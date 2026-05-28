@@ -1,0 +1,19 @@
+# Rust
+/target
+**/*.rs.bk
+*.pdb
+
+# Cargo.lock is intentionally tracked. gdstyle ships both a binary and a
+# library, so the lockfile is committed for reproducible CI builds. Modern
+# Cargo guidance (2023+) is to track Cargo.lock for both binary and library
+# crates.
+
+# macOS
+.DS_Store
+
+# Editor / IDE / agent local state
+.claude/
+.cursor/
+.aider*
+.vscode/
+.idea/

@@ -1,0 +1,15 @@
+[package]
+name = "gdstyle-gdext"
+version = "0.1.0"
+edition = "2021"
+authors = ["Piero Molino <w4nderlust@gmail.com>"]
+description = "GDExtension wrapper for gdstyle, callable directly from GDScript."
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+gdstyle = { path = ".." }
+godot = "0.4"

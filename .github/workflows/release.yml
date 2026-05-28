@@ -1,0 +1,192 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-cli:
+    name: CLI - ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: gdstyle
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            artifact: gdstyle
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            artifact: gdstyle
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact: gdstyle.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build CLI
+        run: cargo build --release --target ${{ matrix.target }} -p gdstyle
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../gdstyle-${{ matrix.target }}.tar.gz ${{ matrix.artifact }}
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          7z a ../../../gdstyle-${{ matrix.target }}.zip ${{ matrix.artifact }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.target }}
+          path: gdstyle-${{ matrix.target }}.*
+
+  build-gdextension:
+    name: GDExtension - ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            lib_name: libgdstyle_gdext.so
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            lib_name: libgdstyle_gdext.dylib
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            lib_name: libgdstyle_gdext.dylib
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            lib_name: gdstyle_gdext.dll
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build GDExtension
+        run: cargo build --release --target ${{ matrix.target }} -p gdstyle-gdext
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../gdstyle-gdext-${{ matrix.target }}.tar.gz ${{ matrix.lib_name }}
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          7z a ../../../gdstyle-gdext-${{ matrix.target }}.zip ${{ matrix.lib_name }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gdext-${{ matrix.target }}
+          path: gdstyle-gdext-${{ matrix.target }}.*
+
+  package-godot-plugin:
+    name: Package Godot plugin
+    needs: build-gdextension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all GDExtension artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Assemble plugin
+        run: |
+          mkdir -p plugin-package/addons/gdstyle/bin
+
+          # Copy plugin source files.
+          cp godot-plugin/addons/gdstyle/plugin.cfg plugin-package/addons/gdstyle/
+          cp godot-plugin/addons/gdstyle/plugin.gd plugin-package/addons/gdstyle/
+          cp godot-plugin/addons/gdstyle/gdstyle_panel.gd plugin-package/addons/gdstyle/
+          cp godot-plugin/addons/gdstyle/gdstyle.gdextension plugin-package/addons/gdstyle/
+
+          # Sync plugin.cfg version to the git tag (e.g. v0.1.0 -> 0.1.0)
+          # so the asset library listing always matches the release.
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          sed -i "s/^version=.*/version=\"${TAG_VERSION}\"/" plugin-package/addons/gdstyle/plugin.cfg
+          echo "plugin.cfg version set to ${TAG_VERSION}"
+
+          # Bundle the icon if one exists at the addon root.
+          if [ -f godot-plugin/addons/gdstyle/icon.png ]; then
+            cp godot-plugin/addons/gdstyle/icon.png plugin-package/addons/gdstyle/
+          fi
+          if [ -f godot-plugin/addons/gdstyle/icon.svg ]; then
+            cp godot-plugin/addons/gdstyle/icon.svg plugin-package/addons/gdstyle/
+          fi
+
+          # Extract and place platform libraries.
+          cd artifacts
+
+          tar xzf gdext-x86_64-unknown-linux-gnu/gdstyle-gdext-x86_64-unknown-linux-gnu.tar.gz
+          mv libgdstyle_gdext.so ../plugin-package/addons/gdstyle/bin/
+
+          tar xzf gdext-x86_64-apple-darwin/gdstyle-gdext-x86_64-apple-darwin.tar.gz
+          mv libgdstyle_gdext.dylib ../plugin-package/addons/gdstyle/bin/libgdstyle_gdext.x86_64.dylib
+
+          tar xzf gdext-aarch64-apple-darwin/gdstyle-gdext-aarch64-apple-darwin.tar.gz
+          mv libgdstyle_gdext.dylib ../plugin-package/addons/gdstyle/bin/libgdstyle_gdext.arm64.dylib
+          7z x gdext-x86_64-pc-windows-msvc/gdstyle-gdext-x86_64-pc-windows-msvc.zip -o.
+          mv gdstyle_gdext.dll ../plugin-package/addons/gdstyle/bin/
+
+      - name: Package plugin
+        run: |
+          cd plugin-package
+          zip -r ../gdstyle-godot-plugin.zip addons/
+
+      - name: Upload plugin package
+        uses: actions/upload-artifact@v4
+        with:
+          name: godot-plugin
+          path: gdstyle-godot-plugin.zip
+
+  release:
+    name: Create GitHub Release
+    needs: [build-cli, build-gdextension, package-godot-plugin]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: RELEASE_NOTES.md
+          generate_release_notes: true
+          files: |
+            artifacts/cli-*/gdstyle-*
+            artifacts/gdext-*/gdstyle-gdext-*
+            artifacts/godot-plugin/gdstyle-godot-plugin.zip
