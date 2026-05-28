@@ -1,6 +1,6 @@
 # gdstyle
 
-<video src="docs/demo.mp4" controls autoplay loop muted playsinline width="900">
+<video src="https://github.com/user-attachments/assets/314e0f55-33e2-4365-bef8-87cf4fdaaa1e" controls autoplay loop muted playsinline width="900">
   gdstyle running in the Godot editor: linting, format-on-save, and right-click single-fix on the bottom panel.
 </video>
 
