@@ -422,11 +422,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download gdstyle
-        run: |
-          curl -sL https://github.com/atelico/gdstyle/releases/latest/download/gdstyle-x86_64-unknown-linux-gnu.tar.gz | tar xz
-          chmod +x gdstyle
-          sudo mv gdstyle /usr/local/bin/
+      - name: Install gdstyle
+        run: cargo install gdstyle
 
       - name: Check formatting
         run: gdstyle fmt --check
