@@ -1,5 +1,10 @@
 # gdstyle
 
+[![Crates.io](https://img.shields.io/crates/v/gdstyle.svg)](https://crates.io/crates/gdstyle)
+[![docs.rs](https://img.shields.io/docsrs/gdstyle)](https://docs.rs/gdstyle)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Build](https://github.com/atelico/gdstyle/actions/workflows/release.yml/badge.svg)](https://github.com/atelico/gdstyle/actions/workflows/release.yml)
+
 <video src="https://github.com/user-attachments/assets/314e0f55-33e2-4365-bef8-87cf4fdaaa1e" controls autoplay loop muted playsinline width="900">
   gdstyle running in the Godot editor: linting, format-on-save, and right-click single-fix on the bottom panel.
 </video>
@@ -470,7 +475,8 @@ When using `--format json`, gdstyle outputs a JSON array of diagnostics:
 
 ## Using as a library
 
-You can also use gdstyle as a Rust library:
+You can also use gdstyle as a Rust library. Full API docs live at
+[**docs.rs/gdstyle**](https://docs.rs/gdstyle).
 
 ```rust
 use gdstyle::config::Config;
