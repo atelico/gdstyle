@@ -1558,6 +1558,39 @@ fn fix_enum_one_per_line_state() {
 }
 
 #[test]
+fn fmt_keeps_doc_attached_when_prev_body_ends_with_nested_block() {
+    // Regression: when a function body ended with a nested indented block
+    // (e.g. a top-level `if` after a `match`, leaving two open indent
+    // levels at the body's tail), a single-line `## doc` for the NEXT
+    // function got detached. The lexer was swallowing the doc line without
+    // emitting the dedents that close the previous body, so the parser
+    // ate the doc as part of the previous function. The formatter then
+    // inserted its canonical between-functions blank-line gap between the
+    // orphaned doc and the function it actually documents. Reported by
+    // a user against gdstyle 0.1.1 with a real Godot project file.
+    let source = "extends Node
+
+static func a() -> void:
+\tmatch 1:
+\t\t1:
+\t\t\tpass
+\tif true:
+\t\tpass
+
+## doc for b
+static func b() -> void:
+\tpass
+";
+    let config = default_config();
+    let formatted = formatter::format_source(source, &config);
+    assert!(
+        formatted.contains("## doc for b\nstatic func b("),
+        "doc comment was detached from its function, got:\n{}",
+        formatted
+    );
+}
+
+#[test]
 fn fmt_preserves_function_bodies_with_doc_comments() {
     let source = r#"## Module doc
 

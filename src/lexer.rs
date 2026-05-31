@@ -175,8 +175,18 @@ impl<'a> Lexer<'a> {
                     return None;
                 }
                 '#' => {
-                    // Comment-only line, treat as same indentation.
-                    return None;
+                    // Comment-only line. If the comment sits at the same or
+                    // deeper indent than the current block, preserve the
+                    // indent stack (a trailing comment inside a body shouldn't
+                    // pop the stack). If it sits at a SHALLOWER indent, fall
+                    // through and emit dedents below — this is what lets a
+                    // top-level `## doc` line between two functions detach
+                    // from the previous body and attach to the next member.
+                    let current_indent = *self.indent_stack.last().unwrap();
+                    if indent_level >= current_indent {
+                        return None;
+                    }
+                    break;
                 }
                 _ => break,
             }
@@ -1322,6 +1332,53 @@ func _ready() -> void:
             .filter(|t| matches!(t.kind, TokenKind::Error(_)))
             .collect();
         assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+    }
+
+    #[test]
+    fn doc_comment_at_lower_indent_emits_dedents() {
+        // Regression: a `## doc` line at column 1 appearing while the lexer
+        // is still inside an indented function body used to be swallowed
+        // with no dedent emitted. The parser would then consume the doc as
+        // part of the previous function's body, and the formatter would
+        // detach it from the function it's actually documenting by
+        // inserting the canonical blank-line gap between top-level members.
+        let source = "func a():\n\tif true:\n\t\tpass\n## doc for b\nfunc b():\n\tpass\n";
+        let tokens = tokenize(source);
+        let doc_pos = tokens
+            .iter()
+            .position(|t| matches!(t.kind, TokenKind::DocComment(_)))
+            .expect("DocComment should be emitted");
+        let dedents_before_doc = tokens[..doc_pos]
+            .iter()
+            .filter(|t| t.kind == TokenKind::Dedent)
+            .count();
+        // Two indents were opened (function body + if body); both must be
+        // closed BEFORE the doc comment so the doc lives at top level.
+        assert_eq!(
+            dedents_before_doc, 2,
+            "expected 2 dedents before DocComment, got {dedents_before_doc} (tokens: {tokens:?})"
+        );
+    }
+
+    #[test]
+    fn comment_at_same_indent_preserves_block() {
+        // Counterpart to the regression above: a comment at the same indent
+        // as the current body is part of the body and MUST NOT trigger a
+        // dedent (otherwise inline comments would tear functions apart).
+        let source = "func a():\n\t# inside\n\tpass\n";
+        let tokens = tokenize(source);
+        let comment_pos = tokens
+            .iter()
+            .position(|t| matches!(t.kind, TokenKind::Comment(_)))
+            .expect("Comment should be emitted");
+        let dedents_before_comment = tokens[..comment_pos]
+            .iter()
+            .filter(|t| t.kind == TokenKind::Dedent)
+            .count();
+        assert_eq!(
+            dedents_before_comment, 0,
+            "in-body comment must not dedent the block"
+        );
     }
 
     #[test]
