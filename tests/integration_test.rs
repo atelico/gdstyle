@@ -1558,6 +1558,60 @@ fn fix_enum_one_per_line_state() {
 }
 
 #[test]
+fn fmt_keeps_doc_attached_on_user_reported_artifact_resolver() {
+    // Verbatim shape of the file the issue reporter posted: a function
+    // whose body ends with a top-level `if` after a `match` (so the body
+    // closes at depth 2), followed by a single-line `## doc` for the
+    // next function. Before the lexer fix, the docstring was detached
+    // by two blank lines from `get_active_artifacts`, breaking the
+    // Godot editor tooltip and the class-docs export. Kept as a
+    // separate test from the minimal repro so a future regression on
+    // this exact reported shape would be immediately recognisable.
+    let source = "extends Object
+class_name ArtifactSkillResolver
+
+## Resolves all artifact skills matching the given trigger.
+## Executes the resolution via signals.
+static func resolve_skills(trigger: int) -> void:
+\tvar activated = []
+\tfor resolution in activated:
+\t\t_execute_resolution(resolution, trigger)
+
+static func _execute_resolution(resolution: int, trigger: int) -> void:
+\tmatch resolution:
+\t\t1:
+\t\t\tprint(\"one\")
+\t\t2:
+\t\t\tprint(\"two\")
+\tif trigger != 0:
+\t\tresolve_skills(0)
+
+## Filters equipped artifacts to only those whose prerequisite is also equipped.
+static func get_active_artifacts(equipped) -> Array:
+\treturn equipped
+";
+    let config = default_config();
+    let formatted = formatter::format_source(source, &config);
+    assert!(
+        formatted.contains(
+            "## Filters equipped artifacts to only those whose prerequisite is also equipped.\nstatic func get_active_artifacts("
+        ),
+        "docstring detached from get_active_artifacts, got:\n{}",
+        formatted
+    );
+    // The multi-line docstring for `resolve_skills` must also stay
+    // attached (regression guard against breaking the working case
+    // while fixing the broken one).
+    assert!(
+        formatted.contains(
+            "## Executes the resolution via signals.\nstatic func resolve_skills("
+        ),
+        "multi-line docstring on resolve_skills was detached, got:\n{}",
+        formatted
+    );
+}
+
+#[test]
 fn fmt_keeps_doc_attached_when_prev_body_ends_with_nested_block() {
     // Regression: when a function body ended with a nested indented block
     // (e.g. a top-level `if` after a `match`, leaving two open indent

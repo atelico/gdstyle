@@ -151,6 +151,55 @@ impl<'a> Lexer<'a> {
         self.read_operator()
     }
 
+    /// Scan ahead from the current position (which must be on a `#` of a
+    /// comment line) to the next REAL line — i.e. the next line that is
+    /// neither blank nor another comment. Returns that line's leading
+    /// indent measured the same way as `process_indentation` (tabs count
+    /// as `TAB_WIDTH` columns). Returns `None` if EOF is reached without
+    /// finding a real line. Read-only: never mutates lexer state.
+    fn peek_next_real_line_indent(&self) -> Option<usize> {
+        const TAB_WIDTH: usize = 4;
+        let mut i = self.position;
+        // Skip to end of current line.
+        while i < self.chars.len() && self.chars[i] != '\n' {
+            i += 1;
+        }
+        loop {
+            if i >= self.chars.len() {
+                return None;
+            }
+            i += 1; // step past '\n'
+            // Measure leading whitespace of this line.
+            let mut indent = 0;
+            while i < self.chars.len() {
+                match self.chars[i] {
+                    '\t' => {
+                        indent = (indent / TAB_WIDTH + 1) * TAB_WIDTH;
+                        i += 1;
+                    }
+                    ' ' => {
+                        indent += 1;
+                        i += 1;
+                    }
+                    _ => break,
+                }
+            }
+            if i >= self.chars.len() {
+                return None;
+            }
+            match self.chars[i] {
+                '\n' => continue, // blank line, look further
+                '#' => {
+                    // Another comment line: skip to end and keep scanning.
+                    while i < self.chars.len() && self.chars[i] != '\n' {
+                        i += 1;
+                    }
+                }
+                _ => return Some(indent),
+            }
+        }
+    }
+
     fn process_indentation(&mut self) -> Option<Token> {
         // Indentation is measured in visual columns: a tab advances to the
         // next multiple of TAB_WIDTH, a space adds one. Counting both as a
@@ -178,12 +227,26 @@ impl<'a> Lexer<'a> {
                     // Comment-only line. If the comment sits at the same or
                     // deeper indent than the current block, preserve the
                     // indent stack (a trailing comment inside a body shouldn't
-                    // pop the stack). If it sits at a SHALLOWER indent, fall
-                    // through and emit dedents below — this is what lets a
-                    // top-level `## doc` line between two functions detach
-                    // from the previous body and attach to the next member.
+                    // pop the stack).
+                    //
+                    // If the comment is at SHALLOWER indent, it might be a
+                    // block boundary (top-level `## doc` between two
+                    // functions; `#` comment between inner-class methods) or
+                    // just mid-body noise (a stray col-1 comment sandwiched
+                    // between two deeper-indented body statements). The two
+                    // look identical on the comment line itself — disambiguate
+                    // by peeking at the next REAL line. If it's deeper than
+                    // the comment, the comment is mid-body noise and the
+                    // block continues; preserve the stack. Otherwise it's a
+                    // boundary; fall through to dedent emission.
                     let current_indent = *self.indent_stack.last().unwrap();
                     if indent_level >= current_indent {
+                        return None;
+                    }
+                    if self
+                        .peek_next_real_line_indent()
+                        .is_some_and(|next| next > indent_level)
+                    {
                         return None;
                     }
                     break;
@@ -1357,6 +1420,31 @@ func _ready() -> void:
         assert_eq!(
             dedents_before_doc, 2,
             "expected 2 dedents before DocComment, got {dedents_before_doc} (tokens: {tokens:?})"
+        );
+    }
+
+    #[test]
+    fn comment_at_lower_indent_followed_by_deeper_real_line_preserves_block() {
+        // Counterpart to `doc_comment_at_lower_indent_emits_dedents`: a
+        // col-1 comment sandwiched between two deeper-indented body
+        // statements is mid-body noise, not a block boundary. The
+        // peek-ahead must recognise that the next real line is deeper
+        // than the comment and refuse to dedent — otherwise the
+        // function gets split in half and the lines after the comment
+        // look orphaned.
+        let source = "func a():\n\tif true:\n\t\tvar x = 1\n# col-1 mid-body\n\t\tvar y = 2\n\t\treturn x + y\n";
+        let tokens = tokenize(source);
+        let comment_pos = tokens
+            .iter()
+            .position(|t| matches!(t.kind, TokenKind::Comment(_)))
+            .expect("Comment should be emitted");
+        let dedents_before_comment = tokens[..comment_pos]
+            .iter()
+            .filter(|t| t.kind == TokenKind::Dedent)
+            .count();
+        assert_eq!(
+            dedents_before_comment, 0,
+            "mid-body col-1 comment must not split the enclosing block"
         );
     }
 
