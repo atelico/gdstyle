@@ -1,40 +1,34 @@
-## gdstyle 0.1.1
+## gdstyle 0.1.2
 
-Small follow-up to the initial release: one false-positive fix and a
-pre-commit integration that came out of community feedback.
+Patch release focused on one user-reported formatter bug. The fix is
+under the hood in the lexer, so existing CI and editor workflows pick
+it up automatically — no config changes required.
 
-### Fixes
+### Fixed
 
-- **`quality/no-self-assign`** no longer flags `obj.field = field` style
-  assignments. The previous implementation compared one identifier on
-  each side of `=`, so `moon.size = size * 0.5` matched `size == size`
-  even though the LHS is the property `moon.size` and the RHS is the
-  local `size`. Same bug hit `self.position = position` and
-  `x = x + 1`. The rule now compares full dotted paths (including
-  `self.` / `super.` heads) and only flags when the assignment ends
-  at a statement terminator. True positives like
-  `obj.foo = obj.foo` and `self.player.health = self.player.health`
-  still trigger.
+- **Formatter no longer detaches `## doc` strings from their function**
+  when the previous function's body ended with a nested indented block
+  (e.g. a top-level `if` after a `match`, leaving two open indent
+  levels at the body's tail). The lexer was emitting the doc comment
+  token before the dedents that close the previous body, so the parser
+  consumed the doc as part of the wrong function. The formatter then
+  inserted its canonical between-functions blank-line gap between the
+  orphan doc and the function it actually documents — visible to users
+  as docstrings that the Godot editor tooltip and the `class_docs`
+  export no longer recognised.
 
-### Added
+  Fixed in the lexer with read-only peek-ahead: when a comment sits at
+  shallower indent than the current block, look at the next real line
+  (skipping blanks and more comments). If that line is deeper than the
+  comment, the comment is mid-body noise and the block continues; if
+  it's at the comment's indent or lower, it's a true boundary and
+  dedents fire correctly.
 
-- **Pre-commit framework integration.** gdstyle now ships a
-  `.pre-commit-hooks.yaml` at the repo root, exposing two hooks for
-  [pre-commit](https://pre-commit.com): `gdstyle` (lint) and
-  `gdstyle-fmt` (format in place). Drop this into your project's
-  `.pre-commit-config.yaml`:
-
-  ```yaml
-  repos:
-    - repo: https://github.com/atelico/gdstyle
-      rev: v0.1.1
-      hooks:
-        - id: gdstyle
-        - id: gdstyle-fmt
-  ```
-
-  Then `pre-commit install`. First run builds gdstyle from source via
-  cargo (Rust toolchain required); subsequent runs are cached.
+  The fix also tightens spacing between inner-class methods: when the
+  previous formatter was confused about member boundaries it was
+  inflating single blank lines to double; member-aware spacing now
+  produces the canonical PEP-8 / Godot-style single blank between
+  methods within a class.
 
 ### Install
 
@@ -43,12 +37,24 @@ CLI from crates.io:
 cargo install gdstyle
 ```
 
-Or grab a prebuilt binary from this release page, drop it on your `PATH`,
-and run `gdstyle` in your project directory.
+Or grab a prebuilt binary from this release page, drop it on your
+`PATH`, and run `gdstyle` in your project directory.
 
 For the Godot editor plugin: download `gdstyle-godot-plugin.zip` from
 this release, extract the `addons/gdstyle/` folder into your Godot
-project, then enable the plugin in *Project > Project Settings > Plugins*.
+project, then enable the plugin in *Project > Project Settings >
+Plugins*.
+
+For the [pre-commit](https://pre-commit.com) framework, bump your
+config to:
+```yaml
+- repo: https://github.com/atelico/gdstyle
+  rev: v0.1.2
+  hooks:
+    - id: gdstyle
+    - id: gdstyle-fmt
+```
+or run `pre-commit autoupdate`.
 
 Full documentation, rule list, configuration reference, and the
 GDExtension API live in the [README](./README.md).

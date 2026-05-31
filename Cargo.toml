@@ -1,6 +1,6 @@
 [package]
 name = "gdstyle"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 authors = ["Piero Molino <w4nderlust@gmail.com>"]
 description = "A fast, opinionated linter and formatter for GDScript (Godot 4.x)"
