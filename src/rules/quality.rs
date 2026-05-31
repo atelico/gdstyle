@@ -344,39 +344,144 @@ pub fn check_self_comparison(
 // New rule 4: no-self-assign
 // ---------------------------------------------------------------------------
 
-/// Warn when assigning a variable to itself (e.g. `x = x`).
+/// Warn when an assignment's left and right sides reference the exact same
+/// dotted path with nothing else on the right (e.g. `x = x`, `a.b.c = a.b.c`).
+///
+/// Uses full-chain comparison instead of a 3-token sliding window so it
+/// correctly distinguishes:
+///
+/// - `moon.size = size` — LHS is `moon.size`, RHS is `size`: NOT a self-assign
+/// - `x = x.y` — LHS is `x`, RHS is `x.y`: NOT a self-assign
+/// - `x = x + 1` — RHS continues into an expression: NOT a self-assign
+///
+/// while still catching the typo cases `x = x` and `obj.foo = obj.foo`.
 pub fn check_no_self_assign(
     tokens: &[Token],
     file: &ScriptFile,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    for i in 0..tokens.len().saturating_sub(2) {
-        let left = &tokens[i];
-        let op = &tokens[i + 1];
-        let right = &tokens[i + 2];
-
+    for (i, op) in tokens.iter().enumerate() {
         if op.kind != TokenKind::Assign {
             continue;
         }
-
-        if let (TokenKind::Identifier(lname), TokenKind::Identifier(rname)) =
-            (&left.kind, &right.kind)
-        {
-            if lname == rname {
-                // Make sure the token after `right` is not a dot (would be `x = x.something`)
-                if let Some(after) = tokens.get(i + 3) {
-                    if after.kind == TokenKind::Dot {
-                        continue;
-                    }
-                }
-                diagnostics.push(Diagnostic::warning(
-                    "quality/no-self-assign",
-                    format!("self-assignment of '{}'", lname),
-                    op.span,
-                    &file.path,
-                ));
-            }
+        let lhs = lhs_chain_ending_at(tokens, i);
+        if lhs.is_empty() {
+            continue;
         }
+        let (rhs, end) = rhs_chain_starting_at(tokens, i + 1);
+        if rhs.is_empty() {
+            continue;
+        }
+        // The RHS chain must be the full RHS. If anything follows it that
+        // isn't a statement-terminating token, the chain is part of a larger
+        // expression (e.g. `x = x + 1`, `x = x or fallback`) and the
+        // assignment isn't a no-op self-assign.
+        if !is_statement_terminator(tokens.get(end)) {
+            continue;
+        }
+        if lhs == rhs {
+            diagnostics.push(Diagnostic::warning(
+                "quality/no-self-assign",
+                format!("self-assignment of '{}'", lhs.join(".")),
+                op.span,
+                &file.path,
+            ));
+        }
+    }
+}
+
+/// Walk backwards from the token at position `before` (exclusive) to build
+/// the dotted LHS chain `(self|super|Identifier) (Dot Identifier)*`.
+/// Returns an empty vec when the LHS isn't a pure identifier chain (e.g.
+/// it ends in `]`, `)`, or starts with `:` as in `:=`).
+fn lhs_chain_ending_at(tokens: &[Token], before: usize) -> Vec<String> {
+    let mut chain: Vec<String> = Vec::new();
+    if before == 0 {
+        return chain;
+    }
+    let mut i = before - 1;
+    loop {
+        match &tokens[i].kind {
+            TokenKind::Identifier(name) => {
+                chain.push(name.clone());
+                if i >= 2
+                    && tokens[i - 1].kind == TokenKind::Dot
+                    && matches!(
+                        tokens[i - 2].kind,
+                        TokenKind::Identifier(_) | TokenKind::Self_ | TokenKind::Super
+                    )
+                {
+                    i -= 2;
+                    continue;
+                }
+                break;
+            }
+            TokenKind::Self_ => {
+                chain.push("self".to_string());
+                break;
+            }
+            TokenKind::Super => {
+                chain.push("super".to_string());
+                break;
+            }
+            _ => return Vec::new(),
+        }
+    }
+    chain.reverse();
+    chain
+}
+
+/// Walk forwards from `start` to build the dotted RHS chain. First segment
+/// may be `self`, `super`, or an identifier; subsequent segments must be
+/// identifiers. Returns the chain and the index of the first token AFTER
+/// the chain (so the caller can check what follows it).
+fn rhs_chain_starting_at(tokens: &[Token], start: usize) -> (Vec<String>, usize) {
+    let mut chain: Vec<String> = Vec::new();
+    let mut i = start;
+    // First segment can be a keyword (`self`/`super`) or an identifier.
+    match tokens.get(i).map(|t| &t.kind) {
+        Some(TokenKind::Identifier(name)) => {
+            chain.push(name.clone());
+        }
+        Some(TokenKind::Self_) => {
+            chain.push("self".to_string());
+        }
+        Some(TokenKind::Super) => {
+            chain.push("super".to_string());
+        }
+        _ => return (chain, i),
+    }
+    // Subsequent segments must be `.identifier`.
+    while i + 2 < tokens.len()
+        && tokens[i + 1].kind == TokenKind::Dot
+        && matches!(tokens[i + 2].kind, TokenKind::Identifier(_))
+    {
+        if let TokenKind::Identifier(name) = &tokens[i + 2].kind {
+            chain.push(name.clone());
+        }
+        i += 2;
+    }
+    (chain, i + 1)
+}
+
+/// True when the token (or the absence of it at end-of-stream) marks the end
+/// of a statement / expression context. Used to decide whether an RHS
+/// identifier chain stands alone or is the start of a larger expression.
+fn is_statement_terminator(token: Option<&Token>) -> bool {
+    match token {
+        None => true,
+        Some(t) => matches!(
+            t.kind,
+            TokenKind::Newline
+                | TokenKind::Semicolon
+                | TokenKind::Eof
+                | TokenKind::RightParen
+                | TokenKind::RightBracket
+                | TokenKind::RightBrace
+                | TokenKind::Comma
+                | TokenKind::Comment(_)
+                | TokenKind::DocComment(_)
+        ),
     }
 }
 

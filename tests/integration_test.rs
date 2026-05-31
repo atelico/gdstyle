@@ -3457,6 +3457,113 @@ fn quality_no_self_assign_dot_access_ok() {
     );
 }
 
+#[test]
+fn quality_no_self_assign_lhs_property_rhs_local_does_not_trigger() {
+    // Regression for a false positive reported in the wild:
+    // `moon.size = size * (.08 + 0.035 * _moon_value)` was being flagged
+    // because the rule used a 3-token sliding window and only saw matching
+    // `size` identifiers on both sides of `=`, ignoring that the LHS is
+    // actually the property access `moon.size`.
+    let config = default_config();
+    let source = "func test() -> void:\n\tmoon.size = size * 0.5\n";
+    let diagnostics = linter::lint_source(source, "test.gd", &config);
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| d.rule == "quality/no-self-assign"),
+        "moon.size = size * 0.5 must not trigger (different paths)"
+    );
+}
+
+#[test]
+fn quality_no_self_assign_uses_lhs_in_rhs_expression_does_not_trigger() {
+    // `x = x + 1` is not a self-assignment, it reads x and writes a new
+    // value. The rule must only flag pure x = x no-ops.
+    let config = default_config();
+    let source = "func test() -> void:\n\tvar x: int = 5\n\tx = x + 1\n";
+    let diagnostics = linter::lint_source(source, "test.gd", &config);
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| d.rule == "quality/no-self-assign"),
+        "x = x + 1 must not trigger (uses x in expression)"
+    );
+}
+
+#[test]
+fn quality_no_self_assign_self_qualified_different_path_does_not_trigger() {
+    // self.position and position are different paths even when the trailing
+    // segment matches.
+    let config = default_config();
+    let source = "func test() -> void:\n\tself.position = position\n";
+    let diagnostics = linter::lint_source(source, "test.gd", &config);
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| d.rule == "quality/no-self-assign"),
+        "self.position = position must not trigger (different paths)"
+    );
+}
+
+#[test]
+fn quality_no_self_assign_matching_dot_chain_triggers() {
+    // `obj.foo = obj.foo` IS a real self-assign and should still be flagged.
+    let config = default_config();
+    let source = "func test() -> void:\n\tobj.foo = obj.foo\n";
+    let diagnostics = linter::lint_source(source, "test.gd", &config);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.rule == "quality/no-self-assign"),
+        "obj.foo = obj.foo must still trigger (same path on both sides)"
+    );
+}
+
+#[test]
+fn quality_no_self_assign_deep_chain_triggers() {
+    // Multi-level chains should also work both ways.
+    let config = default_config();
+    let source = "func test() -> void:\n\tself.player.health = self.player.health\n";
+    let diagnostics = linter::lint_source(source, "test.gd", &config);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.rule == "quality/no-self-assign"),
+        "self.player.health = self.player.health must trigger"
+    );
+}
+
+#[test]
+fn quality_no_self_assign_indexed_does_not_trigger() {
+    // arr[i] = arr[i] is an array element assignment; LHS chain isn't a
+    // pure identifier dotted path, so we conservatively don't flag it.
+    let config = default_config();
+    let source = "func test() -> void:\n\tarr[i] = arr[i]\n";
+    let diagnostics = linter::lint_source(source, "test.gd", &config);
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| d.rule == "quality/no-self-assign"),
+        "arr[i] = arr[i] must not trigger (subscript, not dotted chain)"
+    );
+}
+
+#[test]
+fn quality_no_self_assign_walrus_does_not_trigger() {
+    // `var x := x` would have `Identifier(x) Colon Assign Identifier(x)` —
+    // the LHS chain walk from `=` lands on Colon and bails, so we do not
+    // flag inferred-type declarations like `var x := some_value`.
+    let config = default_config();
+    let source = "func test() -> void:\n\tvar x := 5\n";
+    let diagnostics = linter::lint_source(source, "test.gd", &config);
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| d.rule == "quality/no-self-assign"),
+        ":= inferred declaration must not trigger"
+    );
+}
+
 // --- duplicate-dict-key ---
 
 #[test]
