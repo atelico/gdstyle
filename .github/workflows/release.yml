@@ -190,3 +190,21 @@ jobs:
             artifacts/cli-*/gdstyle-*
             artifacts/gdext-*/gdstyle-gdext-*
             artifacts/godot-plugin/gdstyle-godot-plugin.zip
+
+  publish-crates:
+    name: Publish to crates.io
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Only the `gdstyle` crate is published; `gdstyle-gdext` has
+      # publish = false in its Cargo.toml because it's a Godot-only artifact
+      # shipped via the plugin zip, not via crates.io.
+      - name: Publish gdstyle
+        run: cargo publish -p gdstyle
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
