@@ -1558,6 +1558,74 @@ fn fix_enum_one_per_line_state() {
 }
 
 #[test]
+fn fmt_does_not_duplicate_class_level_abstract_annotation() {
+    // Regression for issue #4: an `@abstract` annotation between blank
+    // lines above `class_name`/`extends` plus a function later in the
+    // file blew up to ~30 copies of `@abstract\nclass_name Pickup\n`
+    // when formatted. The parser was holding `@abstract` in
+    // `pending_annotations` past `class_name` and `extends` and
+    // attaching it to the function; the function unit's start then
+    // covered line 1, which the formatter re-emitted on every pass.
+    //
+    // Fix: flush pending unknown annotations as standalone
+    // `ClassAnnotation` members when we hit `class_name`/`extends`, so
+    // they sort with the other class-level annotations (category 0)
+    // and don't dangle.
+    let source = "@abstract\n\nclass_name Pickup\nextends Node\n\n\n\nfunc apply_to(target: Node3D) -> void:\n\tpass\n";
+    let config = default_config();
+    let formatted = formatter::format_source(source, &config);
+    let abstract_count = formatted.matches("@abstract").count();
+    let class_name_count = formatted.matches("class_name Pickup").count();
+    assert_eq!(
+        abstract_count, 1,
+        "@abstract must not be duplicated, got {} copies:\n{}",
+        abstract_count, formatted
+    );
+    assert_eq!(
+        class_name_count, 1,
+        "class_name must not be duplicated, got {} copies:\n{}",
+        class_name_count, formatted
+    );
+    // And the resulting file should look like canonical Godot:
+    // `@abstract` directly above `class_name`, then `extends`, then
+    // two blank lines before the function.
+    assert!(
+        formatted.contains("@abstract\nclass_name Pickup\nextends Node\n"),
+        "expected canonical class header, got:\n{}",
+        formatted
+    );
+    assert!(
+        formatted.contains("\n\n\nfunc apply_to(target: Node3D) -> void:\n\tpass\n"),
+        "expected 2 blank lines between class header and func, got:\n{}",
+        formatted
+    );
+}
+
+#[test]
+fn fmt_preserves_function_level_abstract_annotation() {
+    // The function-level form of `@abstract` (declaring an abstract
+    // method, distinct from declaring an abstract class) must continue
+    // to attach to the function it sits above, not get hoisted to the
+    // top of the file as a class-level annotation. Guards against an
+    // over-eager rewrite of the class-level fix.
+    let source = "class_name Pickup\nextends Node\n\n\n@abstract\nfunc to_implement() -> void:\n\tpass\n\n\nfunc concrete() -> void:\n\tpass\n";
+    let config = default_config();
+    let formatted = formatter::format_source(source, &config);
+    assert!(
+        formatted.contains("@abstract\nfunc to_implement("),
+        "@abstract must stay attached to its function, got:\n{}",
+        formatted
+    );
+    // And there should still be exactly one @abstract — no duplication.
+    assert_eq!(
+        formatted.matches("@abstract").count(),
+        1,
+        "@abstract must not be duplicated, got:\n{}",
+        formatted
+    );
+}
+
+#[test]
 fn fmt_keeps_doc_attached_on_user_reported_artifact_resolver() {
     // Verbatim shape of the file the issue reporter posted: a function
     // whose body ends with a top-level `if` after a `match` (so the body

@@ -15,6 +15,24 @@ pub struct Parser<'t> {
     position: usize,
 }
 
+/// Convert pending unknown annotations into standalone class-level
+/// annotation members. Called before processing `class_name`/`extends`
+/// (neither accepts a leading annotation), so the annotation doesn't
+/// dangle and silently attach to the first var/func found later in the
+/// file. See the `@abstract` duplication bug for what happens when it
+/// does.
+fn flush_pending_class_annotations(
+    members: &mut Vec<ClassMember>,
+    pending: &mut Vec<AnnotationInfo>,
+) {
+    for a in std::mem::take(pending) {
+        members.push(ClassMember::ClassAnnotation {
+            name: a.name,
+            span: a.span,
+        });
+    }
+}
+
 impl<'t> Parser<'t> {
     pub fn new(tokens: &'t [Token]) -> Self {
         Self {
@@ -62,10 +80,20 @@ impl<'t> Parser<'t> {
                     }
                 }
                 TokenKind::ClassName => {
+                    // Any annotation still pending here can't belong to
+                    // class_name itself — class_name doesn't accept
+                    // annotations as a prefix. Flush them as standalone
+                    // class-level annotations so they don't quietly
+                    // ride forward and attach to the next function in
+                    // the file (which is what produced the @abstract
+                    // duplication bug: the formatter then thought the
+                    // function "owned" lines 1..N and re-emitted them).
+                    flush_pending_class_annotations(&mut members, &mut pending_annotations);
                     let member = self.parse_class_name();
                     members.push(member);
                 }
                 TokenKind::Extends => {
+                    flush_pending_class_annotations(&mut members, &mut pending_annotations);
                     let member = self.parse_extends();
                     members.push(member);
                 }

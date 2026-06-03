@@ -20,6 +20,16 @@ pub enum ClassMember {
     StaticUnloadAnnotation {
         span: Span,
     },
+    /// Catch-all for top-level class annotations the parser doesn't
+    /// recognise by keyword — `@abstract` today, and whatever Godot
+    /// ships next. Emitted only when the annotation can't logically
+    /// attach to a following declaration (e.g. it sits before
+    /// `class_name`/`extends`). Sorted with the other class-level
+    /// annotations (category 0).
+    ClassAnnotation {
+        name: String,
+        span: Span,
+    },
     ClassNameDecl {
         name: String,
         name_span: Span,
@@ -97,6 +107,7 @@ impl ClassMember {
             ClassMember::ToolAnnotation { span }
             | ClassMember::IconAnnotation { span }
             | ClassMember::StaticUnloadAnnotation { span }
+            | ClassMember::ClassAnnotation { span, .. }
             | ClassMember::ClassNameDecl { span, .. }
             | ClassMember::ExtendsDecl { span, .. }
             | ClassMember::DocComment { span, .. }
@@ -118,7 +129,8 @@ impl ClassMember {
         match self {
             ClassMember::ToolAnnotation { .. }
             | ClassMember::IconAnnotation { .. }
-            | ClassMember::StaticUnloadAnnotation { .. } => 0,
+            | ClassMember::StaticUnloadAnnotation { .. }
+            | ClassMember::ClassAnnotation { .. } => 0,
             ClassMember::ClassNameDecl { .. } => 1,
             ClassMember::ExtendsDecl { .. } => 2,
             ClassMember::DocComment { .. } => 3,
@@ -188,8 +200,9 @@ impl ClassMember {
         match self {
             ClassMember::ToolAnnotation { .. }
             | ClassMember::IconAnnotation { .. }
-            | ClassMember::StaticUnloadAnnotation { .. } => {
-                "script annotation (@tool/@icon/@static_unload)"
+            | ClassMember::StaticUnloadAnnotation { .. }
+            | ClassMember::ClassAnnotation { .. } => {
+                "script annotation (@tool/@icon/@static_unload/@abstract)"
             }
             ClassMember::ClassNameDecl { .. } => "class_name declaration",
             ClassMember::ExtendsDecl { .. } => "extends declaration",
