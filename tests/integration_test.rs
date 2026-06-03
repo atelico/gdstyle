@@ -1602,6 +1602,111 @@ fn fmt_does_not_duplicate_class_level_abstract_annotation() {
 }
 
 #[test]
+fn fmt_class_annotation_before_signal_not_duplicated() {
+    // Same family of bug as issue #4: a stray top-level annotation
+    // (`@abstract` here) immediately before a `signal` declaration
+    // used to ride past the signal in `pending_annotations` and
+    // attach to a function later in the file, blowing up the output.
+    // Signal declarations don't take a leading annotation, so the
+    // parser now flushes pending entries as class-level annotations
+    // at that point.
+    let source = "@abstract\nclass_name BaseEntity\nextends Node\n\n\nsignal damaged(amount: int)\n\n\nfunc take_damage(amount: int) -> void:\n\tdamaged.emit(amount)\n";
+    let config = default_config();
+    let formatted = formatter::format_source(source, &config);
+    assert_eq!(
+        formatted.matches("@abstract").count(),
+        1,
+        "@abstract must not be duplicated, got:\n{}",
+        formatted
+    );
+    assert!(
+        formatted.contains("@abstract\nclass_name BaseEntity\nextends Node"),
+        "@abstract must land at the canonical class-header position, got:\n{}",
+        formatted
+    );
+    assert!(
+        formatted.contains("signal damaged(amount: int)"),
+        "signal declaration must be preserved, got:\n{}",
+        formatted
+    );
+}
+
+#[test]
+fn fmt_class_annotation_before_enum_not_duplicated() {
+    // Counterpart to the signal case: an `@abstract` immediately
+    // before an `enum` declaration used to ride forward to the next
+    // function and trigger the same multi-line duplication. `enum`
+    // doesn't accept a leading annotation, so we flush.
+    let source = "@abstract\nclass_name Item\nextends Resource\n\n\nenum Rarity { COMMON, RARE, EPIC }\n\n\nfunc describe() -> String:\n\treturn \"\"\n";
+    let config = default_config();
+    let formatted = formatter::format_source(source, &config);
+    assert_eq!(
+        formatted.matches("@abstract").count(),
+        1,
+        "@abstract must not be duplicated, got:\n{}",
+        formatted
+    );
+    assert!(
+        formatted.contains("@abstract\nclass_name Item\nextends Resource"),
+        "expected canonical class header, got:\n{}",
+        formatted
+    );
+    assert!(
+        formatted.contains("enum Rarity"),
+        "enum declaration must be preserved, got:\n{}",
+        formatted
+    );
+}
+
+#[test]
+fn fmt_class_annotation_before_inner_class_not_duplicated() {
+    // Inner class declarations have no AST slot for annotations, so
+    // we treat a stray `@abstract` above one as a class-level
+    // annotation of the OUTER class. That's the deliberate
+    // trade-off: the alternative — leaving it pending — would
+    // attach it to the next top-level function and cause the
+    // duplication bug. If Godot ever wires inner-class annotations
+    // through the AST, revisit `parse_inner_class`.
+    let source = "class_name Outer\nextends Node\n\n\n@abstract\nclass Inner:\n\tvar x: int = 5\n\n\nfunc use_inner() -> void:\n\tvar i = Inner.new()\n";
+    let config = default_config();
+    let formatted = formatter::format_source(source, &config);
+    assert_eq!(
+        formatted.matches("@abstract").count(),
+        1,
+        "@abstract must not be duplicated, got:\n{}",
+        formatted
+    );
+    assert!(
+        formatted.contains("class Inner:"),
+        "inner class must be preserved, got:\n{}",
+        formatted
+    );
+    assert!(
+        formatted.contains("func use_inner()"),
+        "outer function must be preserved and not eaten by the annotation flush, got:\n{}",
+        formatted
+    );
+}
+
+#[test]
+fn fmt_trailing_unknown_annotation_at_eof_not_dropped() {
+    // A trailing top-level annotation with no following declaration
+    // used to be silently dropped by the parser (pending_annotations
+    // was never flushed at EOF). Now it survives as a class-level
+    // annotation so a round-trip through `gdstyle fmt` doesn't lose
+    // content.
+    let source = "class_name Foo\nextends Node\n\n\nfunc bar() -> void:\n\tpass\n\n\n@abstract\n";
+    let config = default_config();
+    let formatted = formatter::format_source(source, &config);
+    assert_eq!(
+        formatted.matches("@abstract").count(),
+        1,
+        "trailing @abstract must survive the round-trip, got:\n{}",
+        formatted
+    );
+}
+
+#[test]
 fn fmt_preserves_function_level_abstract_annotation() {
     // The function-level form of `@abstract` (declaring an abstract
     // method, distinct from declaring an abstract class) must continue

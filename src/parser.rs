@@ -113,14 +113,24 @@ impl<'t> Parser<'t> {
                     }
                 }
                 TokenKind::Signal => {
+                    // Same rationale as class_name/extends: signal
+                    // declarations don't take a leading annotation, so
+                    // anything pending here is a class-level annotation
+                    // that landed before the signal.
+                    flush_pending_class_annotations(&mut members, &mut pending_annotations);
                     let member = self.parse_signal();
                     members.push(member);
                 }
                 TokenKind::Enum => {
+                    flush_pending_class_annotations(&mut members, &mut pending_annotations);
                     let member = self.parse_enum();
                     members.push(member);
                 }
                 TokenKind::Const => {
+                    // `const` doesn't currently accept annotations
+                    // either. Flush so a stray @abstract above a const
+                    // doesn't ride forward to the next function.
+                    flush_pending_class_annotations(&mut members, &mut pending_annotations);
                     let member = self.parse_const();
                     members.push(member);
                 }
@@ -139,6 +149,16 @@ impl<'t> Parser<'t> {
                     members.push(member);
                 }
                 TokenKind::Class => {
+                    // Inner class declarations don't currently accept a
+                    // leading annotation (the AST has no slot for
+                    // them). Flush as class-level so the annotation
+                    // doesn't ride past the inner class and attach to
+                    // a function further down. Note: this means
+                    // `@some_annotation\nclass Inner:` is treated as if
+                    // the annotation applied to the outer class; if
+                    // Godot ever wires inner-class annotations through
+                    // the AST, revisit this site.
+                    flush_pending_class_annotations(&mut members, &mut pending_annotations);
                     let member = self.parse_inner_class();
                     members.push(member);
                 }
@@ -148,6 +168,12 @@ impl<'t> Parser<'t> {
                 }
             }
         }
+
+        // Anything still pending at EOF can't attach to a following
+        // declaration (there isn't one). Emit as class-level so it
+        // shows up in the formatter's member list and round-trips
+        // through `gdstyle fmt` instead of being silently dropped.
+        flush_pending_class_annotations(&mut members, &mut pending_annotations);
 
         members
     }
