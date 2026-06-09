@@ -961,9 +961,12 @@ func _save_settings() -> void:
 	}
 	var file := FileAccess.open(SETTINGS_PATH, FileAccess.WRITE)
 	if file == null:
-		push_warning("gdstyle: could not open %s for write (err=%d)" % [
-			SETTINGS_PATH, FileAccess.get_open_error()
-		])
+		push_warning(
+			"gdstyle: could not open %s for write (err=%d)" % [
+				SETTINGS_PATH,
+				FileAccess.get_open_error(),
+			]
+		)
 		return
 	file.store_string(JSON.stringify(settings, "\t"))
 	file.close()
@@ -974,22 +977,29 @@ func _load_settings() -> void:
 		return
 	var file := FileAccess.open(SETTINGS_PATH, FileAccess.READ)
 	if file == null:
-		push_warning("gdstyle: could not open %s for read (err=%d)" % [
-			SETTINGS_PATH, FileAccess.get_open_error()
-		])
+		push_warning(
+			"gdstyle: could not open %s for read (err=%d)" % [
+				SETTINGS_PATH,
+				FileAccess.get_open_error(),
+			]
+		)
 		return
 	var text := file.get_as_text()
 	file.close()
 	var json := JSON.new()
 	if json.parse(text) != OK:
 		return
-	var data: Dictionary = json.data
 	# Guard the UI writes so any signal handlers that fire from these
 	# assignments don't try to rewrite settings.json before we return.
 	# `set_pressed_no_signal` on the checkboxes also avoids the toggled
 	# round-trip; the flag is belt-and-suspenders against future
 	# handlers added on `_binary_path_edit` or similar.
 	_loading_settings = true
+	_apply_loaded_settings(json.data)
+	_loading_settings = false
+
+
+func _apply_loaded_settings(data: Dictionary) -> void:
 	if data.has("binary_path"):
 		_gdstyle_path = data["binary_path"]
 		if _binary_path_edit:
@@ -1002,4 +1012,3 @@ func _load_settings() -> void:
 		auto_format_on_save = data["auto_format_on_save"]
 		if _auto_format_check:
 			_auto_format_check.set_pressed_no_signal(auto_format_on_save)
-	_loading_settings = false
