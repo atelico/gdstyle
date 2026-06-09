@@ -28,6 +28,14 @@ var _binary_path_edit: LineEdit
 var _download_button: Button
 var _diagnostics: Array[Dictionary] = []
 
+# Set while _load_settings() is populating the UI. Any toggle / text
+# handler that fires from the assignment must not write settings.json
+# back: on Windows the WRITE open from the toggle handler would collide
+# with the still-open READ handle from this load and Godot's atomic
+# save would leave an orphan settings.json#######.tmp behind every
+# project startup. See issue #6.
+var _loading_settings: bool = false
+
 # CLI binary path (used when GDExtension is not available).
 var _gdstyle_path: String = OS.get_environment("HOME").path_join(".local/bin/gdstyle")
 
@@ -941,26 +949,47 @@ func _load_nearest_config(res_path: String) -> void:
 
 
 func _save_settings() -> void:
+	# Skip the write while we're populating the UI from disk. Without
+	# this guard the toggled handlers fired from _load_settings would
+	# call back into here and clash with the still-open READ handle.
+	if _loading_settings:
+		return
 	var settings := {
 		"binary_path": _gdstyle_path,
 		"auto_lint_on_save": auto_lint_on_save,
 		"auto_format_on_save": auto_format_on_save,
 	}
 	var file := FileAccess.open(SETTINGS_PATH, FileAccess.WRITE)
-	if file:
-		file.store_string(JSON.stringify(settings, "\t"))
+	if file == null:
+		push_warning("gdstyle: could not open %s for write (err=%d)" % [
+			SETTINGS_PATH, FileAccess.get_open_error()
+		])
+		return
+	file.store_string(JSON.stringify(settings, "\t"))
+	file.close()
 
 
 func _load_settings() -> void:
 	if not FileAccess.file_exists(SETTINGS_PATH):
 		return
 	var file := FileAccess.open(SETTINGS_PATH, FileAccess.READ)
-	if not file:
+	if file == null:
+		push_warning("gdstyle: could not open %s for read (err=%d)" % [
+			SETTINGS_PATH, FileAccess.get_open_error()
+		])
 		return
+	var text := file.get_as_text()
+	file.close()
 	var json := JSON.new()
-	if json.parse(file.get_as_text()) != OK:
+	if json.parse(text) != OK:
 		return
 	var data: Dictionary = json.data
+	# Guard the UI writes so any signal handlers that fire from these
+	# assignments don't try to rewrite settings.json before we return.
+	# `set_pressed_no_signal` on the checkboxes also avoids the toggled
+	# round-trip; the flag is belt-and-suspenders against future
+	# handlers added on `_binary_path_edit` or similar.
+	_loading_settings = true
 	if data.has("binary_path"):
 		_gdstyle_path = data["binary_path"]
 		if _binary_path_edit:
@@ -968,8 +997,9 @@ func _load_settings() -> void:
 	if data.has("auto_lint_on_save"):
 		auto_lint_on_save = data["auto_lint_on_save"]
 		if _auto_lint_check:
-			_auto_lint_check.button_pressed = auto_lint_on_save
+			_auto_lint_check.set_pressed_no_signal(auto_lint_on_save)
 	if data.has("auto_format_on_save"):
 		auto_format_on_save = data["auto_format_on_save"]
 		if _auto_format_check:
-			_auto_format_check.button_pressed = auto_format_on_save
+			_auto_format_check.set_pressed_no_signal(auto_format_on_save)
+	_loading_settings = false
