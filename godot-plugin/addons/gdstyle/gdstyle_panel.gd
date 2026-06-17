@@ -144,7 +144,7 @@ func _build_ui() -> void:
 
 	_status_label = Label.new()
 	_status_label.text = "Ready"
-	_status_label.add_theme_color_override("font_color", Color(0.6, 0.6, 0.6))
+	_status_label.add_theme_color_override("font_color", EditorInterface.get_editor_theme().get_color("font_placeholder_color", "Editor"))
 	toolbar.add_child(_status_label)
 
 	# --- CLI settings row (shown when CLI backend is selected) ---
@@ -717,9 +717,9 @@ func _populate_tree() -> void:
 		item.set_tooltip_text(3, message)
 
 		if severity == "error":
-			item.set_custom_color(3, Color(1.0, 0.4, 0.4))
+			item.set_custom_color(3, EditorInterface.get_editor_theme().get_color("error_color", "Editor"))
 		else:
-			item.set_custom_color(3, Color(1.0, 0.85, 0.4))
+			item.set_custom_color(3, EditorInterface.get_editor_theme().get_color("warning_color", "Editor"))
 
 		item.set_metadata(0, file_path)
 		item.set_metadata(1, line_num)
