@@ -4026,6 +4026,88 @@ func test() -> Dictionary:
     );
 }
 
+#[test]
+fn quality_duplicate_dict_key_enum_key_from_other_class_ok() {
+    // Regression (issue #8): the exact user reproduction. A dotted key like
+    // `Enums.E.KEY_A` was scanned token-by-token, so the two `.` tokens
+    // collided into a bogus `duplicate dictionary key '.'`.
+    let config = default_config();
+    let source = "\
+extends Node
+
+const _DEFS: Dictionary = {
+\tEnums.E.KEY_A: {
+\t\t\"value_1\": \"A\",
+\t},
+}
+";
+    let diagnostics = linter::lint_source(source, "test.gd", &config);
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| d.rule == "quality/duplicate-dict-key"),
+        "a single dotted enum key must not self-collide, got: {:?}",
+        diagnostics
+            .iter()
+            .filter(|d| d.rule == "quality/duplicate-dict-key")
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn quality_duplicate_dict_key_distinct_dotted_keys_ok() {
+    // Two different enum entries used as keys are distinct, not duplicates.
+    let config = default_config();
+    let source = "\
+extends Node
+
+const _DEFS: Dictionary = {
+\tEnums.E.KEY_A: {
+\t\t\"value_1\": \"A\",
+\t},
+\tEnums.E.KEY_B: {
+\t\t\"value_1\": \"B\",
+\t},
+}
+";
+    let diagnostics = linter::lint_source(source, "test.gd", &config);
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| d.rule == "quality/duplicate-dict-key"),
+        "distinct dotted keys must not be flagged as duplicates"
+    );
+}
+
+#[test]
+fn quality_duplicate_dict_key_same_dotted_key_detected() {
+    // A genuinely repeated dotted key is still caught after the fix.
+    let config = default_config();
+    let source = "\
+func test() -> Dictionary:
+\treturn {
+\t\tEnums.E.KEY_A: 1,
+\t\tEnums.E.KEY_A: 2,
+\t}
+";
+    let diagnostics = linter::lint_source(source, "test.gd", &config);
+    let hits: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.rule == "quality/duplicate-dict-key")
+        .collect();
+    assert_eq!(
+        hits.len(),
+        1,
+        "a repeated dotted key should be flagged exactly once, got {}",
+        hits.len()
+    );
+    assert!(
+        hits[0].message.contains("Enums.E.KEY_A"),
+        "message should name the full dotted key, got: {}",
+        hits[0].message
+    );
+}
+
 // --- duplicated-load ---
 
 #[test]
