@@ -144,7 +144,7 @@ func _build_ui() -> void:
 
 	_status_label = Label.new()
 	_status_label.text = "Ready"
-	_status_label.add_theme_color_override("font_color", EditorInterface.get_editor_theme().get_color("font_placeholder_color", "Editor"))
+	_status_label.add_theme_color_override("font_color", _editor_color("font_placeholder_color", Color(0.6, 0.6, 0.6)))
 	toolbar.add_child(_status_label)
 
 	# --- CLI settings row (shown when CLI backend is selected) ---
@@ -690,6 +690,22 @@ func _download_binary() -> void:
 # --- Shared UI logic ---
 
 
+## Returns an editor theme color by name, falling back to `fallback` when it is
+## unavailable. The editor theme is read through the injected `editor_interface`
+## rather than the global singleton. Guards for older Godot versions:
+## `get_editor_theme()` exists from 4.2, and some colors (e.g.
+## `font_placeholder_color` on the "Editor" type) only exist from 4.3, so
+## `has_color` gates the lookup and the original hard-coded color is used
+## otherwise.
+func _editor_color(color_name: String, fallback: Color) -> Color:
+	if not editor_interface or not editor_interface.has_method("get_editor_theme"):
+		return fallback
+	var theme: Theme = editor_interface.get_editor_theme()
+	if theme and theme.has_color(color_name, "Editor"):
+		return theme.get_color(color_name, "Editor")
+	return fallback
+
+
 func _populate_tree() -> void:
 	_tree.clear()
 	var root := _tree.create_item()
@@ -717,9 +733,9 @@ func _populate_tree() -> void:
 		item.set_tooltip_text(3, message)
 
 		if severity == "error":
-			item.set_custom_color(3, EditorInterface.get_editor_theme().get_color("error_color", "Editor"))
+			item.set_custom_color(3, _editor_color("error_color", Color(1.0, 0.4, 0.4)))
 		else:
-			item.set_custom_color(3, EditorInterface.get_editor_theme().get_color("warning_color", "Editor"))
+			item.set_custom_color(3, _editor_color("warning_color", Color(1.0, 0.85, 0.4)))
 
 		item.set_metadata(0, file_path)
 		item.set_metadata(1, line_num)
