@@ -573,6 +573,33 @@ fn is_statement_terminator(token: Option<&Token>) -> bool {
 // New rule 5: duplicate-dict-key
 // ---------------------------------------------------------------------------
 
+/// State for scanning one open dictionary literal. A nested literal pushes a
+/// new frame, so each dictionary's keys are tracked independently of the dict
+/// that contains it.
+struct DictKeyFrame {
+    /// Keys already seen at this literal's top level, with the span of the
+    /// first occurrence (used to point back at it in the message).
+    keys: HashMap<String, Span>,
+    /// Whether the next tokens belong to a key (`true`) or a value (`false`).
+    expect_key: bool,
+    /// The current key expression, accumulated token-by-token until the `:`
+    /// that ends it, so multi-token keys compare as a single unit.
+    key_parts: Vec<String>,
+    /// Span of the first token of the current key, for the diagnostic.
+    key_span: Option<Span>,
+}
+
+impl DictKeyFrame {
+    fn new() -> Self {
+        DictKeyFrame {
+            keys: HashMap::new(),
+            expect_key: true,
+            key_parts: Vec::new(),
+            key_span: None,
+        }
+    }
+}
+
 /// Warn about duplicate keys in dictionary literals.
 ///
 /// A key is compared as a whole expression, not a single token: a dotted key
@@ -581,42 +608,32 @@ fn is_statement_terminator(token: Option<&Token>) -> bool {
 /// (issue #8). String-literal segments are normalized to their semantic value
 /// so `{"foo": 1, 'foo': 2}` is still caught regardless of quote style.
 ///
-/// Only the depth-1 keys of each literal are considered; keys inside a nested
-/// dictionary value are left to that value's own scan.
+/// Nested dictionaries are checked too: each `{` opens a fresh frame, so a
+/// duplicate inside a value dictionary (`{"outer": {"a": 1, "a": 2}}`) is
+/// reported against that inner dictionary, independently of the outer keys.
 pub fn check_duplicate_dict_key(
     tokens: &[Token],
     file: &ScriptFile,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let mut i = 0;
-    while i < tokens.len() {
-        if tokens[i].kind == TokenKind::LeftBrace {
-            // Scan this dictionary literal for duplicate keys.
-            let mut keys: HashMap<String, Span> = HashMap::new();
-            let mut depth = 1;
-            let mut j = i + 1;
-            let mut expect_key = true;
-            // The current key expression, accumulated token-by-token until the
-            // `:` that ends it, so multi-token keys compare as a single unit.
-            let mut key_parts: Vec<String> = Vec::new();
-            let mut key_span: Option<Span> = None;
+    // A stack of frames, one per currently-open `{`. Keys, commas, and colons
+    // always apply to the innermost open dictionary (`stack.last_mut()`), which
+    // routes each token to the right nesting level without a depth counter.
+    let mut stack: Vec<DictKeyFrame> = Vec::new();
 
-            while j < tokens.len() && depth > 0 {
-                match &tokens[j].kind {
-                    TokenKind::LeftBrace => {
-                        depth += 1;
-                    }
-                    TokenKind::RightBrace => {
-                        depth -= 1;
-                        if depth == 0 {
-                            break;
-                        }
-                    }
-                    TokenKind::Colon if depth == 1 && expect_key => {
+    for token in tokens {
+        match &token.kind {
+            TokenKind::LeftBrace => stack.push(DictKeyFrame::new()),
+            TokenKind::RightBrace => {
+                stack.pop();
+            }
+            TokenKind::Colon => {
+                if let Some(frame) = stack.last_mut() {
+                    if frame.expect_key {
                         // End of the key expression: record it as one unit.
-                        if let Some(span) = key_span.take() {
-                            let key_text = key_parts.join("");
-                            if let Some(prev_span) = keys.get(&key_text) {
+                        if let Some(span) = frame.key_span.take() {
+                            let key_text = frame.key_parts.join("");
+                            if let Some(prev_span) = frame.keys.get(&key_text) {
                                 diagnostics.push(Diagnostic::warning(
                                     "quality/duplicate-dict-key",
                                     format!(
@@ -627,39 +644,40 @@ pub fn check_duplicate_dict_key(
                                     &file.path,
                                 ));
                             } else {
-                                keys.insert(key_text, span);
+                                frame.keys.insert(key_text, span);
                             }
                         }
-                        key_parts.clear();
-                        expect_key = false;
+                        frame.key_parts.clear();
+                        frame.expect_key = false;
                     }
-                    TokenKind::Comma if depth == 1 => {
-                        // Next entry begins; drop any partially seen value.
-                        key_parts.clear();
-                        key_span = None;
-                        expect_key = true;
-                    }
-                    TokenKind::Newline => {}
-                    _ if expect_key && depth == 1 => {
+                }
+            }
+            TokenKind::Comma => {
+                if let Some(frame) = stack.last_mut() {
+                    // Next entry begins; drop any partially seen value.
+                    frame.key_parts.clear();
+                    frame.key_span = None;
+                    frame.expect_key = true;
+                }
+            }
+            TokenKind::Newline => {}
+            _ => {
+                if let Some(frame) = stack.last_mut() {
+                    if frame.expect_key {
                         // Use the semantic value for string keys so
                         // `{"foo": 1, 'foo': 2}` is detected as a duplicate
                         // (same value, different surrounding quotes).
-                        let part = match &tokens[j].kind {
+                        let part = match &token.kind {
                             TokenKind::String(info) => info.value.clone(),
-                            _ => tokens[j].text.clone(),
+                            _ => token.text.clone(),
                         };
-                        if key_span.is_none() {
-                            key_span = Some(tokens[j].span);
+                        if frame.key_span.is_none() {
+                            frame.key_span = Some(token.span);
                         }
-                        key_parts.push(part);
+                        frame.key_parts.push(part);
                     }
-                    _ => {}
                 }
-                j += 1;
             }
-            i = j + 1;
-        } else {
-            i += 1;
         }
     }
 }
