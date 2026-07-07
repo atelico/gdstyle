@@ -574,6 +574,15 @@ fn is_statement_terminator(token: Option<&Token>) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Warn about duplicate keys in dictionary literals.
+///
+/// A key is compared as a whole expression, not a single token: a dotted key
+/// such as `Enums.E.KEY_A` is treated as one key, so two distinct enum entries
+/// (`Enums.E.KEY_A` and `Enums.E.KEY_B`) are not mistaken for a duplicate `.`
+/// (issue #8). String-literal segments are normalized to their semantic value
+/// so `{"foo": 1, 'foo': 2}` is still caught regardless of quote style.
+///
+/// Only the depth-1 keys of each literal are considered; keys inside a nested
+/// dictionary value are left to that value's own scan.
 pub fn check_duplicate_dict_key(
     tokens: &[Token],
     file: &ScriptFile,
@@ -582,17 +591,20 @@ pub fn check_duplicate_dict_key(
     let mut i = 0;
     while i < tokens.len() {
         if tokens[i].kind == TokenKind::LeftBrace {
-            // Scan this dictionary literal for duplicate keys
+            // Scan this dictionary literal for duplicate keys.
             let mut keys: HashMap<String, Span> = HashMap::new();
             let mut depth = 1;
             let mut j = i + 1;
             let mut expect_key = true;
+            // The current key expression, accumulated token-by-token until the
+            // `:` that ends it, so multi-token keys compare as a single unit.
+            let mut key_parts: Vec<String> = Vec::new();
+            let mut key_span: Option<Span> = None;
 
             while j < tokens.len() && depth > 0 {
                 match &tokens[j].kind {
                     TokenKind::LeftBrace => {
                         depth += 1;
-                        expect_key = true;
                     }
                     TokenKind::RightBrace => {
                         depth -= 1;
@@ -600,10 +612,31 @@ pub fn check_duplicate_dict_key(
                             break;
                         }
                     }
-                    TokenKind::Colon if depth == 1 => {
+                    TokenKind::Colon if depth == 1 && expect_key => {
+                        // End of the key expression: record it as one unit.
+                        if let Some(span) = key_span.take() {
+                            let key_text = key_parts.join("");
+                            if let Some(prev_span) = keys.get(&key_text) {
+                                diagnostics.push(Diagnostic::warning(
+                                    "quality/duplicate-dict-key",
+                                    format!(
+                                        "duplicate dictionary key '{}' (first seen at line {})",
+                                        key_text, prev_span.line
+                                    ),
+                                    span,
+                                    &file.path,
+                                ));
+                            } else {
+                                keys.insert(key_text, span);
+                            }
+                        }
+                        key_parts.clear();
                         expect_key = false;
                     }
                     TokenKind::Comma if depth == 1 => {
+                        // Next entry begins; drop any partially seen value.
+                        key_parts.clear();
+                        key_span = None;
                         expect_key = true;
                     }
                     TokenKind::Newline => {}
@@ -611,25 +644,14 @@ pub fn check_duplicate_dict_key(
                         // Use the semantic value for string keys so
                         // `{"foo": 1, 'foo': 2}` is detected as a duplicate
                         // (same value, different surrounding quotes).
-                        let key_text = match &tokens[j].kind {
+                        let part = match &tokens[j].kind {
                             TokenKind::String(info) => info.value.clone(),
                             _ => tokens[j].text.clone(),
                         };
-                        if let Some(prev_span) = keys.get(&key_text) {
-                            diagnostics.push(Diagnostic::warning(
-                                "quality/duplicate-dict-key",
-                                format!(
-                                    "duplicate dictionary key '{}' (first seen at line {})",
-                                    key_text, prev_span.line
-                                ),
-                                tokens[j].span,
-                                &file.path,
-                            ));
-                        } else {
-                            keys.insert(key_text, tokens[j].span);
+                        if key_span.is_none() {
+                            key_span = Some(tokens[j].span);
                         }
-                        // After seeing a key token, don't re-flag composite keys
-                        // (we only detect simple single-token keys)
+                        key_parts.push(part);
                     }
                     _ => {}
                 }
