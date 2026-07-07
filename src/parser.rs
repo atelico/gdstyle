@@ -719,9 +719,9 @@ impl<'t> Parser<'t> {
                 let mut peek = self.position;
                 while peek < self.tokens.len() {
                     match &self.tokens[peek].kind {
-                        TokenKind::Newline
-                        | TokenKind::DocComment(_)
-                        | TokenKind::Comment(_) => peek += 1,
+                        TokenKind::Newline | TokenKind::DocComment(_) | TokenKind::Comment(_) => {
+                            peek += 1
+                        }
                         TokenKind::Dedent => {
                             return end_line.saturating_sub(start_line) + 1;
                         }

@@ -1738,7 +1738,9 @@ fn fmt_stacked_class_annotations_preserve_source_order() {
     let config = default_config();
     let formatted = formatter::format_source(source, &config);
     let abs = formatted.find("@abstract").expect("missing @abstract");
-    let exp = formatted.find("@experimental").expect("missing @experimental");
+    let exp = formatted
+        .find("@experimental")
+        .expect("missing @experimental");
     let dep = formatted.find("@deprecated").expect("missing @deprecated");
     assert!(
         abs < exp && exp < dep,
@@ -1896,9 +1898,7 @@ static func get_active_artifacts(equipped) -> Array:
     // attached (regression guard against breaking the working case
     // while fixing the broken one).
     assert!(
-        formatted.contains(
-            "## Executes the resolution via signals.\nstatic func resolve_skills("
-        ),
+        formatted.contains("## Executes the resolution via signals.\nstatic func resolve_skills("),
         "multi-line docstring on resolve_skills was detached, got:\n{}",
         formatted
     );
@@ -3154,7 +3154,8 @@ fn fmt_regular_var_with_value_unaffected_by_computed_property_handling() {
 
 #[test]
 fn fmt_colon_spacing_in_type_hints() {
-    let source = "extends Node\n\nconst X:float = 1.0\nvar y:int = 0\n@export var z:Dictionary = {}\n";
+    let source =
+        "extends Node\n\nconst X:float = 1.0\nvar y:int = 0\n@export var z:Dictionary = {}\n";
     let formatted = formatter::format_source(source, &default_config());
     assert!(
         formatted.contains("const X: float = 1.0"),
@@ -3186,7 +3187,8 @@ fn fmt_colon_spacing_in_function_parameters() {
 
 #[test]
 fn fmt_colon_spacing_strips_space_before_block_colon() {
-    let source = "extends Node\n\nfunc _ready() :\n\tif true :\n\t\tpass\n\twhile false :\n\t\tpass\n";
+    let source =
+        "extends Node\n\nfunc _ready() :\n\tif true :\n\t\tpass\n\twhile false :\n\t\tpass\n";
     let formatted = formatter::format_source(source, &default_config());
     assert!(
         formatted.contains("func _ready():"),
@@ -3300,7 +3302,8 @@ fn fmt_combined_colon_and_comma_fixes_match_canonical_godot_form() {
     let source = "extends Node\n\nfunc add_item(item_id:String,count:int = 1,rarity:int = 0) -> bool :\n\tvar pairs = [{\"a\":1,\"b\":2}, {\"c\":3,\"d\":4}]\n\treturn true\n";
     let formatted = formatter::format_source(source, &default_config());
     assert!(
-        formatted.contains("func add_item(item_id: String, count: int = 1, rarity: int = 0) -> bool:"),
+        formatted
+            .contains("func add_item(item_id: String, count: int = 1, rarity: int = 0) -> bool:"),
         "combined signature spacing, got:\n{}",
         formatted
     );

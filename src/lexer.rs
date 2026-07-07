@@ -169,7 +169,7 @@ impl<'a> Lexer<'a> {
                 return None;
             }
             i += 1; // step past '\n'
-            // Measure leading whitespace of this line.
+                    // Measure leading whitespace of this line.
             let mut indent = 0;
             while i < self.chars.len() {
                 match self.chars[i] {
@@ -1353,9 +1353,7 @@ world""""#;
         // string; it is not an unterminated string.
         let tokens = tokenize("var s = \"line one\nline two\"\n");
         assert!(
-            !tokens
-                .iter()
-                .any(|t| matches!(t.kind, TokenKind::Error(_))),
+            !tokens.iter().any(|t| matches!(t.kind, TokenKind::Error(_))),
             "multi-line regular string must not be an Error token: {:?}",
             tokens
         );
@@ -1369,9 +1367,7 @@ world""""#;
     fn genuinely_unterminated_string_is_an_error() {
         // A string with no closing quote before EOF is still an error.
         let tokens = tokenize("var s = \"no closing quote\n");
-        assert!(tokens
-            .iter()
-            .any(|t| matches!(t.kind, TokenKind::Error(_))));
+        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Error(_))));
     }
 
     #[test]

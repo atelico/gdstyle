@@ -339,8 +339,7 @@ fn run_check(
                         result.was_fixed = true;
                     }
                     // Re-lint to report remaining issues.
-                    result.diagnostics =
-                        linter::lint_source(&fixed_source, &file_str, &config);
+                    result.diagnostics = linter::lint_source(&fixed_source, &file_str, &config);
                 } else {
                     result.diagnostics = diagnostics;
                 }

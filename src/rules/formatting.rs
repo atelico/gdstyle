@@ -1032,10 +1032,7 @@ pub fn check_colon_spacing(
         // `=`, a space after the `=`. The Assign rule handles space-after-`=`;
         // here we just skip both the "no space before" and "space after"
         // checks when this colon is the leading half of `:=`.
-        let is_walrus = source
-            .as_bytes()
-            .get(token.span.offset + token.span.length)
-            == Some(&b'=');
+        let is_walrus = source.as_bytes().get(token.span.offset + token.span.length) == Some(&b'=');
 
         // No space before the colon (skipped for `:=`).
         if !is_walrus && token.span.offset > 0 {
@@ -1082,7 +1079,10 @@ pub fn check_colon_spacing(
         let token_end = token.span.offset + token.span.length;
         if token_end < source.len() {
             let next_byte = source.as_bytes().get(token_end);
-            let no_space_required = matches!(next_byte, Some(&b'=') | Some(&b'\n') | Some(&b' ') | Some(&b'\t'));
+            let no_space_required = matches!(
+                next_byte,
+                Some(&b'=') | Some(&b'\n') | Some(&b' ') | Some(&b'\t')
+            );
             if !no_space_required {
                 // Also tolerate when the next token IS a Newline (the byte
                 // check above already handles `\n`, but be defensive about
@@ -1173,12 +1173,7 @@ pub fn check_comma_spacing(
             let next_byte = source.as_bytes().get(token_end);
             let no_space_required = matches!(
                 next_byte,
-                Some(&b' ')
-                    | Some(&b'\t')
-                    | Some(&b'\n')
-                    | Some(&b')')
-                    | Some(&b']')
-                    | Some(&b'}')
+                Some(&b' ') | Some(&b'\t') | Some(&b'\n') | Some(&b')') | Some(&b']') | Some(&b'}')
             );
             if !no_space_required {
                 diagnostics.push(
