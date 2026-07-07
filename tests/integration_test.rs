@@ -3866,6 +3866,35 @@ fn quality_self_comparison_different_vars_ok() {
     );
 }
 
+#[test]
+fn quality_self_comparison_dotted_paths_ok() {
+    // Regression (issue #7): the exact user reproduction. A shared trailing
+    // segment (`.position`, `.label`) must not be read as a self-comparison.
+    let config = default_config();
+    let source = "\
+extends Node
+
+@export var whatever: Node
+
+func _ready():
+\tif position == whatever.position:
+\t\tprint(\"hello\")
+\tif stored_goods != null and stored_goods.label == label:
+\t\tprint(\"hi\")
+";
+    let diagnostics = linter::lint_source(source, "test.gd", &config);
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| d.rule == "quality/self-comparison"),
+        "different dotted paths must not self-compare, got: {:?}",
+        diagnostics
+            .iter()
+            .filter(|d| d.rule == "quality/self-comparison")
+            .collect::<Vec<_>>()
+    );
+}
+
 // --- no-self-assign ---
 
 #[test]
