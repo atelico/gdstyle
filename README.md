@@ -3,6 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/gdstyle.svg)](https://crates.io/crates/gdstyle)
 [![docs.rs](https://img.shields.io/docsrs/gdstyle)](https://docs.rs/gdstyle)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![CI](https://github.com/atelico/gdstyle/actions/workflows/ci.yml/badge.svg)](https://github.com/atelico/gdstyle/actions/workflows/ci.yml)
 [![Build](https://github.com/atelico/gdstyle/actions/workflows/release.yml/badge.svg)](https://github.com/atelico/gdstyle/actions/workflows/release.yml)
 
 <video src="https://github.com/user-attachments/assets/314e0f55-33e2-4365-bef8-87cf4fdaaa1e" controls autoplay loop muted playsinline width="900">
@@ -528,7 +529,7 @@ Add the following to your project's `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/atelico/gdstyle
-    rev: v0.1.7   # pin to a released tag; bump with `pre-commit autoupdate`
+    rev: v0.2.0   # pin to a released tag; bump with `pre-commit autoupdate`
     hooks:
       - id: gdstyle          # lint (fails the commit on diagnostics)
       - id: gdstyle-fmt      # format in place
@@ -641,7 +642,8 @@ gdstyle/
 │   ├── integration_test.rs  # End-to-end integration tests
 │   └── fixtures/            # GDScript test fixtures
 ├── .github/workflows/
-│   └── release.yml          # CI: builds CLI + GDExtension for all platforms
+│   ├── ci.yml               # rustfmt, clippy, and tests on every PR
+│   └── release.yml          # builds + publishes CLI + GDExtension for all platforms
 ├── examples/                # Example GDScript files for trying out gdstyle
 ├── Cargo.toml
 └── gdstyle.example.toml
