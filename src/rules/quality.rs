@@ -309,34 +309,118 @@ const COMPARISON_OPS: &[TokenKind] = &[
     TokenKind::GreaterEqual,
 ];
 
-/// Warn when comparing a value with itself (e.g. `x == x`).
+/// Warn when comparing a value with itself (e.g. `x == x`, `a.b == a.b`).
+///
+/// Compares the full dotted chain on each side of the operator rather than a
+/// single-token window, so a shared trailing segment doesn't produce a false
+/// positive:
+///
+/// - `stored_goods.label == label` — LHS is `stored_goods.label`, RHS is
+///   `label`: NOT a self-comparison
+/// - `position == whatever.position` — different chains: NOT a self-comparison
+/// - `x == x.foo` — RHS chain absorbs `.foo`: NOT a self-comparison
+///
+/// while still catching `x == x` and `obj.foo == obj.foo`. Each side must be
+/// a standalone operand: the left chain must sit on an operand boundary and
+/// the right chain must not continue into a larger expression (`x == x + 1`),
+/// so partial matches inside arithmetic don't trigger.
 pub fn check_self_comparison(
     tokens: &[Token],
     file: &ScriptFile,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    // Look for patterns: Identifier op Identifier where both are the same
-    for i in 0..tokens.len().saturating_sub(2) {
-        let left = &tokens[i];
-        let op = &tokens[i + 1];
-        let right = &tokens[i + 2];
-
+    for (i, op) in tokens.iter().enumerate() {
         if !COMPARISON_OPS.contains(&op.kind) {
             continue;
         }
-
-        if let (TokenKind::Identifier(lname), TokenKind::Identifier(rname)) =
-            (&left.kind, &right.kind)
-        {
-            if lname == rname {
-                diagnostics.push(Diagnostic::warning(
-                    "quality/self-comparison",
-                    format!("comparing '{}' with itself", lname),
-                    op.span,
-                    &file.path,
-                ));
-            }
+        let lhs = lhs_chain_ending_at(tokens, i);
+        if lhs.is_empty() {
+            continue;
         }
+        // The LHS chain must be the whole left operand. A dotted chain of N
+        // segments spans 2*N - 1 tokens (N identifiers, N-1 dots) ending at
+        // `i - 1`, so it starts at `i - (2*N - 1)`. If the token before that
+        // start continues an expression (`foo + x == x`), skip.
+        let lhs_start = i - (2 * lhs.len() - 1);
+        let before_lhs = lhs_start.checked_sub(1).map(|k| &tokens[k]);
+        if !is_operand_start_boundary(before_lhs) {
+            continue;
+        }
+        let (rhs, end) = rhs_chain_starting_at(tokens, i + 1);
+        if rhs.is_empty() {
+            continue;
+        }
+        // The RHS chain must be the whole right operand; if what follows it
+        // continues the expression (`x == x + 1`, `x == x.foo()`), it isn't a
+        // comparison between two identical operands.
+        if !is_comparison_operand_end(tokens.get(end)) {
+            continue;
+        }
+        if lhs == rhs {
+            diagnostics.push(Diagnostic::warning(
+                "quality/self-comparison",
+                format!("comparing '{}' with itself", lhs.join(".")),
+                op.span,
+                &file.path,
+            ));
+        }
+    }
+}
+
+/// True when the token before a left operand marks a clean operand boundary,
+/// so the chain that follows is a standalone operand rather than the tail of a
+/// larger sub-expression (e.g. the `x` in `foo + x`). `None` (start of stream)
+/// counts as a boundary.
+fn is_operand_start_boundary(token: Option<&Token>) -> bool {
+    match token {
+        None => true,
+        Some(t) => matches!(
+            t.kind,
+            TokenKind::Newline
+                | TokenKind::Semicolon
+                | TokenKind::Colon
+                | TokenKind::Comma
+                | TokenKind::LeftParen
+                | TokenKind::LeftBracket
+                | TokenKind::LeftBrace
+                | TokenKind::If
+                | TokenKind::Elif
+                | TokenKind::While
+                | TokenKind::When
+                | TokenKind::Return
+                | TokenKind::Assert
+                | TokenKind::Await
+                | TokenKind::And
+                | TokenKind::Or
+                | TokenKind::Not
+                | TokenKind::In
+                | TokenKind::Assign
+        ),
+    }
+}
+
+/// True when the token after a right operand ends that operand in a comparison
+/// context: a statement terminator, a boolean continuation (`and`/`or`), or a
+/// `:`/closing delimiter. Used so `x == x + 1` and `x == x.foo()` aren't read
+/// as comparing a value with itself.
+fn is_comparison_operand_end(token: Option<&Token>) -> bool {
+    match token {
+        None => true,
+        Some(t) => matches!(
+            t.kind,
+            TokenKind::Newline
+                | TokenKind::Semicolon
+                | TokenKind::Eof
+                | TokenKind::Colon
+                | TokenKind::Comma
+                | TokenKind::RightParen
+                | TokenKind::RightBracket
+                | TokenKind::RightBrace
+                | TokenKind::And
+                | TokenKind::Or
+                | TokenKind::Comment(_)
+                | TokenKind::DocComment(_)
+        ),
     }
 }
 
@@ -1486,6 +1570,21 @@ mod tests {
         Span::new(line, 1, 0, 0)
     }
 
+    /// Lex a source snippet into the token stream the rules operate on.
+    /// Keeps dotted-path regression tests readable instead of hand-building
+    /// `Identifier`/`Dot` sequences.
+    fn lex(source: &str) -> Vec<Token> {
+        crate::lexer::Lexer::new(source).tokenize()
+    }
+
+    fn empty_file() -> ScriptFile {
+        ScriptFile {
+            path: "test.gd".to_string(),
+            lines: vec![],
+            members: vec![],
+        }
+    }
+
     // --- Existing rule tests ---
 
     #[test]
@@ -1721,6 +1820,76 @@ mod tests {
         let mut diags = Vec::new();
         check_self_comparison(&tokens, &file, &mut diags);
         assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn self_comparison_dotted_tail_not_flagged() {
+        // Regression (issue #7): `stored_goods.label == label` shares the
+        // trailing segment `label`, but the operands are different values.
+        let tokens = lex("if stored_goods.label == label:\n\tpass\n");
+        let mut diags = Vec::new();
+        check_self_comparison(&tokens, &empty_file(), &mut diags);
+        assert!(
+            diags.is_empty(),
+            "a shared trailing segment must not self-compare: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn self_comparison_different_dotted_paths_not_flagged() {
+        // Issue #7 minimal repro: `position == whatever.position`.
+        let tokens = lex("if position == whatever.position:\n\tpass\n");
+        let mut diags = Vec::new();
+        check_self_comparison(&tokens, &empty_file(), &mut diags);
+        assert!(
+            diags.is_empty(),
+            "different chains must not self-compare: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn self_comparison_rhs_dotted_head_not_flagged() {
+        // `x == x.foo` — the RHS chain absorbs `.foo`, so operands differ.
+        let tokens = lex("if x == x.foo:\n\tpass\n");
+        let mut diags = Vec::new();
+        check_self_comparison(&tokens, &empty_file(), &mut diags);
+        assert!(
+            diags.is_empty(),
+            "dotted head must not self-compare: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn self_comparison_identical_dotted_paths_flagged() {
+        // `obj.foo == obj.foo` genuinely compares a value with itself.
+        let tokens = lex("if obj.foo == obj.foo:\n\tpass\n");
+        let mut diags = Vec::new();
+        check_self_comparison(&tokens, &empty_file(), &mut diags);
+        assert_eq!(diags.len(), 1, "identical dotted paths should be flagged");
+    }
+
+    #[test]
+    fn self_comparison_partial_match_in_arithmetic_not_flagged() {
+        // `foo + x == x` is `(foo + x) == x`, not a self-comparison.
+        let tokens = lex("if foo + x == x:\n\tpass\n");
+        let mut diags = Vec::new();
+        check_self_comparison(&tokens, &empty_file(), &mut diags);
+        assert!(
+            diags.is_empty(),
+            "arithmetic LHS must not self-compare: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn self_comparison_rhs_continues_expression_not_flagged() {
+        // `x == x + 1` is `x == (x + 1)`.
+        let tokens = lex("if x == x + 1:\n\tpass\n");
+        let mut diags = Vec::new();
+        check_self_comparison(&tokens, &empty_file(), &mut diags);
+        assert!(
+            diags.is_empty(),
+            "continued RHS must not self-compare: {diags:?}"
+        );
     }
 
     #[test]
