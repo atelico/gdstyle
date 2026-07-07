@@ -4137,6 +4137,71 @@ func test() -> Dictionary:
     );
 }
 
+#[test]
+fn quality_duplicate_dict_key_nested_detected() {
+    // A duplicate inside a nested dictionary value is now reported against
+    // that inner dictionary (previously the inner literal was skipped).
+    let config = default_config();
+    let source = "\
+const DATA: Dictionary = {
+\t\"outer\": {
+\t\t\"a\": 1,
+\t\t\"a\": 2,
+\t},
+}
+";
+    let diagnostics = linter::lint_source(source, "test.gd", &config);
+    let hits: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.rule == "quality/duplicate-dict-key")
+        .collect();
+    assert_eq!(
+        hits.len(),
+        1,
+        "duplicate key inside a nested dict should be flagged once, got {}",
+        hits.len()
+    );
+    assert!(
+        hits[0].message.contains("'a'"),
+        "message should name the inner key, got: {}",
+        hits[0].message
+    );
+}
+
+#[test]
+fn quality_duplicate_dict_key_dict_in_array_detected() {
+    // Nested dictionaries reached through an array value are still scanned.
+    let config = default_config();
+    let source = "\
+func test() -> Dictionary:
+\treturn {\"items\": [{\"id\": 1, \"id\": 2}]}
+";
+    let diagnostics = linter::lint_source(source, "test.gd", &config);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.rule == "quality/duplicate-dict-key"),
+        "duplicate inside a dict nested in an array should be flagged"
+    );
+}
+
+#[test]
+fn quality_duplicate_dict_key_outer_and_inner_independent() {
+    // The same key at different nesting levels is not a duplicate.
+    let config = default_config();
+    let source = "\
+func test() -> Dictionary:
+\treturn {\"a\": {\"a\": 1}, \"b\": 2}
+";
+    let diagnostics = linter::lint_source(source, "test.gd", &config);
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| d.rule == "quality/duplicate-dict-key"),
+        "a key reused at a different nesting level must not be flagged"
+    );
+}
+
 // --- duplicated-load ---
 
 #[test]
