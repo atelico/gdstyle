@@ -222,6 +222,11 @@ fn normalize_member_spacing(source: &str) -> String {
     let mut units: Vec<MemberUnit> = Vec::new();
     let mut pending_doc_start: Option<usize> = None;
     let mut pending_doc_last: Option<usize> = None;
+    // A contiguous block of plain `#` comments awaiting the next declaration.
+    // Unlike doc comments it never becomes its own unit; it only ever gets
+    // absorbed as a leading comment when it sits tight against a declaration.
+    let mut pending_comment_start: Option<usize> = None;
+    let mut pending_comment_last: Option<usize> = None;
 
     let flush_standalone_docs =
         |units: &mut Vec<MemberUnit>, start: &mut Option<usize>, last: &mut Option<usize>| {
@@ -255,10 +260,30 @@ fn normalize_member_spacing(source: &str) -> String {
                 }
                 pending_doc_last = Some(span.line);
             }
-            ClassMember::Comment { .. } | ClassMember::BlankLine { .. } => {
-                // Non-doc comments and blank lines sit where they are.
-                // Pending docs remain pending; they may still attach to a
-                // later declaration.
+            ClassMember::Comment { span, .. } => {
+                // Track a contiguous block of plain `#` comments so a block
+                // sitting tight against the next declaration can attach to it
+                // as a leading comment (see the declaration arm). A
+                // non-consecutive comment starts a fresh block. Pending docs
+                // remain pending; they may still attach to a later declaration.
+                if let Some(prev_last) = pending_comment_last {
+                    if span.line != prev_last + 1 {
+                        // A gap: the previous block can no longer be a leading
+                        // comment for the upcoming declaration; start fresh.
+                        pending_comment_start = None;
+                    }
+                }
+                if pending_comment_start.is_none() {
+                    pending_comment_start = Some(span.line);
+                }
+                pending_comment_last = Some(span.line);
+            }
+            ClassMember::BlankLine { .. } => {
+                // Blank lines sit where they are. A blank line breaks the
+                // tightness between a pending comment block and a following
+                // declaration, but the line-adjacency check in the declaration
+                // arm already accounts for that gap, so no reset is needed.
+                // Pending docs remain pending.
             }
             _ => {
                 // The declaration itself starts at the earliest of: its
@@ -288,11 +313,27 @@ fn normalize_member_spacing(source: &str) -> String {
                     }
                 }
 
-                let start = pending_doc_start
+                let mut start = pending_doc_start
                     .map(|d| d.min(decl_start))
                     .unwrap_or(decl_start);
+
+                // A plain `#` comment block sitting tight against this unit's
+                // first line (no blank line between) is a leading comment for
+                // the declaration: absorb it so the canonical member gap is
+                // inserted ABOVE the comment, not between the comment and the
+                // declaration it describes. A blank line breaks the tightness
+                // (`c_last + 1 != start`), leaving the comment where it sits.
+                if let (Some(c_start), Some(c_last)) = (pending_comment_start, pending_comment_last)
+                {
+                    if c_last + 1 == start {
+                        start = c_start;
+                    }
+                }
+
                 pending_doc_start = None;
                 pending_doc_last = None;
+                pending_comment_start = None;
+                pending_comment_last = None;
                 units.push(MemberUnit {
                     category: member.ordering_category(),
                     start,
@@ -1805,5 +1846,43 @@ func take_damage(amount: int) -> void:
         let first = format_source(source, &config);
         let second = format_source(&first, &config);
         assert_eq!(first, second, "formatter must be idempotent");
+    }
+
+    // Regression: a plain `#` comment written directly above a declaration is a
+    // leading comment for it. The member-spacing pass must not slip a blank
+    // line between the comment and the declaration it describes.
+    // See github.com/atelico/gdstyle issue #15.
+    #[test]
+    fn leading_comment_stays_tight_against_declaration() {
+        let source = "extends \"res://addons/kenyoni/app_settings/app_settings.gd\"\n\n\
+             # File\nconst SETTINGS_FILE: String = \"user://mods.cfg\"\n";
+        let expected = "extends \"res://addons/kenyoni/app_settings/app_settings.gd\"\n\n\
+             # File\nconst SETTINGS_FILE: String = \"user://mods.cfg\"\n";
+        let config = Config::default();
+        let result = format_source(source, &config);
+        assert_eq!(result, expected);
+        // And it must be stable under a second pass.
+        assert_eq!(format_source(&result, &config), expected);
+    }
+
+    // Regression: the canonical gap a member requires (two blank lines before a
+    // function) belongs ABOVE its leading comment, never between the comment
+    // and the `func` line.
+    #[test]
+    fn leading_comment_absorbs_member_gap_above_it() {
+        let source = "extends Node\n\n# describe foo\nfunc foo():\n\tpass\n";
+        let expected = "extends Node\n\n\n# describe foo\nfunc foo():\n\tpass\n";
+        let config = Config::default();
+        assert_eq!(format_source(source, &config), expected);
+    }
+
+    // A comment separated from the following declaration by a blank line is a
+    // standalone comment, not a leading comment: it stays where the user put it.
+    #[test]
+    fn comment_separated_by_blank_line_stays_standalone() {
+        let source = "extends Node\n\n# Section header\n\nconst A := 1\n";
+        let expected = "extends Node\n\n# Section header\n\nconst A := 1\n";
+        let config = Config::default();
+        assert_eq!(format_source(source, &config), expected);
     }
 }
