@@ -445,6 +445,31 @@ file-by-file, set it to `"off"` in `gdstyle.toml` instead:
 The TOML config and inline suppressions are independent; either one
 silencing a rule is enough to drop the diagnostic.
 
+#### Pinning a member against reordering
+
+`order/class-member-order` is enforced by the formatter, so ignoring it
+does double duty: it silences the `check` diagnostic *and* pins the
+member where you wrote it, so `gdstyle fmt` won't move it. Everything
+else still reorders around the pinned member. This is handy when two
+declarations are meant to sit together, for example a `const` lookup
+table kept next to the `enum` it mirrors:
+
+```gdscript
+enum SaveGameFormat {
+	BINARY,
+	TEXT,
+}
+# gdstyle:ignore=order/class-member-order
+const SAVE_GAME_FORMAT_DISPLAY_NAMES: PackedStringArray = [
+	"OPTIONS_GENERAL_BINARY",
+	"OPTIONS_GENERAL_TEXT",
+]
+```
+
+The directive may sit directly above the declaration (or above its
+annotations). A `# gdstyle:ignore-file=order/class-member-order` pins
+every member, disabling reordering for the whole file.
+
 ## CLI reference
 
 ```

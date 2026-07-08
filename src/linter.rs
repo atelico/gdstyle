@@ -93,12 +93,36 @@ pub fn lint_file(path: &std::path::Path, config: &Config) -> Result<Vec<Diagnost
 /// the rule list means "suppress all diagnostics in this scope"; `Some`
 /// means "suppress only these rules".
 #[derive(Default)]
-struct Suppressions {
+pub(crate) struct Suppressions {
     /// Per-line: indexed by line number so `is_suppressed` is O(1).
     per_line: std::collections::HashMap<usize, Vec<Option<Vec<String>>>>,
     /// Per-file: all `# gdstyle:ignore-file` directives merged together,
     /// regardless of where they appear in the source.
     file_level: Vec<Option<Vec<String>>>,
+}
+
+impl Suppressions {
+    /// Parse every suppression directive out of `source`.
+    pub(crate) fn parse(source: &str) -> Self {
+        parse_suppression_comments(source)
+    }
+
+    /// True when `rule` is suppressed for a member whose header spans lines
+    /// `first..=last` (1-based, inclusive) — that is, a `# gdstyle:ignore-file`
+    /// covering the rule, or a per-line `# gdstyle:ignore` that resolves onto
+    /// any line of that header. Used both to pin a member against reordering
+    /// and to exempt it from the `order/class-member-order` check, so `fmt` and
+    /// `check` agree on which members opt out.
+    pub(crate) fn suppresses_member(&self, first: usize, last: usize, rule: &str) -> bool {
+        if self.file_level.iter().any(|r| matches_rule_list(r, rule)) {
+            return true;
+        }
+        (first..=last).any(|line| {
+            self.per_line
+                .get(&line)
+                .is_some_and(|lists| lists.iter().any(|r| matches_rule_list(r, rule)))
+        })
+    }
 }
 
 /// Parse suppression comments. Two forms are recognised:
