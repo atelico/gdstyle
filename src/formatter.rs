@@ -1290,6 +1290,7 @@ fn same_member_signatures(a: &[ClassMember], b: &[ClassMember]) -> bool {
 
 /// A reorderable class member: the source span it occupies plus its ordering
 /// category and original position (for a stable sort).
+#[derive(Clone, Copy)]
 struct Block {
     /// 0-indexed first line, including any attached comments / annotations.
     start: usize,
@@ -1409,8 +1410,26 @@ fn reorder_class_members(source: &str) -> String {
 
     let attached_starts = compute_attached_starts(&merged, &lines);
 
-    // Build blocks. Each block spans from its attached_start to just before
-    // the next block's attached_start (or end of file for the last block).
+    // A member carrying a `# gdstyle:ignore=order/class-member-order` directive
+    // opts out of reordering: it is pinned to its source position while the
+    // rest normalise around it. We look for the directive anywhere in the
+    // member's header (its attached comments/annotations through its
+    // declaration line), so it can sit above the annotations too.
+    let suppressions = crate::linter::Suppressions::parse(source);
+    let pinned: Vec<bool> = merged
+        .iter()
+        .enumerate()
+        .map(|(i, &(decl_line, _, _))| {
+            suppressions.suppresses_member(
+                attached_starts[i] + 1,
+                decl_line + 1,
+                "order/class-member-order",
+            )
+        })
+        .collect();
+
+    // Build blocks in source order. Each block spans from its attached_start to
+    // just before the next block's attached_start (or end of file for the last).
     let mut blocks: Vec<Block> = Vec::new();
     for (i, &(_, cat, orig)) in merged.iter().enumerate() {
         let start = attached_starts[i];
@@ -1427,14 +1446,38 @@ fn reorder_class_members(source: &str) -> String {
         });
     }
 
-    // Stable sort by category.
-    blocks.sort_by(|a, b| {
+    // Fixed-point stable sort: pinned blocks keep their source position; the
+    // remaining blocks are stably sorted by (category, original_index) and slot
+    // into the free positions in order. With no pins this reduces to the plain
+    // category sort.
+    let mut movable = blocks
+        .iter()
+        .zip(&pinned)
+        .filter(|&(_, &p)| !p)
+        .map(|(b, _)| *b)
+        .collect::<Vec<Block>>();
+    movable.sort_by(|a, b| {
         a.category
             .cmp(&b.category)
             .then(a.original_index.cmp(&b.original_index))
     });
+    let mut movable = movable.into_iter();
+    let ordered: Vec<Block> = blocks
+        .iter()
+        .zip(&pinned)
+        .map(|(b, &p)| {
+            if p {
+                *b
+            } else {
+                // Exactly one movable block per non-pinned slot by construction.
+                movable
+                    .next()
+                    .expect("movable block for each non-pinned slot")
+            }
+        })
+        .collect();
 
-    emit_reordered_blocks(&blocks, &lines, &attached_starts)
+    emit_reordered_blocks(&ordered, &lines, &attached_starts)
 }
 
 /// Reconstruct the source with `blocks` in their new (sorted) order,
@@ -1884,5 +1927,55 @@ func take_damage(amount: int) -> void:
         let expected = "extends Node\n\n# Section header\n\nconst A := 1\n";
         let config = Config::default();
         assert_eq!(format_source(source, &config), expected);
+    }
+
+    // Enhancement (issue #16): a member tagged with
+    // `# gdstyle:ignore=order/class-member-order` is pinned in place, so a const
+    // kept next to the enum it mirrors stays between the two enums instead of
+    // being hoisted into the constants group. We assert ordering (the feature's
+    // guarantee) rather than exact whitespace, which is a separate concern.
+    #[test]
+    fn order_ignore_directive_pins_member_in_place() {
+        let source = "extends Node\n\n\
+             enum E {\n\tA,\n}\n\
+             # gdstyle:ignore=order/class-member-order\n\
+             const NAMES := [\"a\"]\n\
+             enum F {\n\tB,\n}\n";
+        let config = Config::default();
+        let positions = |text: &str| {
+            (
+                text.find("enum E").unwrap(),
+                text.find("const NAMES").unwrap(),
+                text.find("enum F").unwrap(),
+            )
+        };
+        let result = format_source(source, &config);
+        let (e, c, f) = positions(&result);
+        assert!(
+            e < c && c < f,
+            "pinned const must stay between its enums, got:\n{result}"
+        );
+        // Pinned ordering must be idempotent.
+        let (e2, c2, f2) = positions(&format_source(&result, &config));
+        assert!(e2 < c2 && c2 < f2, "pinned order must be stable");
+    }
+
+    // Control: without the directive the same members reorder canonically
+    // (all enums grouped ahead of the const). Confirms pinning is opt-in.
+    #[test]
+    fn reorder_still_groups_members_without_directive() {
+        let source = "extends Node\n\n\
+             enum E {\n\tA,\n}\n\
+             const NAMES := [\"a\"]\n\
+             enum F {\n\tB,\n}\n";
+        let config = Config::default();
+        let result = format_source(source, &config);
+        let enum_e = result.find("enum E").unwrap();
+        let enum_f = result.find("enum F").unwrap();
+        let const_pos = result.find("const NAMES").unwrap();
+        assert!(
+            enum_e < enum_f && enum_f < const_pos,
+            "enums should group ahead of the const, got:\n{result}"
+        );
     }
 }
