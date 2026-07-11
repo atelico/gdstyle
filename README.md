@@ -562,7 +562,7 @@ Add the following to your project's `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/atelico/gdstyle
-    rev: v0.2.1   # pin to a released tag; bump with `pre-commit autoupdate`
+    rev: v0.2.2   # pin to a released tag; bump with `pre-commit autoupdate`
     hooks:
       - id: gdstyle          # lint (fails the commit on diagnostics)
       - id: gdstyle-fmt      # format in place
@@ -724,9 +724,9 @@ You can switch between backends at any time from the mode dropdown in the toolba
 
 ### Plugin features
 
-- **Lint Project / Lint File.** Run the linter on every script in the project, or just the one you have open.
+- **Lint Project / Lint File.** Run the linter on every script in the project, or just the one you have open. Project-wide runs honor your `exclude`/`include` config, matching the CLI.
 - **Fix File.** Apply all available auto-fixes to the current script in one click.
-- **Format Project / Format File.** Same split for the formatter.
+- **Format Project / Format File.** Same split for the formatter (also config-aware for project runs).
 - **Lint on Save.** Lint after every save (on by default).
 - **Format on Save.** Format before linting on save.
 - **Right-click Fix.** Right-click any diagnostic with an auto-fix to apply it in place.
@@ -766,6 +766,11 @@ style.fix_at_line("res://player.gd", 12, "naming/variable-name-snake-case")
 style.set_max_line_length(120)
 style.disable_rule("format/double-quotes")
 style.load_config_res("res://gdstyle.toml")
+
+# Collect the project's .gd files the config would lint (honors exclude/include).
+# Load the config first so the walk reflects it.
+for res_path in style.collect_project_gd_files():
+    style.lint_res_file(res_path)
 ```
 
 ## Contributing
