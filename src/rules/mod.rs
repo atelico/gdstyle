@@ -109,6 +109,16 @@ pub fn run_all_rules_with_source(
             formatting::check_comma_spacing(tokens, file, src, &mut diagnostics);
         }
     }
+    if config.is_rule_enabled("format/brace-spacing") {
+        if let Some(src) = source {
+            formatting::check_brace_spacing(tokens, file, src, &mut diagnostics);
+        }
+    }
+    if config.is_rule_enabled("format/call-paren-spacing") {
+        if let Some(src) = source {
+            formatting::check_call_paren_spacing(tokens, file, src, &mut diagnostics);
+        }
+    }
     if config.is_rule_enabled("format/float-literal-zeros") {
         formatting::check_float_literal_zeros(tokens, file, &mut diagnostics);
     }
@@ -304,6 +314,14 @@ pub fn all_rules() -> &'static [(&'static str, &'static str)] {
         (
             "format/comma-spacing",
             "No space before ',' and one space after (except newline / closing bracket)",
+        ),
+        (
+            "format/brace-spacing",
+            "Single-line dictionary literals need a space after '{' and before '}'",
+        ),
+        (
+            "format/call-paren-spacing",
+            "No space between a callee and its opening '('",
         ),
         (
             "format/float-literal-zeros",

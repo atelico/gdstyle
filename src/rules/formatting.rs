@@ -1197,6 +1197,173 @@ pub fn check_comma_spacing(
     }
 }
 
+/// Enforce single-line dictionary literals pad their braces with a space
+/// (`{key = "value"}` -> `{ key = "value" }`), per the Godot style guide's
+/// explicit exception for dictionaries (unlike arrays, which get no inner
+/// padding). Enum bodies also use `{}` in GDScript but are not dictionaries,
+/// so they're excluded by checking whether the brace immediately follows the
+/// `enum` keyword (optionally via an enum name). Empty dicts (`{}`) and
+/// multi-line dicts are left alone: there's nothing to pad in the former, and
+/// the opening/closing braces already sit on their own lines in the latter.
+pub fn check_brace_spacing(
+    tokens: &[Token],
+    file: &ScriptFile,
+    source: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for (idx, token) in tokens.iter().enumerate() {
+        if token.kind != TokenKind::LeftBrace {
+            continue;
+        }
+
+        // Skip enum bodies: `enum {A, B}` or `enum Name {A, B}`.
+        if idx > 0 {
+            let prev = &tokens[idx - 1];
+            let is_anonymous_enum = prev.kind == TokenKind::Enum;
+            let is_named_enum = matches!(prev.kind, TokenKind::Identifier(_))
+                && idx > 1
+                && tokens[idx - 2].kind == TokenKind::Enum;
+            if is_anonymous_enum || is_named_enum {
+                continue;
+            }
+        }
+
+        // Find the matching closing brace, tracking nested depth so inner
+        // dictionaries are checked independently.
+        let mut depth = 1;
+        let mut close_idx = None;
+        for (offset, candidate) in tokens[idx + 1..].iter().enumerate() {
+            match candidate.kind {
+                TokenKind::LeftBrace => depth += 1,
+                TokenKind::RightBrace => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close_idx = Some(idx + 1 + offset);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(close_idx) = close_idx else {
+            continue;
+        };
+        let close_token = &tokens[close_idx];
+
+        // Only single-line dictionary literals get padded.
+        if token.span.line != close_token.span.line {
+            continue;
+        }
+        // Empty dict: nothing to pad.
+        if close_idx == idx + 1 {
+            continue;
+        }
+
+        let open_end = token.span.offset + token.span.length;
+        let byte_after = source.as_bytes().get(open_end);
+        if byte_after != Some(&b' ') && byte_after != Some(&b'\t') {
+            diagnostics.push(
+                Diagnostic::warning(
+                    "format/brace-spacing",
+                    "add space after '{' in single-line dictionary literal".to_string(),
+                    token.span,
+                    &file.path,
+                )
+                .with_fix(Fix {
+                    replacements: vec![Replacement {
+                        offset: open_end,
+                        length: 0,
+                        new_text: " ".to_string(),
+                    }],
+                    is_safe: true,
+                }),
+            );
+        }
+
+        if close_token.span.offset > 0 {
+            let byte_before = source.as_bytes().get(close_token.span.offset - 1);
+            if byte_before != Some(&b' ') && byte_before != Some(&b'\t') {
+                diagnostics.push(
+                    Diagnostic::warning(
+                        "format/brace-spacing",
+                        "add space before '}' in single-line dictionary literal".to_string(),
+                        close_token.span,
+                        &file.path,
+                    )
+                    .with_fix(Fix {
+                        replacements: vec![Replacement {
+                            offset: close_token.span.offset,
+                            length: 0,
+                            new_text: " ".to_string(),
+                        }],
+                        is_safe: true,
+                    }),
+                );
+            }
+        }
+    }
+}
+
+/// No space between a callee and its opening `(`: `print ("foo")` should be
+/// `print("foo")`. Applies to identifiers (function/method calls), chained
+/// calls (`get_callback() ()`), calls on a subscript result
+/// (`handlers[i] ()`), and the builtin call-like keywords `preload`,
+/// `assert`, and `super`. Control-flow keywords (`if`, `while`, `return`,
+/// ...) aren't calls and keep whatever paren spacing they already have; a
+/// literal newline between the callee and `(` is also left alone since it's
+/// never an ordinary call.
+pub fn check_call_paren_spacing(
+    tokens: &[Token],
+    file: &ScriptFile,
+    source: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for (idx, token) in tokens.iter().enumerate() {
+        if token.kind != TokenKind::LeftParen || idx == 0 {
+            continue;
+        }
+        let prev = &tokens[idx - 1];
+        let is_call_like = matches!(
+            prev.kind,
+            TokenKind::Identifier(_)
+                | TokenKind::RightParen
+                | TokenKind::RightBracket
+                | TokenKind::Preload
+                | TokenKind::Assert
+                | TokenKind::Super
+        );
+        if !is_call_like {
+            continue;
+        }
+
+        let prev_end = prev.span.offset + prev.span.length;
+        if token.span.offset <= prev_end {
+            continue;
+        }
+        let gap = &source[prev_end..token.span.offset];
+        if gap.is_empty() || !gap.chars().all(|c| c == ' ' || c == '\t') {
+            continue;
+        }
+
+        diagnostics.push(
+            Diagnostic::warning(
+                "format/call-paren-spacing",
+                "no space before '(' in a function call".to_string(),
+                token.span,
+                &file.path,
+            )
+            .with_fix(Fix {
+                replacements: vec![Replacement {
+                    offset: prev_end,
+                    length: token.span.offset - prev_end,
+                    new_text: String::new(),
+                }],
+                is_safe: true,
+            }),
+        );
+    }
+}
+
 /// Check enum members are each on their own line.
 pub fn check_enum_one_per_line(
     file: &ScriptFile,

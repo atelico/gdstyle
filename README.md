@@ -16,7 +16,7 @@ gdstyle catches style violations, naming inconsistencies, and common code-qualit
 
 ## Features
 
-- 54 lint rules across syntax, naming, formatting, ordering, and code quality.
+- 56 lint rules across syntax, naming, formatting, ordering, and code quality.
 - Formatter (`gdstyle fmt`) that's in-place and idempotent, and reorders class members into the canonical Godot order.
 - Auto-fix: `--fix` for the safe ones, `--unsafe-fix` for renames. Renames follow into other `.gd` files and into the `.tscn`/`.tres` scene wiring.
 - Single static binary. No Python, no Rust toolchain, no Godot install required to run it.
@@ -111,7 +111,7 @@ gdstyle check --max-line-length 120
 
 ## Rules
 
-gdstyle ships with 54 rules organized into five categories. Most rules are enabled by default (a few advisory rules are opt-in).
+gdstyle ships with 56 rules organized into five categories. Most rules are enabled by default (a few advisory rules are opt-in).
 
 ### Syntax (1 rule)
 
@@ -135,7 +135,7 @@ gdstyle ships with 54 rules organized into five categories. Most rules are enabl
 | `naming/private-underscore-prefix` | Private members with `_` should not have `@export` | - |
 | `naming/node-name-pascal-case` | `$NodePath` references should use `PascalCase` | unsafe |
 
-### Formatting (18 rules)
+### Formatting (20 rules)
 
 | Rule | Description | Fixable |
 |------|-------------|---------|
@@ -154,6 +154,8 @@ gdstyle ships with 54 rules organized into five categories. Most rules are enabl
 | `format/operator-spacing` | One space around binary operators | safe |
 | `format/colon-spacing` | No space before `:`, one space after (except `:=` and end of line) | safe |
 | `format/comma-spacing` | No space before `,`, one space after (except newline / closing bracket) | safe |
+| `format/brace-spacing` | Single-line dictionary literals need a space after `{` and before `}` | safe |
+| `format/call-paren-spacing` | No space between a callee and its opening `(` | safe |
 | `format/float-literal-zeros` | Float literals need leading/trailing zeros (`0.5`, not `.5`) | safe |
 | `format/large-number-underscores` | Large numbers (>=10000) should use underscores | safe |
 | `format/enum-one-per-line` | Each enum member on its own line | safe |
@@ -651,7 +653,7 @@ gdstyle/
 │   └── rules/
 │       ├── mod.rs           # Rule dispatcher
 │       ├── naming.rs        # 11 naming convention rules
-│       ├── formatting.rs    # 18 formatting rules
+│       ├── formatting.rs    # 20 formatting rules
 │       ├── ordering.rs      # Class member ordering rule
 │       └── quality.rs       # 23 code quality rules
 ├── gdstyle-gdext/           # GDExtension wrapper (exposes linter/formatter to Godot)
