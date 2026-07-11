@@ -587,6 +587,12 @@ struct DictKeyFrame {
     key_parts: Vec<String>,
     /// Span of the first token of the current key, for the diagnostic.
     key_span: Option<Span>,
+    /// Depth of unclosed `(`/`[` within the entry currently being scanned.
+    /// A comma or colon inside a nested call or subscript (e.g. the `,` in
+    /// the key expression `Vector2i(1, 0)`) belongs to that expression, not
+    /// to this dictionary literal, and must not be mistaken for the
+    /// entry-separating comma or the key-ending colon.
+    depth: u32,
 }
 
 impl DictKeyFrame {
@@ -596,6 +602,7 @@ impl DictKeyFrame {
             expect_key: true,
             key_parts: Vec::new(),
             key_span: None,
+            depth: 0,
         }
     }
 }
@@ -617,8 +624,11 @@ pub fn check_duplicate_dict_key(
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     // A stack of frames, one per currently-open `{`. Keys, commas, and colons
-    // always apply to the innermost open dictionary (`stack.last_mut()`), which
-    // routes each token to the right nesting level without a depth counter.
+    // always apply to the innermost open dictionary (`stack.last_mut()`),
+    // which routes each token to the right nesting level. Each frame also
+    // tracks its own `(`/`[` depth so a comma or colon nested inside a call
+    // or subscript within the current entry isn't mistaken for this
+    // dictionary's entry separator or key/value separator.
     let mut stack: Vec<DictKeyFrame> = Vec::new();
 
     for token in tokens {
@@ -627,9 +637,21 @@ pub fn check_duplicate_dict_key(
             TokenKind::RightBrace => {
                 stack.pop();
             }
+            TokenKind::LeftParen | TokenKind::LeftBracket => {
+                if let Some(frame) = stack.last_mut() {
+                    frame.depth += 1;
+                    push_key_part(frame, token);
+                }
+            }
+            TokenKind::RightParen | TokenKind::RightBracket => {
+                if let Some(frame) = stack.last_mut() {
+                    frame.depth = frame.depth.saturating_sub(1);
+                    push_key_part(frame, token);
+                }
+            }
             TokenKind::Colon => {
                 if let Some(frame) = stack.last_mut() {
-                    if frame.expect_key {
+                    if frame.expect_key && frame.depth == 0 {
                         // End of the key expression: record it as one unit.
                         if let Some(span) = frame.key_span.take() {
                             let key_text = frame.key_parts.join("");
@@ -649,37 +671,53 @@ pub fn check_duplicate_dict_key(
                         }
                         frame.key_parts.clear();
                         frame.expect_key = false;
+                    } else {
+                        // A `:` nested inside a call/subscript in the key
+                        // expression is part of that expression, not the
+                        // entry's key/value separator.
+                        push_key_part(frame, token);
                     }
                 }
             }
             TokenKind::Comma => {
                 if let Some(frame) = stack.last_mut() {
-                    // Next entry begins; drop any partially seen value.
-                    frame.key_parts.clear();
-                    frame.key_span = None;
-                    frame.expect_key = true;
+                    if frame.depth == 0 {
+                        // Next entry begins; drop any partially seen value.
+                        frame.key_parts.clear();
+                        frame.key_span = None;
+                        frame.expect_key = true;
+                    } else {
+                        // An argument separator inside a nested call/subscript
+                        // (e.g. `Vector2i(1, 0)`), not the entry separator.
+                        push_key_part(frame, token);
+                    }
                 }
             }
             TokenKind::Newline => {}
             _ => {
                 if let Some(frame) = stack.last_mut() {
-                    if frame.expect_key {
-                        // Use the semantic value for string keys so
-                        // `{"foo": 1, 'foo': 2}` is detected as a duplicate
-                        // (same value, different surrounding quotes).
-                        let part = match &token.kind {
-                            TokenKind::String(info) => info.value.clone(),
-                            _ => token.text.clone(),
-                        };
-                        if frame.key_span.is_none() {
-                            frame.key_span = Some(token.span);
-                        }
-                        frame.key_parts.push(part);
-                    }
+                    push_key_part(frame, token);
                 }
             }
         }
     }
+}
+
+/// Append `token` to the key expression currently being accumulated, if the
+/// frame is in key position. String tokens use their semantic value so
+/// `{"foo": 1, 'foo': 2}` is still caught regardless of quote style.
+fn push_key_part(frame: &mut DictKeyFrame, token: &Token) {
+    if !frame.expect_key {
+        return;
+    }
+    let part = match &token.kind {
+        TokenKind::String(info) => info.value.clone(),
+        _ => token.text.clone(),
+    };
+    if frame.key_span.is_none() {
+        frame.key_span = Some(token.span);
+    }
+    frame.key_parts.push(part);
 }
 
 // ---------------------------------------------------------------------------
