@@ -908,13 +908,13 @@ fn try_break_comment(line: &str, max_len: usize) -> Option<Vec<String>> {
         return None;
     }
 
-    // Extract the comment prefix (# or ##) and the text.
+    // Extract the comment prefix (# or ##) and the text. A bare `#`, a `#!`
+    // shebang, or any non-comment line yields None (the `?` on the `# `
+    // branch), so we never try to wrap those.
     let (prefix, text) = if let Some(rest) = content.strip_prefix("## ") {
         ("## ", rest)
-    } else if let Some(rest) = content.strip_prefix("# ") {
-        ("# ", rest)
     } else {
-        return None; // Don't break #! shebangs or bare # lines.
+        ("# ", content.strip_prefix("# ")?)
     };
 
     let prefix_visual_len = visual_line_len(&format!("{}{}", indent, prefix), TAB_WIDTH);
