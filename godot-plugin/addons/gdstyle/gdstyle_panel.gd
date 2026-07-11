@@ -407,7 +407,8 @@ func fix_current_file() -> void:
 
 func format_project() -> void:
 	_set_status("Formatting...")
-	var gd_files := _find_gd_files("res://")
+	_load_nearest_config("res://")
+	var gd_files := _collect_project_gd_files()
 	var changed_count := 0
 	for file_path in gd_files:
 		if _format_single_file(file_path):
@@ -527,7 +528,8 @@ func _lint_project_native() -> void:
 	_diagnostics.clear()
 	_tree.clear()
 
-	var gd_files := _find_gd_files("res://")
+	_load_nearest_config("res://")
+	var gd_files := _collect_project_gd_files()
 	for file_path in gd_files:
 		var results: Array = _native_linter.lint_res_file(file_path)
 		for d in results:
@@ -537,6 +539,23 @@ func _lint_project_native() -> void:
 	_update_status_counts()
 
 
+## Collect the project's `.gd` files to lint or format. With the GDExtension
+## backend this delegates to the native collector, so the config's
+## `exclude`/`include` are honored exactly like the CLI. The CLI backend keeps
+## the local walk below (the `gdstyle` binary applies the config itself when it
+## runs over the project root).
+func _collect_project_gd_files() -> Array:
+	if _use_gdextension and _native_linter:
+		var out: Array = []
+		for res_path in _native_linter.collect_project_gd_files():
+			out.append(res_path)
+		return out
+	return _find_gd_files("res://")
+
+
+## Local fallback walk for the CLI backend. Honors only the built-in skips
+## (hidden dirs and `addons`); config-driven `exclude`/`include` is applied by
+## the CLI binary itself, and by `_collect_project_gd_files` on the native path.
 func _find_gd_files(dir_path: String) -> Array[String]:
 	var files: Array[String] = []
 	var dir := DirAccess.open(dir_path)

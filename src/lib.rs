@@ -6,6 +6,7 @@
 #![allow(clippy::collapsible_match, clippy::collapsible_if)]
 
 pub mod ast;
+pub mod collect;
 pub mod config;
 pub mod diagnostic;
 pub mod fixer;

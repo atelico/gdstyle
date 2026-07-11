@@ -73,6 +73,30 @@ impl GdStyle {
         self.lint_file(globalized)
     }
 
+    /// Collect every `.gd` file under `res://` that the current config would
+    /// lint, honoring `exclude`/`include` exactly like the CLI. Returns the
+    /// files as `res://` paths, ready to pass back to `lint_res_file` /
+    /// `format_res_file`.
+    ///
+    /// Load the project's config first (`load_config_res`) so the walk reflects
+    /// its `exclude`/`include`; otherwise the defaults apply.
+    #[func]
+    fn collect_project_gd_files(&self) -> PackedStringArray {
+        let settings = ProjectSettings::singleton();
+        let root = settings
+            .globalize_path(&GString::from("res://"))
+            .to_string();
+        let filter = gdstyle::collect::PathFilter::from_config(&self.config);
+        let files =
+            gdstyle::collect::collect_gdscript_files(&[std::path::PathBuf::from(root)], &filter);
+        let mut arr = PackedStringArray::new();
+        for file in files {
+            let globalized = GString::from(file.to_string_lossy().as_ref());
+            arr.push(&settings.localize_path(&globalized));
+        }
+        arr
+    }
+
     /// List all available rule names.
     #[func]
     fn list_rules(&self) -> PackedStringArray {
