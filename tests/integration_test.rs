@@ -2481,7 +2481,7 @@ fn fmt_inner_class_preserves_multiline_body() {
         "static func body preserved"
     );
     assert!(
-        formatted.contains("{\"hp\": hp, \"mp\": mp}"),
+        formatted.contains("{ \"hp\": hp, \"mp\": mp }"),
         "to_dict body preserved"
     );
     // Virtual `_init` comes before the static method.
@@ -3230,7 +3230,7 @@ fn fmt_colon_spacing_in_dict_keys() {
     let source = "extends Node\n\nvar d = {\"a\":1, \"b\":2}\n";
     let formatted = formatter::format_source(source, &default_config());
     assert!(
-        formatted.contains("{\"a\": 1, \"b\": 2}"),
+        formatted.contains("{ \"a\": 1, \"b\": 2 }"),
         "dict keys: missing space after ':', got:\n{}",
         formatted
     );
@@ -3260,7 +3260,7 @@ fn fmt_comma_spacing_in_array_and_dict_literals() {
         formatted
     );
     assert!(
-        formatted.contains("{\"a\": 1, \"b\": 2, \"c\": 3}"),
+        formatted.contains("{ \"a\": 1, \"b\": 2, \"c\": 3 }"),
         "dict literal: missing space after ',', got:\n{}",
         formatted
     );
@@ -3295,6 +3295,116 @@ fn fmt_comma_spacing_preserves_trailing_comma() {
     );
 }
 
+// --- Brace-spacing regression suite -------------------------------------------
+// Style guide: single-line dictionary literals get a space after '{' and
+// before '}' (the one exception to "avoid extra spaces").
+
+#[test]
+fn fmt_brace_spacing_pads_single_line_dict() {
+    let source = "extends Node\n\nvar my_dictionary = {key = \"value\"}\n";
+    let formatted = formatter::format_source(source, &default_config());
+    assert!(
+        formatted.contains("{ key = \"value\" }"),
+        "single-line dict must be padded, got:\n{}",
+        formatted
+    );
+}
+
+#[test]
+fn fmt_brace_spacing_leaves_empty_dict_alone() {
+    let source = "extends Node\n\nvar d = {}\n";
+    let formatted = formatter::format_source(source, &default_config());
+    assert!(
+        formatted.contains("var d = {}"),
+        "empty dict must not be padded, got:\n{}",
+        formatted
+    );
+}
+
+#[test]
+fn fmt_brace_spacing_pads_nested_dicts() {
+    let source = "extends Node\n\nvar d = {a = {b = 1}}\n";
+    let formatted = formatter::format_source(source, &default_config());
+    assert!(
+        formatted.contains("{ a = { b = 1 } }"),
+        "nested dicts must each be padded, got:\n{}",
+        formatted
+    );
+}
+
+#[test]
+fn fmt_brace_spacing_skips_enum_bodies() {
+    // Enums use `{}` too, but they aren't dictionaries and must not be padded.
+    let source = "extends Node\n\nenum Single {ONLY}\n";
+    let formatted = formatter::format_source(source, &default_config());
+    assert!(
+        formatted.contains("enum Single {ONLY}"),
+        "enum body must not be padded like a dict, got:\n{}",
+        formatted
+    );
+}
+
+#[test]
+fn fmt_brace_spacing_leaves_multiline_dict_alone() {
+    let source = "extends Node\n\nvar d = {\n\t\"a\": 1,\n\t\"b\": 2,\n}\n";
+    let formatted = formatter::format_source(source, &default_config());
+    assert!(
+        formatted.contains("d = {\n\t\"a\": 1,"),
+        "multi-line dict braces must not be padded, got:\n{}",
+        formatted
+    );
+}
+
+// --- Call-paren-spacing regression suite --------------------------------------
+// Style guide: no space between a callee and its opening '(', e.g.
+// `print ("foo")` -> `print("foo")`.
+
+#[test]
+fn fmt_call_paren_spacing_strips_space_before_call() {
+    let source = "extends Node\n\nfunc f() -> void:\n\tprint (\"foo\")\n";
+    let formatted = formatter::format_source(source, &default_config());
+    assert!(
+        formatted.contains("print(\"foo\")"),
+        "call must not have space before '(', got:\n{}",
+        formatted
+    );
+}
+
+#[test]
+fn fmt_call_paren_spacing_strips_space_before_chained_and_preload() {
+    let source = "extends Node\n\nfunc f() -> void:\n\tget_callback() ()\n\tpreload (\"res://x.tscn\")\n\tassert (true)\n";
+    let formatted = formatter::format_source(source, &default_config());
+    assert!(
+        formatted.contains("get_callback()()"),
+        "chained call must not have space before '(', got:\n{}",
+        formatted
+    );
+    assert!(
+        formatted.contains("preload(\"res://x.tscn\")"),
+        "preload must not have space before '(', got:\n{}",
+        formatted
+    );
+    assert!(
+        formatted.contains("assert(true)"),
+        "assert must not have space before '(', got:\n{}",
+        formatted
+    );
+}
+
+#[test]
+fn fmt_call_paren_spacing_preserves_if_condition_parens() {
+    // `if (x):` isn't a call; no-unnecessary-parens (not call-paren-spacing)
+    // owns stripping those parens, so the space before them is irrelevant
+    // here as long as call-paren-spacing doesn't touch it.
+    let source = "extends Node\n\nfunc f() -> void:\n\tif (x > 5):\n\t\tpass\n";
+    let formatted = formatter::format_source(source, &default_config());
+    assert!(
+        !formatted.contains("if(x"),
+        "if-condition parens must not be treated as a call, got:\n{}",
+        formatted
+    );
+}
+
 #[test]
 fn fmt_combined_colon_and_comma_fixes_match_canonical_godot_form() {
     // End-to-end regression covering A1+A2+A3 together against a realistic
@@ -3308,7 +3418,8 @@ fn fmt_combined_colon_and_comma_fixes_match_canonical_godot_form() {
         formatted
     );
     assert!(
-        formatted.contains("{\"a\": 1, \"b\": 2}") && formatted.contains("{\"c\": 3, \"d\": 4}"),
+        formatted.contains("{ \"a\": 1, \"b\": 2 }")
+            && formatted.contains("{ \"c\": 3, \"d\": 4 }"),
         "combined dict spacing, got:\n{}",
         formatted
     );
