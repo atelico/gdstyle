@@ -1,64 +1,55 @@
-## gdstyle 0.2.2
+## gdstyle 0.2.3
 
-A release driven by two user-reported issues: dictionary and call spacing the
-formatter used to leave untouched, and a way to lint a first-party addon that
-lives inside an otherwise-excluded directory. The Godot editor plugin now
-selects the same files as the CLI.
+A patch release fixing two user-reported bugs: `--fix` corrupting
+CRLF-terminated files, and a false positive in `quality/duplicate-dict-key`
+for dictionary keys built from multi-argument constructor calls.
 
 ### Fixed
 
-- **Single-line dictionaries and call parentheses are now formatted.**
-  `gdstyle fmt` reported "already formatted" while leaving both of these,
-  which the [official Godot style guide](https://docs.godotengine.org/en/stable/tutorials/scripting/gdscript/gdscript_styleguide.html#whitespace)
-  calls out, untouched:
+- **`--fix` no longer corrupts CRLF-terminated (Windows line ending) files.**
+  Diagnostic byte offsets are computed against an internally LF-normalized
+  copy of the source, but `--fix` and `--unsafe-fix` were applying those
+  offsets straight to the original CRLF source. Every `\r` before the edit
+  point shifted the insertion point left by one byte, so fixes landed
+  mid-identifier:
 
   ```gdscript
-  # before
-  my_dictionary = {key = "value"}
-  print ("foo")
+  # before --fix (CRLF file)
+  var weapon := _make({"hold_type": ..., "mp": 40})
 
-  # gdstyle fmt now produces
-  my_dictionary = { key = "value" }
-  print("foo")
+  # gdstyle 0.2.2 --fix produced (corrupted)
+  var weapon := _ma ke({"hold_type": ..., "mp" : 40})
+
+  # gdstyle 0.2.3 --fix produces
+  var weapon := _make({ "hold_type": ..., "mp": 40 })
   ```
 
-  Two safe-fixable rules, on by default (56 rules total now, 20 of them
-  formatting):
+  Fixes now normalize internally before applying replacements and restore
+  the file's original line endings afterward, so CRLF files stay CRLF. This
+  covers the CLI (`check --fix`, `check --unsafe-fix`) and the GDExtension
+  fix bindings used by the Godot editor plugin.
+  Reported in [#24](https://github.com/atelico/gdstyle/issues/24).
 
-  - `format/brace-spacing` pads single-line dictionary literals, so
-    `{key = "value"}` becomes `{ key = "value" }`. Enum bodies, empty dicts,
-    and multi-line dictionaries are left alone; nested dictionaries are each
-    padded.
-  - `format/call-paren-spacing` removes the space before a call's `(`, so
-    `print ("foo")` becomes `print("foo")`. It covers method and chained
-    calls plus `preload`/`assert`/`super`; control-flow keyword parentheses
-    (`if (x):`) and lambda `func (...)` are untouched.
+- **`quality/duplicate-dict-key` no longer flags multi-argument constructor
+  keys as duplicates.** A comma inside a key like `Vector2i(1, 0)` was
+  mistaken for the dictionary's entry separator, so the tracked key
+  collapsed to a trailing fragment (`0)`) and unrelated keys sharing that
+  fragment were flagged:
 
-  Reported in [#20](https://github.com/atelico/gdstyle/issues/20).
-
-### Added
-
-- **`include` config to force-lint paths inside an excluded directory.**
-  Exclude `addons` wholesale yet still lint your own plugin:
-
-  ```toml
-  exclude = [".godot", "addons"]
-  include = ["addons/my_plugin"]
+  ```gdscript
+  # gdstyle 0.2.2 incorrectly flagged these as duplicates
+  var directions := {
+      Vector2i(1, 0): "east",
+      Vector2i(2, 0): "far_east",
+      Vector2i(3, 0): "farther_east",
+  }
   ```
 
-  An `include` always wins over an `exclude`, regardless of order. The whole
-  included subtree is linted (nested files included), and its excluded siblings
-  stay excluded. `check`, `fmt`, and the `--unsafe-fix` scene pass all honor it.
-  Requested in [#19](https://github.com/atelico/gdstyle/issues/19).
-
-### Improved
-
-- **The Godot editor plugin honors `exclude`/`include`.** Project-wide Lint and
-  Format in the plugin walked the project with a hardcoded `addons` skip, so the
-  editor disagreed with the CLI and could not be told to lint a first-party
-  addon. It now applies the same file selection as the CLI, including the new
-  `include` carve-outs. A new GDExtension method, `collect_project_gd_files()`,
-  exposes the config-aware walk to GDScript.
+  Each dictionary literal now tracks its own paren/bracket depth, so a
+  comma or colon nested inside a call or subscript is treated as part of
+  that key expression instead of the entry separator. Genuine duplicate
+  constructor-call keys are still caught.
+  Reported in [#23](https://github.com/atelico/gdstyle/issues/23).
 
 ### Install
 
@@ -77,7 +68,7 @@ enable the plugin in *Project > Project Settings > Plugins*.
 For the [pre-commit](https://pre-commit.com) framework, bump your config to:
 ```yaml
 - repo: https://github.com/atelico/gdstyle
-  rev: v0.2.2
+  rev: v0.2.3
   hooks:
     - id: gdstyle
     - id: gdstyle-fmt
