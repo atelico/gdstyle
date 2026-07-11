@@ -87,6 +87,15 @@ pub struct CrossFileReference {
 /// assert_eq!(fixed, "var x = 1\n");
 /// ```
 pub fn apply_fixes(source: &str, diagnostics: &[Diagnostic], safe_only: bool) -> String {
+    // `diagnostics` was produced by `linter::lint_source`, which normalizes
+    // `\r\n`/`\r` to `\n` before computing byte offsets (see
+    // `normalize_line_endings`). Normalize here too so those offsets land on
+    // the right bytes, then restore the original line-ending convention on
+    // the way out so CRLF files stay CRLF.
+    let has_crlf = source.contains('\r');
+    let normalized = crate::linter::normalize_line_endings(source);
+    let source = normalized.as_str();
+
     // Single tokenize + parse pass for everything we need below.
     let mut lexer = Lexer::new(source);
     let tokens = lexer.tokenize();
@@ -182,11 +191,17 @@ pub fn apply_fixes(source: &str, diagnostics: &[Diagnostic], safe_only: bool) ->
         }
     }
 
-    if replacements.is_empty() {
-        return source.to_string();
-    }
+    let fixed = if replacements.is_empty() {
+        source.to_string()
+    } else {
+        apply_replacements(source, replacements)
+    };
 
-    apply_replacements(source, replacements)
+    if has_crlf {
+        fixed.replace('\n', "\r\n")
+    } else {
+        fixed
+    }
 }
 
 fn apply_replacements(source: &str, replacements: Vec<Replacement>) -> String {
@@ -205,6 +220,12 @@ pub fn extract_renames(
     file_path: &str,
     members: &[ClassMember],
 ) -> Vec<AppliedRename> {
+    // `diagnostics` carries byte offsets computed against the LF-normalized
+    // source (see `apply_fixes` for the full rationale), so normalize here
+    // too before slicing `source` with those offsets.
+    let normalized = crate::linter::normalize_line_endings(source);
+    let source = normalized.as_str();
+
     let class_name = extract_class_name(members);
     let existing_names = collect_existing_names(members);
     let mut lexer = Lexer::new(source);
@@ -1103,5 +1124,31 @@ mod tests {
         let diags: Vec<Diagnostic> = vec![];
         let result = apply_fixes(source, &diags, true);
         assert_eq!(result, source);
+    }
+
+    // Regression test for https://github.com/atelico/gdstyle/issues/24:
+    // `lint_source` computes diagnostic offsets against an internally
+    // LF-normalized copy of the source, so a CRLF file's own `\r` bytes must
+    // not shift those offsets when the fix is applied back.
+    #[test]
+    fn apply_fixes_on_crlf_source_does_not_corrupt_offsets() {
+        let source =
+            "extends Node\r\n\r\nfunc _demo() -> void:\r\n\tvar w := _make({\"k\": 1})\r\n";
+        let diagnostics =
+            crate::linter::lint_source(source, "test.gd", &crate::config::Config::default());
+        let fixed = apply_fixes(source, &diagnostics, true);
+        assert_eq!(
+            fixed,
+            "extends Node\r\n\r\nfunc _demo() -> void:\r\n\tvar w := _make({ \"k\": 1 })\r\n"
+        );
+    }
+
+    #[test]
+    fn apply_fixes_preserves_crlf_line_endings_when_source_has_none_fixed() {
+        let source = "extends Node\r\n\r\nfunc _demo() -> void:\r\n\tpass\r\n";
+        let diagnostics =
+            crate::linter::lint_source(source, "test.gd", &crate::config::Config::default());
+        let fixed = apply_fixes(source, &diagnostics, true);
+        assert_eq!(fixed, source);
     }
 }

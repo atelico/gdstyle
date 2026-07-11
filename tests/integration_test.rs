@@ -3586,6 +3586,29 @@ fn formatter_handles_crlf_input() {
     );
 }
 
+// Regression test for https://github.com/atelico/gdstyle/issues/24: --fix
+// on a CRLF file must not drift replacement offsets (which corrupted
+// identifiers) and must preserve the CRLF line endings.
+#[test]
+fn fix_on_crlf_source_preserves_line_endings_and_offsets() {
+    let source = "extends Node\r\n\r\nfunc _demo() -> void:\r\n\tvar w := _make({\"k\": 1})\r\n\tvar v := _make({\"j\": 2})\r\n";
+    let config = default_config();
+    let diagnostics = linter::lint_source(source, "test.gd", &config);
+    let fixed = fixer::apply_fixes(source, &diagnostics, true);
+
+    assert!(fixed.contains("\r\n"), "CRLF endings should be preserved");
+    assert!(
+        fixed.contains("_make({ \"k\": 1 })"),
+        "identifier/brace spacing should not be corrupted, got:\n{:?}",
+        fixed
+    );
+    assert!(
+        fixed.contains("_make({ \"j\": 2 })"),
+        "identifier/brace spacing on later line should not be corrupted, got:\n{:?}",
+        fixed
+    );
+}
+
 // Naming: Vector2D, Area2D, Node3D patterns
 #[test]
 fn naming_suggests_correct_snake_case_for_2d_3d_names() {
