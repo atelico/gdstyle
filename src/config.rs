@@ -45,6 +45,12 @@ pub struct Config {
     /// File/directory patterns to exclude from linting.
     pub exclude: Vec<String>,
 
+    /// Patterns that force-include paths even when `exclude` matches them.
+    /// An include always wins over an exclude, regardless of order, so you can
+    /// carve a specific subtree out of a broad exclude (e.g. exclude `addons`
+    /// but include `addons/my_plugin`). Empty by default.
+    pub include: Vec<String>,
+
     /// Per-rule configuration overrides.
     /// Key is the rule name, value is "off", "warn", or "error".
     pub rules: HashMap<String, RuleSeverityConfig>,
@@ -74,6 +80,7 @@ impl Default for Config {
             max_public_methods: 20,
             max_inner_classes: 5,
             exclude: vec![".godot".to_string(), "addons".to_string()],
+            include: Vec::new(),
             rules: HashMap::new(),
         }
     }
@@ -159,6 +166,7 @@ mod tests {
         assert_eq!(config.max_function_length, 50);
         assert!(config.exclude.contains(&".godot".to_string()));
         assert!(config.exclude.contains(&"addons".to_string()));
+        assert!(config.include.is_empty());
     }
 
     #[test]
@@ -183,6 +191,24 @@ exclude = [".godot", "addons", "generated"]
             config.rules.get("quality/max-function-length"),
             Some(&RuleSeverityConfig::Off)
         );
+    }
+
+    #[test]
+    fn parse_include_overrides_exclude() {
+        let toml = r#"
+exclude = ["addons"]
+include = ["addons/my_plugin"]
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.exclude, vec!["addons".to_string()]);
+        assert_eq!(config.include, vec!["addons/my_plugin".to_string()]);
+    }
+
+    #[test]
+    fn include_defaults_to_empty_when_omitted() {
+        // Existing configs that predate `include` must still parse.
+        let config: Config = toml::from_str("exclude = [\"addons\"]").unwrap();
+        assert!(config.include.is_empty());
     }
 
     #[test]

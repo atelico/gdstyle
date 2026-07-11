@@ -264,8 +264,8 @@ fn run_check(
     };
 
     // Collect files.
-    let exclude_patterns = build_exclude_patterns(&config.exclude);
-    let files = collect_gdscript_files(paths, &exclude_patterns);
+    let filter = PathFilter::new(&config.exclude, &config.include);
+    let files = collect_gdscript_files(paths, &filter);
 
     if files.is_empty() {
         eprintln!("{}: no .gd files found", "warning".yellow());
@@ -434,7 +434,7 @@ fn run_check(
         // A `.gd`-only signal/function rename leaves `[connection signal="…"
         // method="…"]` rows stale, and the connection fails silently at
         // runtime, so `--unsafe-fix` must touch `.tscn`/`.tres` too.
-        let scene_files = collect_scene_files(paths, &exclude_patterns);
+        let scene_files = collect_scene_files(paths, &filter);
         for scene_path in &scene_files {
             let Ok(scene_source) = std::fs::read_to_string(scene_path) else {
                 continue;
@@ -523,8 +523,8 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
         }
     };
 
-    let exclude_patterns = build_exclude_patterns(&config.exclude);
-    let files = collect_gdscript_files(paths, &exclude_patterns);
+    let filter = PathFilter::new(&config.exclude, &config.include);
+    let files = collect_gdscript_files(paths, &filter);
 
     if files.is_empty() {
         eprintln!("{}: no .gd files found", "warning".yellow());
@@ -711,6 +711,11 @@ max_parameters = 5
 # These are matched as glob patterns against file paths.
 exclude = [".godot", "addons"]
 
+# Patterns to force-include even when `exclude` matches them. An include always
+# wins over an exclude, so you can lint one plugin inside an otherwise-excluded
+# directory. Empty by default.
+# include = ["addons/my_plugin"]
+
 # Per-rule severity overrides.
 # Values: "off" (disable), "warn" (warning), "error" (error)
 #
@@ -778,7 +783,7 @@ fn print_rules() {
     }
 }
 
-fn build_exclude_patterns(patterns: &[String]) -> Vec<globset::GlobMatcher> {
+fn build_glob_patterns(patterns: &[String]) -> Vec<globset::GlobMatcher> {
     patterns
         .iter()
         .filter_map(|p| {
@@ -790,10 +795,50 @@ fn build_exclude_patterns(patterns: &[String]) -> Vec<globset::GlobMatcher> {
         .collect()
 }
 
-fn collect_gdscript_files(
-    paths: &[PathBuf],
-    exclude_patterns: &[globset::GlobMatcher],
-) -> Vec<PathBuf> {
+/// Decides which paths are walked and linted, combining `exclude` and
+/// `include` globs. An `include` always wins over an `exclude`, regardless of
+/// order, so a broad exclude (e.g. `addons`) can be carved out with a narrower
+/// include (e.g. `addons/my_plugin`).
+///
+/// Excluding a directory normally prunes its whole subtree, so the walkers
+/// can't reach a nested include by matching alone. When any include is
+/// configured, they instead keep descending into excluded (non-hidden)
+/// directories, carrying an inherited-exclusion flag so only force-included
+/// paths beneath survive and their excluded siblings don't leak back in.
+/// Hidden directories (`.godot`, `.git`, …) are always pruned regardless.
+struct PathFilter {
+    exclude: Vec<globset::GlobMatcher>,
+    include: Vec<globset::GlobMatcher>,
+}
+
+impl PathFilter {
+    fn new(exclude: &[String], include: &[String]) -> Self {
+        Self {
+            exclude: build_glob_patterns(exclude),
+            include: build_glob_patterns(include),
+        }
+    }
+
+    fn is_excluded(&self, path: &str) -> bool {
+        self.exclude.iter().any(|m| m.is_match(path))
+    }
+
+    fn is_included(&self, path: &str) -> bool {
+        self.include.iter().any(|m| m.is_match(path))
+    }
+
+    fn has_includes(&self) -> bool {
+        !self.include.is_empty()
+    }
+
+    /// Whether `path` is excluded once inherited exclusion and force-includes
+    /// are resolved. Include wins over exclude (local or inherited).
+    fn resolve_excluded(&self, path: &str, subtree_excluded: bool) -> bool {
+        (subtree_excluded || self.is_excluded(path)) && !self.is_included(path)
+    }
+}
+
+fn collect_gdscript_files(paths: &[PathBuf], filter: &PathFilter) -> Vec<PathBuf> {
     let mut files = Vec::new();
 
     for path in paths {
@@ -802,7 +847,7 @@ fn collect_gdscript_files(
                 files.push(path.clone());
             }
         } else if path.is_dir() {
-            collect_from_directory(path, exclude_patterns, &mut files);
+            collect_from_directory(path, filter, false, &mut files);
         }
     }
 
@@ -812,7 +857,8 @@ fn collect_gdscript_files(
 
 fn collect_from_directory(
     dir: &Path,
-    exclude_patterns: &[globset::GlobMatcher],
+    filter: &PathFilter,
+    subtree_excluded: bool,
     files: &mut Vec<PathBuf>,
 ) {
     let entries = match std::fs::read_dir(dir) {
@@ -833,22 +879,21 @@ fn collect_from_directory(
     for entry in entries.flatten() {
         let path = entry.path();
         let path_str = path.to_string_lossy();
-
-        // Check exclude patterns.
-        if exclude_patterns
-            .iter()
-            .any(|p| p.is_match(path_str.as_ref()))
-        {
-            continue;
-        }
+        let excluded = filter.resolve_excluded(path_str.as_ref(), subtree_excluded);
 
         if path.is_dir() {
-            // Skip hidden directories.
+            // Skip hidden directories (.godot, .git, …) unconditionally.
             if entry.file_name().to_string_lossy().starts_with('.') {
                 continue;
             }
-            collect_from_directory(&path, exclude_patterns, files);
-        } else if path.extension().is_some_and(|ext| ext == "gd") {
+            // Prune an excluded directory, unless an include is configured that
+            // might live beneath it — then descend, keeping the subtree
+            // excluded-by-default so only the carve-out survives.
+            if excluded && !filter.has_includes() {
+                continue;
+            }
+            collect_from_directory(&path, filter, excluded, files);
+        } else if !excluded && path.extension().is_some_and(|ext| ext == "gd") {
             files.push(path);
         }
     }
@@ -857,30 +902,27 @@ fn collect_from_directory(
 /// Recursively collect `.tscn` / `.tres` scene/resource files under `paths`.
 /// Used by `--unsafe-fix` to rewrite editor-wired signal/method connections
 /// when a `.gd` rename would otherwise leave them stale.
-fn collect_scene_files(
-    paths: &[PathBuf],
-    exclude_patterns: &[globset::GlobMatcher],
-) -> Vec<PathBuf> {
-    fn walk(dir: &Path, exclude: &[globset::GlobMatcher], out: &mut Vec<PathBuf>) {
+fn collect_scene_files(paths: &[PathBuf], filter: &PathFilter) -> Vec<PathBuf> {
+    fn walk(dir: &Path, filter: &PathFilter, subtree_excluded: bool, out: &mut Vec<PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if exclude
-                .iter()
-                .any(|p| p.is_match(path.to_string_lossy().as_ref()))
-            {
-                continue;
-            }
+            let path_str = path.to_string_lossy();
+            let excluded = filter.resolve_excluded(path_str.as_ref(), subtree_excluded);
             if path.is_dir() {
                 if entry.file_name().to_string_lossy().starts_with('.') {
                     continue;
                 }
-                walk(&path, exclude, out);
-            } else if path
-                .extension()
-                .is_some_and(|ext| ext == "tscn" || ext == "tres")
+                if excluded && !filter.has_includes() {
+                    continue;
+                }
+                walk(&path, filter, excluded, out);
+            } else if !excluded
+                && path
+                    .extension()
+                    .is_some_and(|ext| ext == "tscn" || ext == "tres")
             {
                 out.push(path);
             }
@@ -890,9 +932,103 @@ fn collect_scene_files(
     let mut files = Vec::new();
     for path in paths {
         if path.is_dir() {
-            walk(path, exclude_patterns, &mut files);
+            walk(path, filter, false, &mut files);
         }
     }
     files.sort();
     files
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+    use std::fs;
+    use tempfile::TempDir;
+
+    /// Create an empty `.gd` file at `root/rel`, making parent directories.
+    fn touch(root: &Path, rel: &str) {
+        let path = root.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"extends Node\n").unwrap();
+    }
+
+    /// Collect `.gd` files under `root` with the given exclude/include globs,
+    /// returning their paths relative to `root` with forward slashes.
+    fn collected(root: &Path, exclude: &[&str], include: &[&str]) -> BTreeSet<String> {
+        let to_owned = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let filter = PathFilter::new(&to_owned(exclude), &to_owned(include));
+        collect_gdscript_files(&[root.to_path_buf()], &filter)
+            .into_iter()
+            .map(|p| {
+                p.strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn exclude_prunes_subtree_when_no_include() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        touch(root, "src/player.gd");
+        touch(root, "addons/plugin_a/a.gd");
+
+        let got = collected(root, &["addons"], &[]);
+        assert!(got.contains("src/player.gd"), "{:?}", got);
+        assert!(
+            !got.iter().any(|p| p.starts_with("addons/")),
+            "excluded addons must be pruned: {:?}",
+            got
+        );
+    }
+
+    #[test]
+    fn include_carves_one_plugin_out_of_excluded_addons() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        touch(root, "src/player.gd");
+        touch(root, "addons/my_plugin/main.gd");
+        touch(root, "addons/my_plugin/nested/deep.gd");
+        touch(root, "addons/third_party/lib.gd");
+
+        let got = collected(root, &["addons"], &["addons/my_plugin"]);
+        assert!(got.contains("src/player.gd"), "{:?}", got);
+        assert!(got.contains("addons/my_plugin/main.gd"), "{:?}", got);
+        // The whole included subtree is linted, nested files included.
+        assert!(got.contains("addons/my_plugin/nested/deep.gd"), "{:?}", got);
+        // A sibling plugin under the same excluded dir must not leak back in.
+        assert!(!got.contains("addons/third_party/lib.gd"), "{:?}", got);
+    }
+
+    #[test]
+    fn hidden_dirs_are_pruned_even_with_include_set() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        touch(root, ".godot/imported/cache.gd");
+        touch(root, "src/player.gd");
+
+        // A configured include must not cause hidden dirs to be walked.
+        let got = collected(root, &["addons"], &["addons/my_plugin"]);
+        assert!(got.contains("src/player.gd"), "{:?}", got);
+        assert!(
+            !got.iter().any(|p| p.starts_with(".godot/")),
+            "hidden .godot must stay pruned: {:?}",
+            got
+        );
+    }
+
+    #[test]
+    fn include_can_reinclude_a_single_file() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        touch(root, "gen/keep.gd");
+        touch(root, "gen/skip.gd");
+
+        let got = collected(root, &["gen"], &["gen/keep.gd"]);
+        assert!(got.contains("gen/keep.gd"), "{:?}", got);
+        assert!(!got.contains("gen/skip.gd"), "{:?}", got);
+    }
 }

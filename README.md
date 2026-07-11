@@ -304,6 +304,11 @@ max_inner_classes = 5
 # File/directory patterns to exclude
 exclude = [".godot", "addons"]
 
+# Patterns to force-include even when `exclude` matches them. An include always
+# wins over an exclude, so you can lint one plugin inside an otherwise-excluded
+# directory. Empty by default.
+include = ["addons/my_plugin"]
+
 # Per-rule severity overrides
 # Values: "off", "warn", "error"
 [rules]
@@ -332,6 +337,7 @@ When no config file is found, gdstyle uses these defaults:
 | `max_public_methods` | 20 |
 | `max_inner_classes` | 5 |
 | `exclude` | `[".godot", "addons"]` |
+| `include` | `[]` |
 
 Most rules are enabled by default with `warn` severity. Three advisory rules (`quality/type-hint`, `quality/empty-function`, `quality/no-debug-print`) are off by default and must be explicitly enabled.
 
