@@ -4313,6 +4313,126 @@ func test() -> Dictionary:
     );
 }
 
+#[test]
+fn quality_duplicate_dict_key_multiarg_constructor_keys_not_duplicates() {
+    // Regression (issue #23): a comma inside a multi-argument constructor
+    // call key (`Vector2i(1, 0)`) was mistaken for the dict entry separator,
+    // so the accumulated key text collapsed to the trailing fragment `0)`
+    // and distinct keys sharing that fragment were flagged as duplicates.
+    let config = default_config();
+    let source = "\
+var fp_multiline_vec2 := {
+\tVector2i(1, 0): \"a\",
+\tVector2i(2, 0): \"b\",
+\tVector2i(3, 0): \"c\",
+}
+";
+    let diagnostics = linter::lint_source(source, "test.gd", &config);
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| d.rule == "quality/duplicate-dict-key"),
+        "distinct Vector2i keys sharing a trailing coordinate must not be flagged, got: {:?}",
+        diagnostics
+            .iter()
+            .filter(|d| d.rule == "quality/duplicate-dict-key")
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn quality_duplicate_dict_key_singleline_multiarg_constructor_keys_not_duplicates() {
+    // Same false positive as above, single-line form from issue #23.
+    let config = default_config();
+    let source = "var fp := {Vector2i(10, 0): 0, Vector2i(8, 0): 2, Vector2i(4, 0): 6}\n";
+    let diagnostics = linter::lint_source(source, "test.gd", &config);
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| d.rule == "quality/duplicate-dict-key"),
+        "distinct single-line Vector2i keys must not be flagged, got: {:?}",
+        diagnostics
+            .iter()
+            .filter(|d| d.rule == "quality/duplicate-dict-key")
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn quality_duplicate_dict_key_vector3i_multiarg_constructor_keys_not_duplicates() {
+    // Three-argument constructor form from issue #23.
+    let config = default_config();
+    let source = "\
+var fp_vec3 := {
+\tVector3i(0, 1, 0): \"a\",
+\tVector3i(0, 2, 0): \"b\",
+}
+";
+    let diagnostics = linter::lint_source(source, "test.gd", &config);
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| d.rule == "quality/duplicate-dict-key"),
+        "distinct Vector3i keys sharing a trailing coordinate must not be flagged, got: {:?}",
+        diagnostics
+            .iter()
+            .filter(|d| d.rule == "quality/duplicate-dict-key")
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn quality_duplicate_dict_key_repeated_constructor_key_detected() {
+    // A genuinely repeated constructor-call key is still caught after the fix.
+    let config = default_config();
+    let source = "\
+var d := {
+\tVector2i(1, 0): \"a\",
+\tVector2i(1, 0): \"b\",
+}
+";
+    let diagnostics = linter::lint_source(source, "test.gd", &config);
+    let hits: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.rule == "quality/duplicate-dict-key")
+        .collect();
+    assert_eq!(
+        hits.len(),
+        1,
+        "a repeated constructor-call key should be flagged exactly once, got {}",
+        hits.len()
+    );
+    assert!(
+        hits[0].message.contains("Vector2i(1,0)"),
+        "message should name the full constructor-call key, got: {}",
+        hits[0].message
+    );
+}
+
+#[test]
+fn quality_duplicate_dict_key_constructor_args_not_confused_by_digit_boundary() {
+    // Vector2i(1, 23) and Vector2i(12, 3) must not collide even though naive
+    // concatenation of their digits without the comma would both yield "123".
+    let config = default_config();
+    let source = "\
+var d := {
+\tVector2i(1, 23): \"a\",
+\tVector2i(12, 3): \"b\",
+}
+";
+    let diagnostics = linter::lint_source(source, "test.gd", &config);
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| d.rule == "quality/duplicate-dict-key"),
+        "constructor keys must not collide across an argument digit boundary, got: {:?}",
+        diagnostics
+            .iter()
+            .filter(|d| d.rule == "quality/duplicate-dict-key")
+            .collect::<Vec<_>>()
+    );
+}
+
 // --- duplicated-load ---
 
 #[test]
