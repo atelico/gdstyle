@@ -1,55 +1,29 @@
-## gdstyle 0.2.3
+## gdstyle 0.2.4
 
-A patch release fixing two user-reported bugs: `--fix` corrupting
-CRLF-terminated files, and a false positive in `quality/duplicate-dict-key`
-for dictionary keys built from multi-argument constructor calls.
+A patch release fixing a false negative in `quality/duplicate-dict-key`: a
+comment inside a dictionary literal caused the rule to stop tracking keys for
+the rest of that literal.
 
 ### Fixed
 
-- **`--fix` no longer corrupts CRLF-terminated (Windows line ending) files.**
-  Diagnostic byte offsets are computed against an internally LF-normalized
-  copy of the source, but `--fix` and `--unsafe-fix` were applying those
-  offsets straight to the original CRLF source. Every `\r` before the edit
-  point shifted the insertion point left by one byte, so fixes landed
-  mid-identifier:
+- **`quality/duplicate-dict-key` no longer misses duplicates after a comment
+  in the dict literal.** A `#` comment sitting in key position (on its own
+  line, or trailing an entry's comma) was appended to the key currently being
+  accumulated, corrupting its text. The corrupted key no longer matched an
+  identical key elsewhere in the literal, so a genuine duplicate went
+  unreported:
 
   ```gdscript
-  # before --fix (CRLF file)
-  var weapon := _make({"hold_type": ..., "mp": 40})
-
-  # gdstyle 0.2.2 --fix produced (corrupted)
-  var weapon := _ma ke({"hold_type": ..., "mp" : 40})
-
-  # gdstyle 0.2.3 --fix produces
-  var weapon := _make({ "hold_type": ..., "mp": 40 })
-  ```
-
-  Fixes now normalize internally before applying replacements and restore
-  the file's original line endings afterward, so CRLF files stay CRLF. This
-  covers the CLI (`check --fix`, `check --unsafe-fix`) and the GDExtension
-  fix bindings used by the Godot editor plugin.
-  Reported in [#24](https://github.com/atelico/gdstyle/issues/24).
-
-- **`quality/duplicate-dict-key` no longer flags multi-argument constructor
-  keys as duplicates.** A comma inside a key like `Vector2i(1, 0)` was
-  mistaken for the dictionary's entry separator, so the tracked key
-  collapsed to a trailing fragment (`0)`) and unrelated keys sharing that
-  fragment were flagged:
-
-  ```gdscript
-  # gdstyle 0.2.2 incorrectly flagged these as duplicates
-  var directions := {
-      Vector2i(1, 0): "east",
-      Vector2i(2, 0): "far_east",
-      Vector2i(3, 0): "farther_east",
+  var with_comment: Dictionary = {
+      # a comment inside the dict literal
+      Vector3i(0, 0, 0): "a",
+      Vector3i(0, 0, 0): "b",  # gdstyle 0.2.3 missed this duplicate
   }
   ```
 
-  Each dictionary literal now tracks its own paren/bracket depth, so a
-  comma or colon nested inside a call or subscript is treated as part of
-  that key expression instead of the entry separator. Genuine duplicate
-  constructor-call keys are still caught.
-  Reported in [#23](https://github.com/atelico/gdstyle/issues/23).
+  Comment tokens are now skipped while scanning a dictionary literal's keys,
+  the same way blank lines already are.
+  Reported in [#27](https://github.com/atelico/gdstyle/issues/27).
 
 ### Install
 
@@ -68,7 +42,7 @@ enable the plugin in *Project > Project Settings > Plugins*.
 For the [pre-commit](https://pre-commit.com) framework, bump your config to:
 ```yaml
 - repo: https://github.com/atelico/gdstyle
-  rev: v0.2.3
+  rev: v0.2.4
   hooks:
     - id: gdstyle
     - id: gdstyle-fmt
