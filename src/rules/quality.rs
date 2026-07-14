@@ -693,7 +693,7 @@ pub fn check_duplicate_dict_key(
                     }
                 }
             }
-            TokenKind::Newline => {}
+            TokenKind::Newline | TokenKind::Comment(_) | TokenKind::DocComment(_) => {}
             _ => {
                 if let Some(frame) = stack.last_mut() {
                     push_key_part(frame, token);
