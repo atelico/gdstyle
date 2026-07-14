@@ -4456,6 +4456,61 @@ var d := {
     );
 }
 
+#[test]
+fn quality_duplicate_dict_key_detected_after_leading_comment() {
+    // A `#` comment sitting on its own line before the first key must not be
+    // absorbed into that key's text (issue #27), or the identical key later
+    // in the same literal no longer matches it.
+    let config = default_config();
+    let source = "\
+var d := {
+\t# a comment inside the dict literal
+\tVector3i(0, 0, 0): \"a\",
+\tVector3i(0, 0, 0): \"b\",
+}
+";
+    let diagnostics = linter::lint_source(source, "test.gd", &config);
+    let hits: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.rule == "quality/duplicate-dict-key")
+        .collect();
+    assert_eq!(
+        hits.len(),
+        1,
+        "a duplicate key after a leading comment should still be flagged, got {}",
+        hits.len()
+    );
+    assert!(
+        hits[0].message.contains("Vector3i(0,0,0)"),
+        "message should name the full constructor-call key, got: {}",
+        hits[0].message
+    );
+}
+
+#[test]
+fn quality_duplicate_dict_key_detected_after_trailing_comment() {
+    // A trailing `#` comment right after an entry's comma must not be
+    // absorbed into the following key's text either.
+    let config = default_config();
+    let source = "\
+var d := {
+\tVector3i(0, 0, 0): \"a\", # trailing comment
+\tVector3i(0, 0, 0): \"b\",
+}
+";
+    let diagnostics = linter::lint_source(source, "test.gd", &config);
+    let hits: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.rule == "quality/duplicate-dict-key")
+        .collect();
+    assert_eq!(
+        hits.len(),
+        1,
+        "a duplicate key after a trailing comment should still be flagged, got {}",
+        hits.len()
+    );
+}
+
 // --- duplicated-load ---
 
 #[test]
