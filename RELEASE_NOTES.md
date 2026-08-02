@@ -1,29 +1,66 @@
-## gdstyle 0.2.4
+## gdstyle 0.2.5
 
-A patch release fixing a false negative in `quality/duplicate-dict-key`: a
-comment inside a dictionary literal caused the rule to stop tracking keys for
-the rest of that literal.
+A patch release fixing two bugs found by running gdstyle across a 1100-file
+Godot 4.6 project: a formatter bug that could turn valid code into a parse
+error, and a false `error`-severity diagnostic that failed CI on valid
+GDScript. It also narrows when `format/trailing-comma` fires, which changes
+formatter output.
 
 ### Fixed
 
-- **`quality/duplicate-dict-key` no longer misses duplicates after a comment
-  in the dict literal.** A `#` comment sitting in key position (on its own
-  line, or trailing an entry's comma) was appended to the key currently being
-  accumulated, corrupting its text. The corrupted key no longer matched an
-  identical key elsewhere in the literal, so a genuine duplicate went
-  unreported:
+- **`format/one-statement-per-line` no longer splits a `;` inside an inline
+  callable body.** The rule lifted every statement after a `;` onto its own
+  line at the enclosing indent. Inside a lambda body that dropped the trailing
+  statements out of the lambda, and when the lambda was a call argument it
+  broke the argument list too, turning valid input into a parse error:
 
   ```gdscript
-  var with_comment: Dictionary = {
-      # a comment inside the dict literal
-      Vector3i(0, 0, 0): "a",
-      Vector3i(0, 0, 0): "b",  # gdstyle 0.2.3 missed this duplicate
-  }
+  _active_tween.tween_method(
+      func(v: float) -> void: _calc.visual = v; queue_redraw(),
+      from, to, duration
+  )
   ```
 
-  Comment tokens are now skipped while scanning a dictionary literal's keys,
-  the same way blank lines already are.
-  Reported in [#27](https://github.com/atelico/gdstyle/issues/27).
+  The statements after the `;` belong to the callable body, not to the
+  enclosing scope, so they cannot be lifted. This is the same shape as the
+  match arms the rule already skipped. Single-line named functions
+  (`func _ready() -> void: setup(); start()`) were affected identically and are
+  fixed too. A `;` that genuinely separates peers still splits, including
+  `add(func(): pass); other()`, where the body closes before the semicolon.
+
+- **`syntax/lex-error` no longer fires on a line continuation aligned with
+  tabs and spaces.** The lexer consumed mid-line whitespace in two sequential
+  passes, all spaces and then all tabs, which cannot handle a tab followed by
+  spaces. On a `\` continuation line indented with a tab for block depth plus
+  spaces for alignment, it skipped the tab, stopped on the first space, and
+  reported `unexpected character: ' '`:
+
+  ```gdscript
+  if a() and \
+     b():
+      return true
+  ```
+
+  Because the severity was `error`, this failed CI for anyone running
+  `gdstyle check` on perfectly valid code. Whitespace is now consumed in one
+  interleaved pass. Tabs at line start are still indentation and are still
+  handled by the indentation tracker.
+
+### Changed
+
+- **`format/trailing-comma` now only fires when the closing bracket starts its
+  own line.** Previously any collection spanning more than one line qualified,
+  so `[\n\talpha, beta])` became `[\n\talpha, beta,])`. A trailing comma earns
+  its place by keeping diffs clean when each element owns a line and the closer
+  owns the last one. When the closer trails the final element it adds churn and
+  nothing else, and black, rustfmt and prettier all require the closer on its
+  own line before adding one. A trailing comment on the last element still
+  counts as the closer owning its line, so those keep the comma.
+
+  This changes formatter output. The first `gdstyle fmt` after upgrading will
+  produce a diff on code that adopted the old shape. It is a net reduction: on
+  the 1100-file project used for testing, `format/trailing-comma` warnings drop
+  from 992 to 314.
 
 ### Install
 
@@ -42,7 +79,7 @@ enable the plugin in *Project > Project Settings > Plugins*.
 For the [pre-commit](https://pre-commit.com) framework, bump your config to:
 ```yaml
 - repo: https://github.com/atelico/gdstyle
-  rev: v0.2.4
+  rev: v0.2.5
   hooks:
     - id: gdstyle
     - id: gdstyle-fmt
