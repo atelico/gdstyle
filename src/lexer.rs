@@ -935,13 +935,23 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// Skip mid-line whitespace.
+    ///
+    /// Spaces and tabs are consumed in ONE interleaved pass. Two sequential
+    /// passes (all spaces, then all tabs) silently stranded anything after the
+    /// first tab: a `\` continuation line indented `\t   ` — a tab for block
+    /// depth plus spaces to align under the opening expression — left the
+    /// lexer sitting on a space it had already stopped skipping, which
+    /// surfaced as `unexpected character: ' '` on valid GDScript.
     fn skip_spaces(&mut self) {
-        while !self.is_at_end() && self.current_char() == ' ' {
-            self.advance();
-        }
-        // Also skip tabs if not at line start (mid-line tabs are treated as spaces).
-        while !self.is_at_end() && self.current_char() == '\t' && !self.at_line_start {
-            self.advance();
+        while !self.is_at_end() {
+            match self.current_char() {
+                ' ' => self.advance(),
+                // At line start a tab is indentation and belongs to
+                // process_indentation; mid-line it is just spacing.
+                '\t' if !self.at_line_start => self.advance(),
+                _ => return,
+            }
         }
     }
 
@@ -1326,6 +1336,34 @@ world""""#;
         let kinds = token_kinds(source);
         // The backslash-newline should be consumed, so we get a continuous expression.
         assert!(kinds.contains(&TokenKind::Plus));
+        assert!(kinds.contains(&TokenKind::Integer(2)));
+    }
+
+    #[test]
+    fn line_continuation_indented_with_tab_then_spaces() {
+        // A continuation line commonly carries a tab for block depth plus spaces
+        // to align under the opening expression. Both must be consumed: the
+        // whitespace after `\` is alignment, not indentation.
+        let source = "func f() -> bool:\n\tif a() and \\\n\t   b():\n\t\treturn true\n";
+        let kinds = token_kinds(source);
+        assert!(
+            !kinds.iter().any(|k| matches!(k, TokenKind::Error(_))),
+            "tab-then-space continuation indent must not raise a lex error, got {:?}",
+            kinds
+        );
+    }
+
+    #[test]
+    fn line_continuation_indented_with_spaces_then_tab() {
+        // The mirror ordering must work too — the skip has to interleave rather
+        // than run one pass per whitespace kind.
+        let source = "var x = 1 +\\\n   \t2\n";
+        let kinds = token_kinds(source);
+        assert!(
+            !kinds.iter().any(|k| matches!(k, TokenKind::Error(_))),
+            "space-then-tab continuation indent must not raise a lex error, got {:?}",
+            kinds
+        );
         assert!(kinds.contains(&TokenKind::Integer(2)));
     }
 
