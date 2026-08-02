@@ -564,6 +564,16 @@ pub fn check_one_statement_per_line(
                 continue;
             }
 
+            // Skip inline callable bodies: `func(v): stmt1; stmt2`. Same shape
+            // as the match arm above — the second statement belongs to the
+            // lambda, not to the enclosing scope, so moving it to a new line at
+            // the line's indent drops it out of the body. When the lambda is a
+            // call argument that also breaks the argument list, turning valid
+            // code into a parse error.
+            if is_inside_inline_callable_body(tokens, idx) {
+                continue;
+            }
+
             // Replace semicolon and any trailing whitespace with newline + indent.
             let mut replace_len = token.span.length;
             // Consume whitespace between the semicolon and the next token.
@@ -1477,6 +1487,44 @@ fn build_enum_multiline_fix(
 /// with the `:` at column < `semi_col`). Used to skip the
 /// one-statement-per-line autofix on lines where splitting `;` would orphan
 /// the second statement out of the arm.
+/// Whether the semicolon at `semi_idx` sits inside an inline callable body —
+/// `func(v): stmt1; stmt2`, or a single-line named `func foo(): a(); b()`.
+///
+/// Walks left from the semicolon, staying on its physical line, tracking
+/// bracket depth so a callable whose body already closed does not count:
+///
+/// ```gdscript
+/// add(func(): a; b)       # `;` is INSIDE the body      -> true  (don't split)
+/// add(func(): pass); b()  # body closed at `)` before `;` -> false (do split)
+/// var x: int = 1; var y: int = 2  # a `:` but no `func`   -> false (do split)
+/// ```
+///
+/// A body opened on an EARLIER line is not matched: there the statements are
+/// already indented peers, so splitting them is correct.
+fn is_inside_inline_callable_body(tokens: &[Token], semi_idx: usize) -> bool {
+    let semi_line = tokens[semi_idx].span.line;
+    // Depth relative to the semicolon: closers seen while walking left mean we
+    // have descended into a group that closes before the semicolon.
+    let mut depth: i32 = 0;
+    let mut saw_body_colon = false;
+    for token in tokens[..semi_idx].iter().rev() {
+        if token.span.line != semi_line {
+            break;
+        }
+        match token.kind {
+            TokenKind::RightParen | TokenKind::RightBracket | TokenKind::RightBrace => depth += 1,
+            TokenKind::LeftParen | TokenKind::LeftBracket | TokenKind::LeftBrace => depth -= 1,
+            // The `:` that opens the body, at the same level as the semicolon.
+            // A `:` nested deeper is a parameter or dictionary annotation.
+            TokenKind::Colon if depth == 0 => saw_body_colon = true,
+            // `func` at our own level, with its body colon already behind us.
+            TokenKind::Func if depth == 0 && saw_body_colon => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
 fn is_match_arm_line(line: &str, semi_col: usize) -> bool {
     // Find the first `:` on the line that is not part of `:=`, `::`, or a
     // string literal. We scan left to right, byte-by-byte, ignoring chars
@@ -1791,6 +1839,59 @@ mod tests {
         check_one_statement_per_line(&tokens, &file, &mut diags);
         assert_eq!(diags.len(), 1);
         assert!(diags[0].fix.is_some());
+    }
+
+    #[test]
+    fn test_semicolon_inside_inline_lambda_body_skipped() {
+        // `;` separates two statements INSIDE the lambda body. Splitting at the
+        // line indent moves `queue_redraw()` out of the lambda AND breaks the
+        // enclosing call's argument list.
+        let line = "\tfunc(v: float) -> void: _calc.visual = v; queue_redraw(),";
+        let source = format!("{}\n", line);
+        let tokens = tokenize(&source);
+        let file = make_file(&[line, ""]);
+        let mut diags = Vec::new();
+        check_one_statement_per_line(&tokens, &file, &mut diags);
+        assert!(
+            diags.is_empty(),
+            "must not split a `;` inside an inline lambda body, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn test_semicolon_inside_single_line_named_function_skipped() {
+        // Same hazard for a single-line named function: the second statement
+        // would fall out of the body.
+        let line = "func ready() -> void: setup(); start()";
+        let source = format!("{}\n", line);
+        let tokens = tokenize(&source);
+        let file = make_file(&[line, ""]);
+        let mut diags = Vec::new();
+        check_one_statement_per_line(&tokens, &file, &mut diags);
+        assert!(
+            diags.is_empty(),
+            "must not split a `;` inside a single-line function body, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn test_semicolon_after_closed_lambda_still_split() {
+        // The lambda's body ended at `)`, so this `;` genuinely separates two
+        // peer statements. The guard must NOT swallow this case.
+        let line = "add(func(): pass); other()";
+        let source = format!("{}\n", line);
+        let tokens = tokenize(&source);
+        let file = make_file(&[line, ""]);
+        let mut diags = Vec::new();
+        check_one_statement_per_line(&tokens, &file, &mut diags);
+        assert_eq!(
+            diags.len(),
+            1,
+            "a `;` after a closed lambda is a real statement separator, got {:?}",
+            diags
+        );
     }
 
     #[test]
