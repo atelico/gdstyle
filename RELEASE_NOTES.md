@@ -50,12 +50,33 @@ formatter output.
 
 - **`format/trailing-comma` now only fires when the closing bracket starts its
   own line.** Previously any collection spanning more than one line qualified,
-  so `[\n\talpha, beta])` became `[\n\talpha, beta,])`. A trailing comma earns
-  its place by keeping diffs clean when each element owns a line and the closer
-  owns the last one. When the closer trails the final element it adds churn and
-  nothing else, and black, rustfmt and prettier all require the closer on its
-  own line before adding one. A trailing comment on the last element still
-  counts as the closer owning its line, so those keep the comma.
+  so a closer sharing the last element's line still got a comma:
+
+  ```gdscript
+  # 0.2.4 rewrote this ...
+  print("%s %s" % [
+      alpha, beta])
+
+  # ... into this. 0.2.5 leaves it alone.
+  print("%s %s" % [
+      alpha, beta,])
+  ```
+
+  A trailing comma earns its place by keeping diffs clean when each element
+  owns a line and the closer owns the last one. When the closer trails the
+  final element it adds churn and nothing else, and black, rustfmt and prettier
+  all require the closer on its own line before adding one. Collections written
+  the conventional way are unaffected:
+
+  ```gdscript
+  var xs := [
+      alpha,
+      beta,   # still added, the closer owns its line
+  ]
+  ```
+
+  A trailing comment on the last element still counts as the closer owning its
+  line, so those keep the comma too.
 
   This changes formatter output. The first `gdstyle fmt` after upgrading will
   produce a diff on code that adopted the old shape. It is a net reduction: on

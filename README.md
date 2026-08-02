@@ -148,7 +148,7 @@ gdstyle ships with 56 rules organized into five categories. Most rules are enabl
 | `format/comment-spacing` | Comments must have a space after `#` | safe |
 | `format/no-unnecessary-parens` | No unnecessary parentheses in `if`/`while`/`elif` conditions | safe |
 | `format/number-literals` | Hex digits must be lowercase (`0xff`, not `0xFF`) | safe |
-| `format/one-statement-per-line` | One statement per line (no semicolons to separate statements) | safe |
+| `format/one-statement-per-line` | One statement per line (no semicolons to separate statements). Match arms and inline callable bodies are exempt, since their statements are not peers of the enclosing line | safe |
 | `format/blank-lines` | Collapse 3+ blank lines to 2 | safe |
 | `format/trailing-comma` | Trailing comma on last item of multi-line collections whose closing bracket starts its own line | safe |
 | `format/operator-spacing` | One space around binary operators | safe |
@@ -562,7 +562,7 @@ Add the following to your project's `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/atelico/gdstyle
-    rev: v0.2.2   # pin to a released tag; bump with `pre-commit autoupdate`
+    rev: v0.2.5   # pin to a released tag; bump with `pre-commit autoupdate`
     hooks:
       - id: gdstyle          # lint (fails the commit on diagnostics)
       - id: gdstyle-fmt      # format in place
