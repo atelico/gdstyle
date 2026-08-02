@@ -301,7 +301,7 @@ pub fn all_rules() -> &'static [(&'static str, &'static str)] {
         ),
         (
             "format/trailing-comma",
-            "Trailing comma on last item of multi-line collections",
+            "Trailing comma on last item of multi-line collections whose closing bracket starts its own line",
         ),
         (
             "format/operator-spacing",

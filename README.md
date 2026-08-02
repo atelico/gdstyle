@@ -150,7 +150,7 @@ gdstyle ships with 56 rules organized into five categories. Most rules are enabl
 | `format/number-literals` | Hex digits must be lowercase (`0xff`, not `0xFF`) | safe |
 | `format/one-statement-per-line` | One statement per line (no semicolons to separate statements) | safe |
 | `format/blank-lines` | Collapse 3+ blank lines to 2 | safe |
-| `format/trailing-comma` | Trailing comma on last item of multi-line collections | safe |
+| `format/trailing-comma` | Trailing comma on last item of multi-line collections whose closing bracket starts its own line | safe |
 | `format/operator-spacing` | One space around binary operators | safe |
 | `format/colon-spacing` | No space before `:`, one space after (except `:=` and end of line) | safe |
 | `format/comma-spacing` | No space before `,`, one space after (except newline / closing bracket) | safe |

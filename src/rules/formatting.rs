@@ -826,7 +826,19 @@ pub fn check_trailing_comma(
                         _ => break,
                     }
                 }
-                if last_item > i && tokens[last_item].kind != TokenKind::Comma {
+                // Only add the comma when the closer starts its own line. A
+                // trailing comma exists to keep diffs clean when each element
+                // owns a line and the closer owns the last one; `beta,])` buys
+                // nothing, and no mainstream formatter (black, rustfmt,
+                // prettier) writes it. GDScript has no block comments, so
+                // "close is on a later line than the last item" is equivalent
+                // to "close is the first non-whitespace token on its line".
+                let closer_starts_own_line = tokens[k].span.line > tokens[last_item].span.line;
+
+                if last_item > i
+                    && tokens[last_item].kind != TokenKind::Comma
+                    && closer_starts_own_line
+                {
                     let insert_offset =
                         tokens[last_item].span.offset + tokens[last_item].span.length;
                     diagnostics.push(

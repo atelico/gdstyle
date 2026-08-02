@@ -5970,3 +5970,86 @@ const myConst = 1
         normal_fixed
     );
 }
+
+#[test]
+fn trailing_comma_requires_closer_on_its_own_line() {
+    // A trailing comma pays for itself only when each element owns a line and
+    // the closer owns the last one. When the closer trails the final element,
+    // `beta,])` adds churn and buys no diff cleanliness, so the rule must stay
+    // quiet. Reported against a 247-file run where this shape produced a large
+    // fraction of the diff.
+    let config = default_config();
+
+    let closer_shares_line = "\
+extends Node
+
+func f() -> void:
+\tprint(\"%s %s\" % [
+\t\talpha, beta])
+";
+    let quiet: Vec<_> = linter::lint_source(closer_shares_line, "test.gd", &config)
+        .into_iter()
+        .filter(|d| d.rule == "format/trailing-comma")
+        .collect();
+    assert!(
+        quiet.is_empty(),
+        "trailing-comma must not fire when the closer shares the last element's line; got: {:?}",
+        quiet
+            .iter()
+            .map(|d| (d.span.line, &d.message))
+            .collect::<Vec<_>>()
+    );
+
+    // End to end: the collection itself must come out untouched. (Member
+    // spacing elsewhere in the file is normalized independently, so this
+    // asserts on the collection rather than the whole source.)
+    let formatted = formatter::format_source(closer_shares_line, &config);
+    assert!(
+        formatted.contains("alpha, beta])") && !formatted.contains("beta,]"),
+        "formatter must not insert a comma when the closer shares the last element's line; got:\n{}",
+        formatted
+    );
+
+    // The case the rule exists for still fires: closer alone on its line.
+    let closer_owns_line = "\
+extends Node
+
+var xs := [
+\talpha,
+\tbeta
+]
+";
+    assert!(
+        linter::lint_source(closer_owns_line, "test.gd", &config)
+            .iter()
+            .any(|d| d.rule == "format/trailing-comma"),
+        "trailing-comma must still fire when the closer starts its own line"
+    );
+}
+
+#[test]
+fn trailing_comma_still_fires_with_comment_before_own_line_closer() {
+    // The last element carrying a trailing comment must not be confused with
+    // the closer sharing its line: `]` still starts its own line here.
+    let config = default_config();
+    let source = "\
+extends Node
+
+var xs := [
+\talpha,
+\tbeta # note
+]
+";
+    assert!(
+        linter::lint_source(source, "test.gd", &config)
+            .iter()
+            .any(|d| d.rule == "format/trailing-comma"),
+        "a trailing comment on the last element must not suppress the rule"
+    );
+    let formatted = formatter::format_source(source, &config);
+    assert!(
+        formatted.contains("beta, # note") || formatted.contains("beta,\t# note"),
+        "comma belongs after the element, before its comment; got:\n{}",
+        formatted
+    );
+}
