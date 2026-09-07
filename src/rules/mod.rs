@@ -9,11 +9,18 @@ use crate::diagnostic::Diagnostic;
 use crate::token::Token;
 
 /// Run all enabled lint rules on a parsed script file.
+///
+/// Diagnostics come back with each rule's own default severity; the
+/// `[rules]` severity overrides are applied by [`crate::linter::lint_source`],
+/// which is the entry point most callers want.
 pub fn run_all_rules(file: &ScriptFile, tokens: &[Token], config: &Config) -> Vec<Diagnostic> {
     run_all_rules_with_source(file, tokens, config, None)
 }
 
 /// Run all enabled lint rules, optionally with source for token-gap analysis.
+///
+/// Like [`run_all_rules`], this does not apply the config's severity
+/// overrides — see [`crate::linter::lint_source`].
 pub fn run_all_rules_with_source(
     file: &ScriptFile,
     tokens: &[Token],
