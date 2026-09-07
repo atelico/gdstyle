@@ -231,7 +231,7 @@ fn fmt_also_reports_unknown_rule_names() {
 fn the_generated_config_names_only_real_rules() {
     // `gdstyle init` writes a template listing every rule. Now that an
     // unrecognised name is reported, the tool's own output must pass its
-    // own validation — this catches a rule renamed in the registry but
+    // own validation. This catches a rule renamed in the registry but
     // not in the template.
     let dir = tempfile::tempdir().expect("temp dir");
     let status = Command::new(env!("CARGO_BIN_EXE_gdstyle"))
