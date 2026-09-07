@@ -65,6 +65,33 @@ pub enum RuleSeverityConfig {
     Error,
 }
 
+impl std::str::FromStr for RuleSeverityConfig {
+    type Err = String;
+
+    /// Parse the same vocabulary TOML uses, so a severity set through an
+    /// API and one set in `gdstyle.toml` can never disagree.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use gdstyle::config::RuleSeverityConfig;
+    ///
+    /// assert_eq!("error".parse(), Ok(RuleSeverityConfig::Error));
+    /// assert!("fatal".parse::<RuleSeverityConfig>().is_err());
+    /// ```
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "off" => Ok(Self::Off),
+            "warn" => Ok(Self::Warn),
+            "error" => Ok(Self::Error),
+            other => Err(format!(
+                "unknown severity {:?}, expected one of: off, warn, error",
+                other
+            )),
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -237,6 +264,27 @@ include = ["addons/my_plugin"]
         // Existing configs that predate `include` must still parse.
         let config: Config = toml::from_str("exclude = [\"addons\"]").unwrap();
         assert!(config.include.is_empty());
+    }
+
+    #[test]
+    fn severity_config_parses_the_toml_vocabulary() {
+        use std::str::FromStr;
+        assert_eq!(
+            RuleSeverityConfig::from_str("off"),
+            Ok(RuleSeverityConfig::Off)
+        );
+        assert_eq!(
+            RuleSeverityConfig::from_str("warn"),
+            Ok(RuleSeverityConfig::Warn)
+        );
+        assert_eq!(
+            RuleSeverityConfig::from_str("error"),
+            Ok(RuleSeverityConfig::Error)
+        );
+        // "warning" is what diagnostics serialize as, but the config
+        // vocabulary is "warn", and accepting both would fork the spelling.
+        let error = RuleSeverityConfig::from_str("warning").unwrap_err();
+        assert!(error.contains("off, warn, error"), "got: {}", error);
     }
 
     #[test]

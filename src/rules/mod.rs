@@ -20,7 +20,7 @@ pub fn run_all_rules(file: &ScriptFile, tokens: &[Token], config: &Config) -> Ve
 /// Run all enabled lint rules, optionally with source for token-gap analysis.
 ///
 /// Like [`run_all_rules`], this does not apply the config's severity
-/// overrides — see [`crate::linter::lint_source`].
+/// overrides. See [`crate::linter::lint_source`].
 pub fn run_all_rules_with_source(
     file: &ScriptFile,
     tokens: &[Token],
@@ -443,4 +443,76 @@ pub fn all_rules() -> &'static [(&'static str, &'static str)] {
 
 pub fn all_rule_names() -> Vec<&'static str> {
     all_rules().iter().map(|(name, _)| *name).collect()
+}
+
+/// The `[rules]` keys in `config` that match no rule in the registry,
+/// sorted for stable output.
+///
+/// A misspelled rule name parses as valid TOML and is then silently
+/// ignored, so the config looks like it took effect when it did not.
+/// Callers surface this to the user; the registry is what decides.
+///
+/// # Example
+///
+/// ```
+/// use gdstyle::config::{Config, RuleSeverityConfig};
+/// use gdstyle::rules;
+///
+/// let mut config = Config::default();
+/// config.rules.insert("naming/variable-snake-case".to_string(), RuleSeverityConfig::Error);
+/// assert_eq!(rules::unknown_rule_names(&config), vec!["naming/variable-snake-case"]);
+/// ```
+pub fn unknown_rule_names(config: &Config) -> Vec<&str> {
+    let known = all_rule_names();
+    let mut unknown: Vec<&str> = config
+        .rules
+        .keys()
+        .map(String::as_str)
+        .filter(|name| !known.contains(name))
+        .collect();
+    unknown.sort_unstable();
+    unknown
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::RuleSeverityConfig;
+
+    #[test]
+    fn unknown_rule_names_flags_only_misspellings() {
+        let mut config = Config::default();
+        // A real rule, a near-miss typo, and something entirely made up.
+        for name in [
+            "naming/variable-name-snake-case",
+            "naming/variable-snake-case",
+            "format/tabs",
+        ] {
+            config
+                .rules
+                .insert(name.to_string(), RuleSeverityConfig::Error);
+        }
+        assert_eq!(
+            unknown_rule_names(&config),
+            vec!["format/tabs", "naming/variable-snake-case"]
+        );
+    }
+
+    #[test]
+    fn every_registry_name_is_accepted() {
+        // Guards against the registry and the validator drifting apart:
+        // a config naming every rule must report nothing unknown.
+        let mut config = Config::default();
+        for name in all_rule_names() {
+            config
+                .rules
+                .insert(name.to_string(), RuleSeverityConfig::Warn);
+        }
+        assert!(unknown_rule_names(&config).is_empty());
+    }
+
+    #[test]
+    fn default_config_has_no_unknown_rules() {
+        assert!(unknown_rule_names(&Config::default()).is_empty());
+    }
 }

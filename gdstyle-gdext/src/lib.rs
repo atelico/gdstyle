@@ -153,6 +153,40 @@ impl GdStyle {
         self.config.rules.remove(&rule_name.to_string());
     }
 
+    /// Set a rule's severity to "off", "warn", or "error", the same
+    /// vocabulary `gdstyle.toml` uses. Returns false and logs an error for
+    /// an unrecognised severity, leaving the config untouched.
+    ///
+    /// "error" is what makes a diagnostic report as an error rather than a
+    /// warning; without this, severity could only be set by loading a
+    /// config file.
+    #[func]
+    fn set_rule_severity(&mut self, rule_name: GString, severity: GString) -> bool {
+        let severity_str = severity.to_string();
+        match severity_str.parse::<gdstyle::config::RuleSeverityConfig>() {
+            Ok(parsed) => {
+                self.config.rules.insert(rule_name.to_string(), parsed);
+                true
+            }
+            Err(message) => {
+                godot_error!("gdstyle: {}", message);
+                false
+            }
+        }
+    }
+
+    /// The names in the loaded config's `[rules]` that match no known rule.
+    /// A misspelled name is silently ignored otherwise, so the config looks
+    /// like it took effect when it did nothing.
+    #[func]
+    fn unknown_rule_names(&self) -> PackedStringArray {
+        let mut arr = PackedStringArray::new();
+        for name in rules::unknown_rule_names(&self.config) {
+            arr.push(&GString::from(name));
+        }
+        arr
+    }
+
     /// Check if a specific rule is enabled.
     #[func]
     fn is_rule_enabled(&self, rule_name: GString) -> bool {
