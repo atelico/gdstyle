@@ -341,6 +341,10 @@ When no config file is found, gdstyle uses these defaults:
 
 Most rules are enabled by default with `warn` severity. Three advisory rules (`quality/type-hint`, `quality/empty-function`, `quality/no-debug-print`) are off by default and must be explicitly enabled.
 
+Severity is the CI knob: `check` exits `1` as soon as one diagnostic has
+`error` severity, and `0` when everything is a warning. Set the rules you
+want to block a build to `"error"` in `[rules]`.
+
 ## Suppressing diagnostics
 
 gdstyle has two ways to silence a warning from source: **per-line** for
@@ -599,7 +603,7 @@ When using `--format json`, gdstyle outputs a JSON array of diagnostics:
   {
     "rule": "naming/variable-name-snake-case",
     "message": "Variable 'BadName' should use snake_case: 'bad_name'",
-    "severity": "warn",
+    "severity": "warning",
     "span": {
       "line": 5,
       "column": 1

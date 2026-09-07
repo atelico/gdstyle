@@ -1,3 +1,4 @@
+use crate::diagnostic::Severity;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
@@ -137,6 +138,33 @@ impl Config {
             None => !Self::OFF_BY_DEFAULT.contains(&rule_name),
         }
     }
+
+    /// The severity a rule's diagnostics should carry, or `None` when the
+    /// config says nothing about it.
+    ///
+    /// `None` means "leave the rule's own default alone" rather than
+    /// "warning", so an error-by-default rule such as `syntax/lex-error`
+    /// keeps reporting as an error unless the config explicitly downgrades
+    /// it. `Off` also yields `None` because a disabled rule never emits.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use gdstyle::config::{Config, RuleSeverityConfig};
+    /// use gdstyle::diagnostic::Severity;
+    ///
+    /// let mut config = Config::default();
+    /// config.rules.insert("naming/function-name-snake-case".to_string(), RuleSeverityConfig::Error);
+    /// assert_eq!(config.severity_for("naming/function-name-snake-case"), Some(Severity::Error));
+    /// assert_eq!(config.severity_for("naming/variable-name-snake-case"), None);
+    /// ```
+    pub fn severity_for(&self, rule_name: &str) -> Option<Severity> {
+        match self.rules.get(rule_name) {
+            Some(RuleSeverityConfig::Warn) => Some(Severity::Warning),
+            Some(RuleSeverityConfig::Error) => Some(Severity::Error),
+            Some(RuleSeverityConfig::Off) | None => None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -209,6 +237,35 @@ include = ["addons/my_plugin"]
         // Existing configs that predate `include` must still parse.
         let config: Config = toml::from_str("exclude = [\"addons\"]").unwrap();
         assert!(config.include.is_empty());
+    }
+
+    #[test]
+    fn severity_for_maps_each_config_state() {
+        let mut config = Config::default();
+        config.rules.insert(
+            "naming/function-name-snake-case".to_string(),
+            RuleSeverityConfig::Error,
+        );
+        config
+            .rules
+            .insert("format/double-quotes".to_string(), RuleSeverityConfig::Warn);
+        config.rules.insert(
+            "format/trailing-whitespace".to_string(),
+            RuleSeverityConfig::Off,
+        );
+
+        assert_eq!(
+            config.severity_for("naming/function-name-snake-case"),
+            Some(Severity::Error)
+        );
+        assert_eq!(
+            config.severity_for("format/double-quotes"),
+            Some(Severity::Warning)
+        );
+        // Off never emits, so there is no severity to assign.
+        assert_eq!(config.severity_for("format/trailing-whitespace"), None);
+        // Unmentioned rules keep whatever severity the rule itself picked.
+        assert_eq!(config.severity_for("naming/variable-name-snake-case"), None);
     }
 
     #[test]
