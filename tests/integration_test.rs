@@ -6053,3 +6053,55 @@ var xs := [
         formatted
     );
 }
+
+/// End-to-end reproduction of the reported severity bug: a `gdstyle.toml`
+/// setting rules to `"error"` next to a file that violates them. Before the
+/// fix both diagnostics came back as warnings and the summary read
+/// "2 warnings found", so `check` exited 0 and CI stayed green.
+#[test]
+fn toml_error_severity_reaches_diagnostics_and_summary() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        dir.path().join("gdstyle.toml"),
+        "[rules]\n\
+         \"naming/variable-name-snake-case\" = \"error\"\n\
+         \"naming/function-name-snake-case\" = \"error\"\n",
+    )
+    .expect("write config");
+
+    let script = dir.path().join("bad_test.gd");
+    std::fs::write(
+        &script,
+        "extends Node\n\nvar BadName: int = 5\n\nfunc DoThing() -> void:\n\tpass\n",
+    )
+    .expect("write script");
+
+    let config = Config::find_and_load(dir.path());
+    let diagnostics = linter::lint_file(&script, &config).expect("lint");
+
+    assert_eq!(
+        diagnostics.len(),
+        2,
+        "expected exactly the two naming diagnostics, got: {:?}",
+        diagnostics
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .all(|d| d.severity == gdstyle::diagnostic::Severity::Error),
+        "rules configured as \"error\" must report as errors, got: {:?}",
+        diagnostics
+    );
+
+    // `check` exits 1 on exactly this predicate (see `run_check` in main.rs).
+    assert!(diagnostics
+        .iter()
+        .any(|d| d.severity == gdstyle::diagnostic::Severity::Error));
+
+    let summary = gdstyle::reporter::format_summary(&diagnostics, 1);
+    assert!(
+        summary.contains("2 errors") && !summary.contains("warning"),
+        "summary should count errors, not warnings; got: {}",
+        summary
+    );
+}

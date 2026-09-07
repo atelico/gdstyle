@@ -53,6 +53,10 @@ struct Cli {
     #[arg(long)]
     max_line_length: Option<usize>,
 
+    /// Exit 1 when more than this many warnings are found.
+    #[arg(long)]
+    max_warnings: Option<usize>,
+
     /// Disable colored output.
     #[arg(long)]
     no_color: bool,
@@ -101,6 +105,10 @@ enum Commands {
         /// Maximum line length override.
         #[arg(long)]
         max_line_length: Option<usize>,
+
+        /// Exit 1 when more than this many warnings are found.
+        #[arg(long)]
+        max_warnings: Option<usize>,
 
         /// Disable colored output.
         #[arg(long)]
@@ -155,19 +163,21 @@ fn main() {
             select,
             ignore,
             max_line_length,
+            max_warnings,
             no_color,
         }) => {
-            run_check(
-                &paths,
+            run_check(CheckOptions {
+                paths: &paths,
                 fix,
                 unsafe_fix,
-                &format,
-                config.as_deref(),
-                select.as_deref(),
-                ignore.as_deref(),
+                format: &format,
+                config_path: config.as_deref(),
+                select: select.as_deref(),
+                ignore: ignore.as_deref(),
                 max_line_length,
+                max_warnings,
                 no_color,
-            );
+            });
         }
         Some(Commands::Fmt {
             paths,
@@ -188,33 +198,70 @@ fn main() {
             run_init(force);
         }
         None => {
-            run_check(
-                &cli.paths,
-                cli.fix,
-                cli.unsafe_fix,
-                &cli.format,
-                cli.config.as_deref(),
-                cli.select.as_deref(),
-                cli.ignore.as_deref(),
-                cli.max_line_length,
-                cli.no_color,
-            );
+            run_check(CheckOptions {
+                paths: &cli.paths,
+                fix: cli.fix,
+                unsafe_fix: cli.unsafe_fix,
+                format: &cli.format,
+                config_path: cli.config.as_deref(),
+                select: cli.select.as_deref(),
+                ignore: cli.ignore.as_deref(),
+                max_line_length: cli.max_line_length,
+                max_warnings: cli.max_warnings,
+                no_color: cli.no_color,
+            });
         }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn run_check(
-    paths: &[PathBuf],
+/// Everything `run_check` needs from the CLI. The same options are
+/// reachable both as `gdstyle check ...` and as a bare `gdstyle ...`, so
+/// bundling them keeps the two call sites from drifting apart as flags
+/// are added.
+struct CheckOptions<'a> {
+    paths: &'a [PathBuf],
     fix: bool,
     unsafe_fix: bool,
-    format: &str,
-    config_path: Option<&Path>,
-    select: Option<&str>,
-    ignore: Option<&str>,
+    format: &'a str,
+    config_path: Option<&'a Path>,
+    select: Option<&'a str>,
+    ignore: Option<&'a str>,
     max_line_length: Option<usize>,
+    max_warnings: Option<usize>,
     no_color: bool,
-) {
+}
+
+/// Warn about `[rules]` entries naming no known rule. A misspelled name
+/// is valid TOML and is then ignored, so without this the config looks
+/// like it took effect when it silently did nothing.
+fn warn_unknown_rules(config: &Config) {
+    let unknown = rules::unknown_rule_names(config);
+    if unknown.is_empty() {
+        return;
+    }
+    eprintln!(
+        "{}: unknown rule {} in [rules]: {}",
+        "warning".yellow(),
+        if unknown.len() == 1 { "name" } else { "names" },
+        unknown.join(", ")
+    );
+    eprintln!("         run `gdstyle rules` to see the available rules");
+}
+
+fn run_check(options: CheckOptions) {
+    let CheckOptions {
+        paths,
+        fix,
+        unsafe_fix,
+        format,
+        config_path,
+        select,
+        ignore,
+        max_line_length,
+        max_warnings,
+        no_color,
+    } = options;
+
     if no_color {
         colored::control::set_override(false);
     }
@@ -233,6 +280,8 @@ fn run_check(
             Config::find_and_load(&cwd)
         }
     };
+
+    warn_unknown_rules(&config);
 
     // Apply CLI overrides.
     if let Some(max_len) = max_line_length {
@@ -502,6 +551,26 @@ fn run_check(
     if has_errors {
         process::exit(1);
     }
+
+    // `--max-warnings` is the escape hatch for projects that want CI to
+    // fail on warnings without escalating every rule to "error". Reported
+    // on stderr so `--format json` keeps stdout machine-readable.
+    if let Some(limit) = max_warnings {
+        let warning_count = all_diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Warning)
+            .count();
+        if warning_count > limit {
+            eprintln!(
+                "{}: {} warning{} found, exceeding the --max-warnings limit of {}",
+                "error".red(),
+                warning_count,
+                if warning_count == 1 { "" } else { "s" },
+                limit
+            );
+            process::exit(1);
+        }
+    }
 }
 
 fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path>, no_color: bool) {
@@ -522,6 +591,10 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
             Config::find_and_load(&cwd)
         }
     };
+
+    // `fmt` applies safe lint fixes too, so a typo'd rule name silently
+    // changes what gets formatted just as it changes what gets reported.
+    warn_unknown_rules(&config);
 
     let filter = PathFilter::new(&config.exclude, &config.include);
     let files = collect_gdscript_files(paths, &filter);

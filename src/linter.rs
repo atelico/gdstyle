@@ -68,6 +68,16 @@ pub fn lint_source(source: &str, file_path: &str, config: &Config) -> Vec<Diagno
     // Filter out suppressed diagnostics.
     diagnostics.retain(|d| !is_suppressed(d, &suppressed_lines));
 
+    // Apply per-rule severity overrides from the config. Rules build their
+    // diagnostics with a fixed default severity; this is the single place
+    // that knows what the user asked for. Every surface (CLI, GDExtension,
+    // formatter) funnels through here, so one pass covers them all.
+    for diagnostic in &mut diagnostics {
+        if let Some(severity) = config.severity_for(&diagnostic.rule) {
+            diagnostic.severity = severity;
+        }
+    }
+
     diagnostics
 }
 
@@ -486,6 +496,67 @@ func take_damage(amount: int) -> void:
         assert!(!diagnostics
             .iter()
             .any(|d| d.rule == "naming/class-name-pascal-case"));
+    }
+
+    #[test]
+    fn config_escalates_rule_to_error() {
+        // The reported bug: `"rule" = "error"` parsed fine but every
+        // diagnostic still came out as a warning, so `check` exited 0.
+        let source = "var BadName: int = 5\n\nfunc DoThing() -> void:\n\tpass\n";
+        let mut config = Config::default();
+        for rule in [
+            "naming/variable-name-snake-case",
+            "naming/function-name-snake-case",
+        ] {
+            config
+                .rules
+                .insert(rule.to_string(), crate::config::RuleSeverityConfig::Error);
+        }
+
+        let diagnostics = lint_source(source, "bad_test.gd", &config);
+        let escalated: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.rule.starts_with("naming/"))
+            .collect();
+        assert_eq!(escalated.len(), 2, "got: {:?}", diagnostics);
+        assert!(
+            escalated
+                .iter()
+                .all(|d| d.severity == crate::diagnostic::Severity::Error),
+            "configured rules must report as errors, got: {:?}",
+            escalated
+        );
+    }
+
+    #[test]
+    fn unconfigured_rule_keeps_default_warning_severity() {
+        let source = "var BadName: int = 5\n";
+        let diagnostics = lint_source(source, "test.gd", &Config::default());
+        let diagnostic = diagnostics
+            .iter()
+            .find(|d| d.rule == "naming/variable-name-snake-case")
+            .expect("naming diagnostic");
+        assert_eq!(diagnostic.severity, crate::diagnostic::Severity::Warning);
+    }
+
+    #[test]
+    fn config_downgrades_error_by_default_rule() {
+        // `syntax/lex-error` is the one rule that defaults to Error. An
+        // unmentioned rule must keep that default (guarded by
+        // `lint_surfaces_unterminated_string_as_error`), but an explicit
+        // `"warn"` must still be able to downgrade it.
+        let source = "var x = \"oops\nvar y = 5\n";
+        let mut config = Config::default();
+        config.rules.insert(
+            "syntax/lex-error".to_string(),
+            crate::config::RuleSeverityConfig::Warn,
+        );
+        let diagnostics = lint_source(source, "test.gd", &config);
+        let lex_error = diagnostics
+            .iter()
+            .find(|d| d.rule == "syntax/lex-error")
+            .expect("lex error diagnostic");
+        assert_eq!(lex_error.severity, crate::diagnostic::Severity::Warning);
     }
 
     #[test]

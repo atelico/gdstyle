@@ -341,6 +341,22 @@ When no config file is found, gdstyle uses these defaults:
 
 Most rules are enabled by default with `warn` severity. Three advisory rules (`quality/type-hint`, `quality/empty-function`, `quality/no-debug-print`) are off by default and must be explicitly enabled.
 
+Severity is the CI knob: `check` exits `1` as soon as one diagnostic has
+`error` severity, and `0` when everything is a warning. Set the rules you
+want to block a build to `"error"` in `[rules]`, or use
+[`--max-warnings <N>`](#exit-codes) to cap warnings without escalating
+individual rules.
+
+A `[rules]` key that matches no known rule is reported on stderr rather
+than silently ignored, so a typo doesn't look like a setting that took
+effect:
+
+```
+$ gdstyle check
+warning: unknown rule name in [rules]: naming/variable-snake-case
+         run `gdstyle rules` to see the available rules
+```
+
 ## Suppressing diagnostics
 
 gdstyle has two ways to silence a warning from source: **per-line** for
@@ -504,6 +520,7 @@ gdstyle [COMMAND] [OPTIONS] [PATHS]...
 | `--select <RULES>` | Only check specific rules (comma-separated, supports partial matching) |
 | `--ignore <RULES>` | Ignore specific rules (comma-separated) |
 | `--max-line-length <N>` | Override the maximum line length |
+| `--max-warnings <N>` | Exit 1 when more than N warnings are found |
 | `--no-color` | Disable colored output |
 
 ### `fmt` options
@@ -526,8 +543,13 @@ gdstyle [COMMAND] [OPTIONS] [PATHS]...
 | Code | Meaning |
 |------|---------|
 | `0` | Linting/formatting completed (warnings only, or no issues) |
-| `1` | Linting completed with errors, or `fmt --check` found changes |
+| `1` | Linting completed with errors, `--max-warnings` was exceeded, or `fmt --check` found changes |
 | `2` | Configuration error |
+
+There are two ways to make warnings fail a build. Set the rules you care
+about to `"error"` in `[rules]` to fail on those specifically, or pass
+`--max-warnings <N>` to cap the total regardless of rule. `--max-warnings 0`
+means "no warnings at all"; `--max-warnings 5` fails only at six or more.
 
 ## CI/CD integration
 
@@ -552,6 +574,9 @@ jobs:
 
       - name: Lint GDScript files
         run: gdstyle check
+
+      # Or fail on warnings too, without escalating individual rules:
+      # run: gdstyle check --max-warnings 0
 ```
 
 ### Pre-commit hook
@@ -599,7 +624,7 @@ When using `--format json`, gdstyle outputs a JSON array of diagnostics:
   {
     "rule": "naming/variable-name-snake-case",
     "message": "Variable 'BadName' should use snake_case: 'bad_name'",
-    "severity": "warn",
+    "severity": "warning",
     "span": {
       "line": 5,
       "column": 1
@@ -766,6 +791,14 @@ style.fix_at_line("res://player.gd", 12, "naming/variable-name-snake-case")
 style.set_max_line_length(120)
 style.disable_rule("format/double-quotes")
 style.load_config_res("res://gdstyle.toml")
+
+# Set a rule's severity: "off", "warn", or "error", the same vocabulary
+# gdstyle.toml uses. Returns false and logs an error for anything else.
+style.set_rule_severity("naming/variable-name-snake-case", "error")
+
+# Report [rules] keys in the loaded config that match no known rule.
+for name in style.unknown_rule_names():
+    push_warning("gdstyle: unknown rule name %s" % name)
 
 # Collect the project's .gd files the config would lint (honors exclude/include).
 # Load the config first so the walk reflects it.

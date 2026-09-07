@@ -43,6 +43,11 @@ var _gdstyle_path: String = OS.get_environment("HOME").path_join(".local/bin/gds
 var _use_gdextension: bool = false
 var _native_linter: RefCounted = null
 
+# Config file whose unknown rule names we've already reported. Warning is
+# one-shot per config because _load_nearest_config() runs on every lint,
+# and repeating it on each save would bury the output log.
+var _rules_warned_for_config: String = ""
+
 
 func _ready() -> void:
 	_detect_backend()
@@ -973,6 +978,7 @@ func _load_nearest_config(res_path: String) -> void:
 			var candidate := dir.path_join(name)
 			if FileAccess.file_exists(candidate):
 				_native_linter.load_config_res(candidate)
+				_warn_unknown_rules(candidate)
 				return
 		if dir == "res://":
 			break
@@ -981,6 +987,30 @@ func _load_nearest_config(res_path: String) -> void:
 			break
 		dir = parent
 	_native_linter.reset_config()
+	_rules_warned_for_config = ""
+
+
+## Report [rules] keys in [param config_path] that name no known rule.
+## A misspelled name parses fine and is then ignored, so without this the
+## config looks like it took effect when it silently did nothing.
+func _warn_unknown_rules(config_path: String) -> void:
+	if _rules_warned_for_config == config_path:
+		return
+	# An older GDExtension binary predates this method. Version skew must
+	# not break lint-on-save, which runs through here on every save.
+	if not _native_linter.has_method("unknown_rule_names"):
+		return
+	_rules_warned_for_config = config_path
+	var unknown: PackedStringArray = _native_linter.unknown_rule_names()
+	if unknown.is_empty():
+		return
+	push_warning(
+		"gdstyle: unknown rule %s in %s: %s" % [
+			"name" if unknown.size() == 1 else "names",
+			config_path,
+			", ".join(unknown),
+		]
+	)
 
 
 func _save_settings() -> void:
