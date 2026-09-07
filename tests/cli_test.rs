@@ -260,3 +260,46 @@ fn the_generated_config_names_only_real_rules() {
         );
     }
 }
+
+#[test]
+fn issue_29_full_user_config() {
+    // The reporter's own files, kept verbatim in tests/fixtures/issue29:
+    // a config setting every rule to "error" and a script violating two of
+    // them. Reported as warnings with exit 0; must be errors with exit 1.
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("issue29");
+    let output = check(
+        &fixtures.join("gdstyle.toml"),
+        &fixtures.join("bad_test.gd"),
+        &[],
+    );
+    let stdout = stdout_of(&output);
+
+    assert_eq!(output.status.code(), Some(1), "stdout:\n{}", stdout);
+    assert!(stdout.contains("2 errors found"), "got:\n{}", stdout);
+    for expected in [
+        "3:1 error variable name \'BadName\'",
+        "5:1 error function name \'DoThing\'",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "missing {:?}; got:\n{}",
+            expected,
+            stdout
+        );
+    }
+    assert!(
+        !stdout.contains("warning"),
+        "nothing should report as a warning; got:\n{}",
+        stdout
+    );
+    // Every name in that config is real, so it must not trip the new
+    // unknown-rule warning either.
+    assert!(
+        !stderr_of(&output).contains("unknown rule"),
+        "the reported config is valid; got stderr:\n{}",
+        stderr_of(&output)
+    );
+}

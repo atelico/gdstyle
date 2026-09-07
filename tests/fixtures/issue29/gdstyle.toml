@@ -1,0 +1,71 @@
+# gdstyle.toml: starter configuration
+#
+# Place this file as `gdstyle.toml` or `.gdstyle.toml` in your project root.
+# gdstyle will search for it starting from the current directory and walking
+# up the directory tree.
+
+# Maximum line length (default: 100)
+max_line_length = 100
+
+# Use tabs for indentation (default: true).
+# Set to false if your project uses spaces.
+use_tabs = true
+
+# Maximum function body length in lines (default: 50)
+max_function_length = 50
+
+# Maximum file length in lines (default: 1000)
+max_file_length = 500
+
+# Maximum number of function parameters (default: 5)
+max_parameters = 5
+
+# File and directory patterns to exclude from linting.
+# These are matched as glob patterns against file paths.
+exclude = [".godot", "addons"]
+
+# Per-rule severity overrides.
+# Values: "off" (disable), "warn" (warning), "error" (error)
+#
+# All rules are enabled with "warn" severity by default.
+# Uncomment any line below to change its severity.
+[rules]
+# --- Naming ---
+"naming/class-name-pascal-case" = "error"
+"naming/function-name-snake-case" = "error"
+"naming/variable-name-snake-case" = "error"
+"naming/constant-name-screaming-case" = "error"
+"naming/signal-name-snake-case" = "error"
+"naming/enum-name-pascal-case" = "error"
+"naming/enum-member-screaming-case" = "error"
+"naming/file-name-snake-case" = "error"
+"naming/signal-past-tense" = "error"
+"naming/private-underscore-prefix" = "error"
+"naming/node-name-pascal-case" = "error"
+
+# --- Formatting ---
+"format/max-line-length" = "error"
+"format/trailing-whitespace" = "error"
+"format/trailing-newline" = "error"
+"format/no-tabs-as-spaces" = "error"
+"format/boolean-operators" = "error"
+"format/double-quotes" = "error"
+"format/comment-spacing" = "error"
+"format/no-unnecessary-parens" = "error"
+"format/number-literals" = "error"
+"format/one-statement-per-line" = "error"
+"format/blank-lines" = "error"
+"format/trailing-comma" = "error"
+"format/operator-spacing" = "error"
+"format/float-literal-zeros" = "error"
+"format/large-number-underscores" = "error"
+"format/enum-one-per-line" = "error"
+
+# --- Ordering ---
+"order/class-member-order" = "error"
+
+# --- Quality ---
+"quality/max-function-length" = "error"
+"quality/max-file-length" = "error"
+"quality/max-parameters" = "error"
+"quality/no-debug-print" = "error"
