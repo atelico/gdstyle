@@ -1,87 +1,102 @@
-## gdstyle 0.2.5
+## gdstyle 0.3.0
 
-A patch release fixing two bugs found by running gdstyle across a 1100-file
-Godot 4.6 project: a formatter bug that could turn valid code into a parse
-error, and a false `error`-severity diagnostic that failed CI on valid
-GDScript. It also narrows when `format/trailing-comma` fires, which changes
-formatter output.
+Per-rule `"error"` severity never actually worked. It parsed, and was then
+thrown away, so every diagnostic printed as a warning and `gdstyle check`
+always exited `0`. If you set rules to `"error"` expecting CI to fail on
+them, it never did. This release fixes that and closes the two gaps that
+made it hard to notice, plus adds a way to fail a build on warnings without
+escalating rules one at a time.
 
 ### Fixed
 
-- **`format/one-statement-per-line` no longer splits a `;` inside an inline
-  callable body.** The rule lifted every statement after a `;` onto its own
-  line at the enclosing indent. Inside a lambda body that dropped the trailing
-  statements out of the lambda, and when the lambda was a call argument it
-  broke the argument list too, turning valid input into a parse error:
+- **`"error"` severity in `[rules]` is now applied to diagnostics.**
+  `Config::rules` is three-valued (`"off"`, `"warn"`, `"error"`), but the
+  only code reading it collapsed that to a boolean, "is this rule on?". The
+  `"warn"` versus `"error"` distinction was parsed and discarded, so every
+  rule emitted a warning. Because `check` exits `1` only when it sees an
+  error-severity diagnostic, no configuration could fail a build:
 
-  ```gdscript
-  _active_tween.tween_method(
-      func(v: float) -> void: _calc.visual = v; queue_redraw(),
-      from, to, duration
-  )
+  ```toml
+  [rules]
+  "naming/variable-name-snake-case" = "error"
+  "naming/function-name-snake-case" = "error"
   ```
 
-  The statements after the `;` belong to the callable body, not to the
-  enclosing scope, so they cannot be lifted. This is the same shape as the
-  match arms the rule already skipped. Single-line named functions
-  (`func _ready() -> void: setup(); start()`) were affected identically and are
-  fixed too. A `;` that genuinely separates peers still splits, including
-  `add(func(): pass); other()`, where the body closes before the semicolon.
+  ```
+  # 0.2.5
+  3:1 warning variable name 'BadName' should use snake_case ...
+  5:1 warning function name 'DoThing' should use snake_case ...
+  1 file checked, 2 warnings found.        $? = 0
 
-- **`syntax/lex-error` no longer fires on a line continuation aligned with
-  tabs and spaces.** The lexer consumed mid-line whitespace in two sequential
-  passes, all spaces and then all tabs, which cannot handle a tab followed by
-  spaces. On a `\` continuation line indented with a tab for block depth plus
-  spaces for alignment, it skipped the tab, stopped on the first space, and
-  reported `unexpected character: ' '`:
-
-  ```gdscript
-  if a() and \
-     b():
-      return true
+  # 0.3.0
+  3:1 error variable name 'BadName' should use snake_case ...
+  5:1 error function name 'DoThing' should use snake_case ...
+  1 file checked, 2 errors found.          $? = 1
   ```
 
-  Because the severity was `error`, this failed CI for anyone running
-  `gdstyle check` on perfectly valid code. Whitespace is now consumed in one
-  interleaved pass. Tabs at line start are still indentation and are still
-  handled by the indentation tracker.
+  Severity is now applied in `lint_source`, the single entry point the CLI,
+  the GDExtension and the formatter all share, so the CLI, `--format json`
+  and the Godot editor panel agree. A rule you say nothing about keeps its
+  own default, which leaves `syntax/lex-error` an error while still letting
+  an explicit `"warn"` downgrade it.
 
-### Changed
+  Reported in [#29](https://github.com/atelico/gdstyle/issues/29), with a
+  complete reproduction that is now pinned as a regression fixture.
 
-- **`format/trailing-comma` now only fires when the closing bracket starts its
-  own line.** Previously any collection spanning more than one line qualified,
-  so a closer sharing the last element's line still got a comma:
+### Added
 
-  ```gdscript
-  # 0.2.4 rewrote this ...
-  print("%s %s" % [
-      alpha, beta])
+- **Unknown rule names in `[rules]` are reported instead of ignored.** A
+  misspelled key is valid TOML and used to be dropped on the floor, so a
+  config looked like it had taken effect when it silently did nothing. This
+  is the failure mode that made the severity bug above hard to tell apart
+  from a typo:
 
-  # ... into this. 0.2.5 leaves it alone.
-  print("%s %s" % [
-      alpha, beta,])
+  ```
+  $ gdstyle check
+  warning: unknown rule name in [rules]: naming/variable-snake-case
+           run `gdstyle rules` to see the available rules
   ```
 
-  A trailing comma earns its place by keeping diffs clean when each element
-  owns a line and the closer owns the last one. When the closer trails the
-  final element it adds churn and nothing else, and black, rustfmt and prettier
-  all require the closer on its own line before adding one. Collections written
-  the conventional way are unaffected:
+  Both `check` and `fmt` report them (`fmt` applies safe lint fixes, so a
+  typo changes what gets formatted too), and the editor plugin pushes a
+  warning once per config file. It is a warning rather than a hard error:
+  an unknown key is harmless, and failing outright would break configs
+  written against a different version.
 
-  ```gdscript
-  var xs := [
-      alpha,
-      beta,   # still added, the closer owns its line
-  ]
+- **`gdstyle check --max-warnings <N>`** exits `1` when more than `N`
+  warnings are found. Previously, a default config had no way to fail CI on
+  warnings at all, short of escalating rules to `"error"` one by one:
+
+  ```bash
+  gdstyle check --max-warnings 0   # no warnings tolerated
+  gdstyle check --max-warnings 20  # fails at 21
   ```
 
-  A trailing comment on the last element still counts as the closer owning its
-  line, so those keep the comma too.
+  `N` is a maximum, so exactly `N` warnings still passes. The explanation
+  goes to stderr, which keeps `--format json` stdout machine-readable.
 
-  This changes formatter output. The first `gdstyle fmt` after upgrading will
-  produce a diff on code that adopted the old shape. It is a net reduction: on
-  the 1100-file project used for testing, `format/trailing-comma` warnings drop
-  from 992 to 314.
+- **`GdStyle.set_rule_severity(rule, severity)` in GDScript**, taking the
+  same `"off"` / `"warn"` / `"error"` vocabulary as `gdstyle.toml`. It sits
+  alongside the existing `disable_rule` and `enable_rule`; until now,
+  severity could only be set by loading a config file. `GdStyle.unknown_rule_names()`
+  exposes the validation above to plugin code:
+
+  ```gdscript
+  var style = GdStyle.new()
+  style.set_rule_severity("naming/variable-name-snake-case", "error")
+
+  for name in style.unknown_rule_names():
+      push_warning("gdstyle: unknown rule name %s" % name)
+  ```
+
+### Internal
+
+- The release workflow validates `CARGO_REGISTRY_TOKEN` before anything is
+  published. `publish-crates` runs after the GitHub release, so an expired
+  token used to surface only once the release and all 9 assets were already
+  out, leaving a tag that never reached crates.io.
+- The JSON output example in the README said `"severity": "warn"`; the
+  serialized value is `"warning"`.
 
 ### Install
 
@@ -100,12 +115,21 @@ enable the plugin in *Project > Project Settings > Plugins*.
 For the [pre-commit](https://pre-commit.com) framework, bump your config to:
 ```yaml
 - repo: https://github.com/atelico/gdstyle
-  rev: v0.2.5
+  rev: v0.3.0
   hooks:
     - id: gdstyle
     - id: gdstyle-fmt
 ```
 or run `pre-commit autoupdate`.
+
+### Upgrading
+
+If your `gdstyle.toml` already sets rules to `"error"`, this release starts
+enforcing them and `gdstyle check` may begin failing where it previously
+passed. That is the fix working, but it can arrive as a surprise in CI. To
+see what will change before you upgrade the pipeline, run `gdstyle check`
+locally and look at the error count, or set the rules back to `"warn"` and
+adopt `--max-warnings` instead.
 
 Full documentation, rule list, configuration reference, and the GDExtension API
 live in the [README](./README.md).
