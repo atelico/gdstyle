@@ -4,6 +4,9 @@ on:
   push:
     tags:
       - "v*"
+  # Lets the crates.io token be checked on demand, without cutting a release.
+  # On a manual run only `preflight` executes; every other job is push-gated.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -12,8 +15,51 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # `publish-crates` runs *after* `release`, so an expired CARGO_REGISTRY_TOKEN
+  # would otherwise surface only once the GitHub release and all 9 assets were
+  # already published, leaving a tag that never reaches crates.io. Checking the
+  # token up front turns that into a clean pre-release failure.
+  preflight:
+    name: Preflight - crates.io token
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify CARGO_REGISTRY_TOKEN
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -uo pipefail
+          if [ -z "${CARGO_REGISTRY_TOKEN}" ]; then
+            echo "::error::CARGO_REGISTRY_TOKEN is not set. Add it at Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
+          body=$(mktemp)
+          status=$(curl -sS -o "$body" -w '%{http_code}' \
+            -H "Authorization: ${CARGO_REGISTRY_TOKEN}" \
+            -H 'User-Agent: gdstyle-release (github.com/atelico/gdstyle)' \
+            https://crates.io/api/v1/me) || status=000
+
+          if [ "$status" = "200" ]; then
+            echo "crates.io accepted the token."
+            echo "Note: crates.io exposes token *expiry* only on the website;"
+            echo "check https://crates.io/settings/tokens for the expiry date."
+            exit 0
+          fi
+
+          # Only "authentication failed" unambiguously means the token is
+          # expired/revoked. Anything else (network blip, scope rule, outage)
+          # is inconclusive, and must not block a release on its own.
+          if grep -q 'authentication failed' "$body"; then
+            echo "::error::crates.io rejected CARGO_REGISTRY_TOKEN - it is expired or revoked. Generate a new one at https://crates.io/settings/tokens and update the repository secret."
+            exit 1
+          fi
+
+          echo "::warning::Could not verify CARGO_REGISTRY_TOKEN (HTTP $status). Continuing; the publish step may still fail."
+          head -c 400 "$body" || true
+
   build-cli:
     name: CLI - ${{ matrix.target }}
+    if: github.event_name == 'push'
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -62,6 +108,7 @@ jobs:
 
   build-gdextension:
     name: GDExtension - ${{ matrix.target }}
+    if: github.event_name == 'push'
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -110,6 +157,7 @@ jobs:
 
   package-godot-plugin:
     name: Package Godot plugin
+    if: github.event_name == 'push'
     needs: build-gdextension
     runs-on: ubuntu-latest
     steps:
@@ -171,7 +219,8 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: [build-cli, build-gdextension, package-godot-plugin]
+    if: github.event_name == 'push'
+    needs: [preflight, build-cli, build-gdextension, package-godot-plugin]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -193,6 +242,7 @@ jobs:
 
   publish-crates:
     name: Publish to crates.io
+    if: github.event_name == 'push'
     needs: release
     runs-on: ubuntu-latest
     steps:
