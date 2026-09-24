@@ -178,6 +178,10 @@ jobs:
           cp godot-plugin/addons/gdstyle/gdstyle_panel.gd plugin-package/addons/gdstyle/
           cp godot-plugin/addons/gdstyle/gdstyle.gdextension plugin-package/addons/gdstyle/
 
+          # Ship the license inside the addon folder, where users actually
+          # end up with it. Copied from the repo root so it can't go stale.
+          cp LICENSE plugin-package/addons/gdstyle/LICENSE
+
           # Sync plugin.cfg version to the git tag (e.g. v0.1.0 -> 0.1.0)
           # so the asset library listing always matches the release.
           TAG_VERSION="${GITHUB_REF_NAME#v}"
