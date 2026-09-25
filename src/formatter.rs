@@ -754,14 +754,27 @@ fn try_break_line(line: &str, config: &Config) -> Option<Vec<String>> {
     Some(broken)
 }
 
-/// Track whether the scanner is currently inside a string literal, including
-/// raw / `&` / `^` prefixed strings (no escape processing) and respecting
-/// the prior char so `r"foo\"bar"` terminates at the literal `"`.
+/// Track whether the scanner is currently inside a string literal.
+///
+/// A backslash always skips the next character, prefixed strings included:
+/// Godot won't let `\"` close a raw string either (`r"foo\"bar"` is one
+/// literal), so raw strings end exactly where escaped ones do.
+///
+/// Triple-quoted strings (`"""..."""`, `'''...'''`) close only on three
+/// unescaped quotes in a row. The scanner has no lookahead, so it reads `""`
+/// as an empty string and upgrades it to a triple-quoted one when the same
+/// quote follows immediately.
 struct StringScanner {
     in_string: bool,
     quote: char,
     escaped: bool,
-    raw: bool,
+    is_triple: bool,
+    /// Unescaped closing quotes seen in a row inside a triple-quoted string.
+    closing_quote_run: u8,
+    /// Characters consumed since the opening quote(s), to recognise `""`.
+    content_length: usize,
+    /// The previous character closed an empty `""`/`''` string.
+    just_closed_empty_string: bool,
 }
 
 impl StringScanner {
@@ -770,34 +783,54 @@ impl StringScanner {
             in_string: false,
             quote: '"',
             escaped: false,
-            raw: false,
+            is_triple: false,
+            closing_quote_run: 0,
+            content_length: 0,
+            just_closed_empty_string: false,
         }
     }
+
     /// Step the scanner one character forward. Returns true if `ch` should
-    /// be ignored (we're inside a string).
-    fn step(&mut self, prior: Option<char>, ch: char) -> bool {
+    /// be ignored (it is part of a string literal, quotes included).
+    fn step(&mut self, ch: char) -> bool {
         if self.in_string {
-            if !self.raw {
-                if self.escaped {
-                    self.escaped = false;
-                    return true;
-                }
-                if ch == '\\' {
-                    self.escaped = true;
-                    return true;
-                }
+            if self.escaped || ch == '\\' {
+                self.escaped = !self.escaped;
+                self.closing_quote_run = 0;
+                self.content_length += 1;
+                return true;
             }
             if ch == self.quote {
-                self.in_string = false;
-                self.raw = false;
+                if self.is_triple {
+                    self.closing_quote_run += 1;
+                    if self.closing_quote_run == 3 {
+                        self.in_string = false;
+                    }
+                } else {
+                    self.in_string = false;
+                    self.just_closed_empty_string = self.content_length == 0;
+                }
+                return true;
             }
+            self.closing_quote_run = 0;
+            self.content_length += 1;
+            return true;
+        }
+        let follows_empty_string = std::mem::take(&mut self.just_closed_empty_string);
+        if follows_empty_string && ch == self.quote {
+            // `""` + `"`: the opening of a triple-quoted string.
+            self.in_string = true;
+            self.is_triple = true;
+            self.closing_quote_run = 0;
             return true;
         }
         if ch == '"' || ch == '\'' {
             self.in_string = true;
             self.quote = ch;
             self.escaped = false;
-            self.raw = matches!(prior, Some('r' | 'R'));
+            self.is_triple = false;
+            self.closing_quote_run = 0;
+            self.content_length = 0;
             return true;
         }
         false
@@ -807,16 +840,9 @@ impl StringScanner {
 /// Find the first `(`, `[`, or `{` in content, respecting strings.
 fn find_first_delimiter(content: &str) -> Option<(usize, char, char)> {
     let mut scanner = StringScanner::new();
-    let chars: Vec<(usize, char)> = content.char_indices().collect();
 
-    for window in 0..chars.len() {
-        let (i, ch) = chars[window];
-        let prior = if window == 0 {
-            None
-        } else {
-            Some(chars[window - 1].1)
-        };
-        if scanner.step(prior, ch) {
+    for (i, ch) in content.char_indices() {
+        if scanner.step(ch) {
             continue;
         }
         if ch == '#' {
@@ -836,15 +862,12 @@ fn find_first_delimiter(content: &str) -> Option<(usize, char, char)> {
 fn find_matching_close(content: &str, open_pos: usize, open: char, close: char) -> Option<usize> {
     let mut depth = 1;
     let mut scanner = StringScanner::new();
-    let mut prior = Some(content[..open_pos + 1].chars().next_back().unwrap_or(' '));
 
     for (i, ch) in content[open_pos + 1..].char_indices() {
         let abs_pos = open_pos + 1 + i;
-        if scanner.step(prior, ch) {
-            prior = Some(ch);
+        if scanner.step(ch) {
             continue;
         }
-        prior = Some(ch);
         if ch == open {
             depth += 1;
         } else if ch == close {
@@ -863,12 +886,9 @@ fn split_top_level_commas(content: &str) -> Vec<String> {
     let mut current = String::new();
     let mut depth = 0;
     let mut scanner = StringScanner::new();
-    let mut prior: Option<char> = None;
 
     for ch in content.chars() {
-        let in_string = scanner.step(prior, ch);
-        prior = Some(ch);
-        if in_string {
+        if scanner.step(ch) {
             current.push(ch);
             continue;
         }
@@ -1015,11 +1035,9 @@ fn find_statement_colon(text: &str) -> Option<usize> {
     let mut scanner = StringScanner::new();
     let mut depth: i32 = 0;
     let mut found: Option<usize> = None;
-    let mut prior: Option<char> = None;
     let bytes = text.as_bytes();
     for (i, ch) in text.char_indices() {
-        if scanner.step(prior, ch) {
-            prior = Some(ch);
+        if scanner.step(ch) {
             continue;
         }
         match ch {
@@ -1034,7 +1052,6 @@ fn find_statement_colon(text: &str) -> Option<usize> {
             }
             _ => {}
         }
-        prior = Some(ch);
     }
     found
 }
@@ -1769,6 +1786,38 @@ pub fn format_file(path: &std::path::Path, config: &Config) -> Result<bool, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `S` for every character the scanner treats as string, `.` otherwise.
+    fn string_mask(line: &str) -> String {
+        let mut scanner = StringScanner::new();
+        line.chars()
+            .map(|ch| if scanner.step(ch) { 'S' } else { '.' })
+            .collect()
+    }
+
+    #[test]
+    fn string_scanner_marks_literal_boundaries() {
+        let cases = [
+            // Plain, escaped quote, and the other quote style inside.
+            (r#"a("x,y", b)"#, "..SSSSS...."),
+            (r#"a("x\"y", b)"#, "..SSSSSS...."),
+            (r#"a('x"y', b)"#, "..SSSSS...."),
+            // Raw: `\"` does not close; `\\` pairs so the next quote does.
+            (r#"a(r"x\"y", b)"#, "...SSSSSS...."),
+            (r#"a(r"x\\", b)"#, "...SSSSS...."),
+            // Empty strings next to each other and to other tokens.
+            (r#"a("", '', b)"#, "..SS..SS...."),
+            // Triple-quoted: lone quotes inside don't close it.
+            (r#"a("""x", y""", b)"#, "..SSSSSSSSSSS...."),
+            (r#"a(r'''a, ' '', b''', c)"#, "...SSSSSSSSSSSSSSSS...."),
+            // A value ending in a quote: three quotes close, the fourth
+            // starts a new string.
+            (r#"a("""x"""", b)"#, "..SSSSSSSSSSSS"),
+        ];
+        for (line, expected) in cases {
+            assert_eq!(string_mask(line), expected, "for {}", line);
+        }
+    }
 
     #[test]
     fn test_strip_trailing_whitespace() {
