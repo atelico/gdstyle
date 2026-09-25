@@ -137,7 +137,7 @@ pub fn run_all_rules_with_source(
         formatting::check_float_literal_zeros(tokens, file, &mut diagnostics);
     }
     if config.is_rule_enabled("format/large-number-underscores") {
-        formatting::check_large_number_underscores(tokens, file, &mut diagnostics);
+        formatting::check_large_number_underscores(tokens, file, config, &mut diagnostics);
     }
     if config.is_rule_enabled("format/enum-one-per-line") {
         formatting::check_enum_one_per_line(file, source, &mut diagnostics);
@@ -347,7 +347,7 @@ pub fn all_rules() -> &'static [(&'static str, &'static str)] {
         ),
         (
             "format/large-number-underscores",
-            "Large numbers (>=10000) should use underscores",
+            "Large numbers (integer part >= large_number_threshold, default 1_000_000) should use underscores",
         ),
         (
             "format/enum-one-per-line",

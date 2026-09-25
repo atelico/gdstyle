@@ -705,62 +705,95 @@ pub fn check_float_literal_zeros(
 }
 
 /// Check that large numbers use underscores for readability.
+///
+/// Covers decimal integers and the integer part of floats (`1000000.5` →
+/// `1_000_000.5`); fraction and exponent digits are left alone. A number is
+/// flagged when its integer part is at least `config.large_number_threshold`.
+/// Hex/binary literals, integer parts that already contain `_`, and integer
+/// parts written with leading zeros (`007`) are skipped.
+///
+/// # Example
+///
+/// ```
+/// use gdstyle::{config::Config, linter};
+///
+/// let diagnostics = linter::lint_source("var n := 1000000.0\n", "demo.gd", &Config::default());
+/// assert!(diagnostics.iter().any(|d| d.message.contains("1_000_000.0")));
+/// ```
 pub fn check_large_number_underscores(
     tokens: &[Token],
     file: &ScriptFile,
+    config: &Config,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     for token in tokens {
-        if let TokenKind::Integer(val) = &token.kind {
-            let text = &token.text;
-            // Skip hex/binary/octal and already-grouped numbers.
-            if text.starts_with("0x")
-                || text.starts_with("0X")
-                || text.starts_with("0b")
-                || text.starts_with("0B")
-                || text.contains('_')
-            {
-                continue;
-            }
-            if *val >= 10_000 || *val <= -10_000 {
-                let fixed = format_with_underscores(*val);
-                diagnostics.push(
-                    Diagnostic::warning(
-                        "format/large-number-underscores",
-                        format!("use '{}' instead of '{}' for readability", fixed, text),
-                        token.span,
-                        &file.path,
-                    )
-                    .with_fix(Fix {
-                        replacements: vec![Replacement {
-                            offset: token.span.offset,
-                            length: token.span.length,
-                            new_text: fixed,
-                        }],
-                        is_safe: true,
-                    }),
-                );
-            }
+        if !matches!(token.kind, TokenKind::Integer(_) | TokenKind::Float(_)) {
+            continue;
         }
+        let text = &token.text;
+        // An integer part with `_` already is not all digits, so it is
+        // skipped here too; underscores in the fraction don't matter.
+        let Some(integer_digits) = decimal_integer_part(text) else {
+            continue;
+        };
+        if integer_digits.len() > 1 && integer_digits.starts_with('0') {
+            // Deliberate zero padding; grouping it would read as a new number.
+            continue;
+        }
+        // An integer part too long for u64 is certainly past any threshold.
+        let integer_part_value = integer_digits.parse::<u64>().unwrap_or(u64::MAX);
+        if integer_part_value < config.large_number_threshold {
+            continue;
+        }
+        let grouped = group_digits(integer_digits);
+        if grouped == integer_digits {
+            // Three digits or fewer: nothing to group, even at a tiny threshold.
+            continue;
+        }
+        let fixed = format!("{}{}", grouped, &text[integer_digits.len()..]);
+        diagnostics.push(
+            Diagnostic::warning(
+                "format/large-number-underscores",
+                format!("use '{}' instead of '{}' for readability", fixed, text),
+                token.span,
+                &file.path,
+            )
+            .with_fix(Fix {
+                // Only the integer digits. On `1000000.` this overlaps the
+                // whole-token trailing-zero fixes; the fixer keeps the
+                // narrower edit, so one `check --fix` pass writes
+                // `1_000_000.` and the next adds the `0` (`fmt` loops and
+                // gets there in one run).
+                replacements: vec![Replacement {
+                    offset: token.span.offset,
+                    length: integer_digits.len(),
+                    new_text: grouped,
+                }],
+                is_safe: true,
+            }),
+        );
     }
 }
 
-fn format_with_underscores(val: i64) -> String {
-    let negative = val < 0;
-    let abs_str = val.unsigned_abs().to_string();
-    let chars: Vec<char> = abs_str.chars().collect();
-    let mut result = String::new();
-    for (i, c) in chars.iter().enumerate() {
-        if i > 0 && (chars.len() - i).is_multiple_of(3) {
-            result.push('_');
+/// The leading decimal digits of a number literal, up to any `.` or
+/// exponent. `None` for hex/binary literals and floats written as `.5`.
+fn decimal_integer_part(text: &str) -> Option<&str> {
+    let end = text.find(['.', 'e', 'E']).unwrap_or(text.len());
+    let integer_part = &text[..end];
+    let is_decimal = !integer_part.is_empty() && integer_part.bytes().all(|b| b.is_ascii_digit());
+    is_decimal.then_some(integer_part)
+}
+
+/// Insert `_` every three digits from the right: `"1234567"` → `"1_234_567"`.
+fn group_digits(digits: &str) -> String {
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push('_');
         }
-        result.push(*c);
+        grouped.push(digit);
     }
-    if negative {
-        format!("-{}", result)
-    } else {
-        result
-    }
+    grouped
 }
 
 use crate::ast::ClassMember;
@@ -1906,13 +1939,18 @@ mod tests {
         );
     }
 
+    fn large_number_diagnostics(source: &str, config: &Config) -> Vec<Diagnostic> {
+        let tokens = tokenize(source);
+        let lines: Vec<&str> = source.split('\n').collect();
+        let file = make_file(&lines);
+        let mut diags = Vec::new();
+        check_large_number_underscores(&tokens, &file, config, &mut diags);
+        diags
+    }
+
     #[test]
     fn test_large_number_underscores() {
-        let source = "var x = 1000000\n";
-        let tokens = tokenize(source);
-        let file = make_file(&["var x = 1000000", ""]);
-        let mut diags = Vec::new();
-        check_large_number_underscores(&tokens, &file, &mut diags);
+        let diags = large_number_diagnostics("var x = 1000000\n", &Config::default());
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("1_000_000"));
         assert!(diags[0].fix.is_some());
@@ -1920,11 +1958,74 @@ mod tests {
 
     #[test]
     fn test_large_number_underscores_small_ok() {
-        let source = "var x = 999\n";
-        let tokens = tokenize(source);
-        let file = make_file(&["var x = 999", ""]);
-        let mut diags = Vec::new();
-        check_large_number_underscores(&tokens, &file, &mut diags);
-        assert!(diags.is_empty());
+        assert!(large_number_diagnostics("var x = 999\n", &Config::default()).is_empty());
+    }
+
+    #[test]
+    fn issue_33_audio_constants_pass_by_default() {
+        // Sample rates and PCM limits sit below the default 1_000_000 floor,
+        // as ints and as floats alike.
+        let source = "const SAMPLE_RATE: int = 16000\nvar r := [22050, 44100, 48000, 65536]\nvar s := 16384 / 32768.0\n";
+        let diags = large_number_diagnostics(source, &Config::default());
+        assert!(diags.is_empty(), "got {:?}", diags);
+    }
+
+    #[test]
+    fn large_number_threshold_is_configurable() {
+        let config = Config {
+            large_number_threshold: 10_000,
+            ..Config::default()
+        };
+        let diags = large_number_diagnostics("var s := 16384 / 32768.0 + 9999\n", &config);
+        let messages: Vec<&str> = diags.iter().map(|d| d.message.as_str()).collect();
+        assert_eq!(
+            messages,
+            vec![
+                "use '16_384' instead of '16384' for readability",
+                "use '32_768.0' instead of '32768.0' for readability",
+            ]
+        );
+    }
+
+    #[test]
+    fn large_number_floats_group_only_the_integer_part() {
+        let source = "var a := 1234567.891011\nvar b := 1000000e3\nvar c := 0.0000001\nvar d := 1e10\nvar e := 1000000E5\nvar f := 1000000.000_001\nvar g := 99999999999999999999.0\n";
+        let diags = large_number_diagnostics(source, &Config::default());
+        let messages: Vec<&str> = diags.iter().map(|d| d.message.as_str()).collect();
+        assert_eq!(
+            messages,
+            vec![
+                "use '1_234_567.891011' instead of '1234567.891011' for readability",
+                "use '1_000_000e3' instead of '1000000e3' for readability",
+                "use '1_000_000E5' instead of '1000000E5' for readability",
+                "use '1_000_000.000_001' instead of '1000000.000_001' for readability",
+                // Integer part past u64: still well over the threshold.
+                "use '99_999_999_999_999_999_999.0' instead of '99999999999999999999.0' for readability",
+            ]
+        );
+        // The fix rewrites only the integer digits.
+        let replacement = &diags[0].fix.as_ref().unwrap().replacements[0];
+        assert_eq!(replacement.length, "1234567".len());
+        assert_eq!(replacement.new_text, "1_234_567");
+    }
+
+    #[test]
+    fn large_number_skips_grouped_hex_and_binary() {
+        let source = "var a := 1_000_000\nvar b := 0xFFFFFFFF\nvar c := 0b1111111111111111\nvar d := 10_000_000.0\n";
+        assert!(large_number_diagnostics(source, &Config::default()).is_empty());
+    }
+
+    #[test]
+    fn large_number_short_digits_and_zero_padding_never_flagged() {
+        let config = Config {
+            large_number_threshold: 0,
+            ..Config::default()
+        };
+        let diags = large_number_diagnostics(
+            "var a := 0\nvar b := 999.5\nvar c := 1000\nvar d := 0000\nvar e := 0001000000\n",
+            &config,
+        );
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("'1_000'"));
     }
 }

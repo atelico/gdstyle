@@ -6105,3 +6105,68 @@ fn toml_error_severity_reaches_diagnostics_and_summary() {
         summary
     );
 }
+
+// --- Issue #33: format/large-number-underscores threshold and floats ---
+
+#[test]
+fn issue_33_audio_constants_are_clean_by_default() {
+    let source = "extends Node\n\nconst SAMPLE_RATE: int = 16000\n\n\nfunc f(samples: Array) -> void:\n\tsamples.append(16384 / 32768.0)\n";
+    let diagnostics = linter::lint_source(source, "audio.gd", &default_config());
+    assert!(
+        diagnostics
+            .iter()
+            .all(|d| d.rule != "format/large-number-underscores"),
+        "got {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn issue_33_threshold_loads_from_toml_and_covers_floats() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let config_path = dir.path().join("gdstyle.toml");
+    std::fs::write(&config_path, "large_number_threshold = 10000\n").expect("write config");
+    let config = Config::from_file(&config_path).expect("config parses");
+    assert_eq!(config.large_number_threshold, 10_000);
+
+    let source = "var s := 16384 / 32768.0\n";
+    let flagged: Vec<String> = linter::lint_source(source, "audio.gd", &config)
+        .into_iter()
+        .filter(|d| d.rule == "format/large-number-underscores")
+        .map(|d| d.message)
+        .collect();
+    assert_eq!(
+        flagged,
+        vec![
+            "use '16_384' instead of '16384' for readability",
+            "use '32_768.0' instead of '32768.0' for readability",
+        ]
+    );
+}
+
+#[test]
+fn issue_33_fmt_groups_float_alongside_trailing_zero_fix() {
+    // `100000.` draws two overlapping fixes on one token: the trailing-zero
+    // rules rewrite the whole token, this rule only its integer digits. The
+    // fixer applies one per pass; `fmt` loops until both have landed.
+    let config = Config {
+        large_number_threshold: 10_000,
+        ..default_config()
+    };
+    let formatted = formatter::format_source("var x := 100000.\n", &config);
+    assert_eq!(formatted, "var x := 100_000.0\n");
+    assert_eq!(formatter::format_source(&formatted, &config), formatted);
+}
+
+#[test]
+fn issue_33_check_fix_settles_trailing_dot_float_in_two_passes() {
+    // `check --fix` runs a single fixer pass. The narrow grouping edit wins
+    // the overlap, and the trailing zero follows on the next pass.
+    let source = "var x := 1000000.\n";
+    let config = default_config();
+    let first = fixer::apply_fixes(source, &linter::lint_source(source, "a.gd", &config), true);
+    assert_eq!(first, "var x := 1_000_000.\n");
+    let second = fixer::apply_fixes(&first, &linter::lint_source(&first, "a.gd", &config), true);
+    assert_eq!(second, "var x := 1_000_000.0\n");
+    assert!(linter::lint_source(&second, "a.gd", &config).is_empty());
+}
