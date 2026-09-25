@@ -780,6 +780,10 @@ max_file_length = 1000
 # Maximum number of function parameters (default: 5)
 max_parameters = 5
 
+# Smallest number format/large-number-underscores asks to group with
+# underscores (default: 1_000_000). Floats compare their integer part.
+# large_number_threshold = 1_000_000
+
 # File and directory patterns to exclude from linting.
 # These are matched as glob patterns against file paths.
 exclude = [".godot", "addons"]
