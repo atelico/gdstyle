@@ -792,9 +792,14 @@ exclude = [".godot", "addons"]
 # Per-rule severity overrides.
 # Values: "off" (disable), "warn" (warning), "error" (error)
 #
-# All rules are enabled with "warn" severity by default.
+# Rules are enabled with "warn" severity by default, except the syntax rules
+# (which default to "error") and a few opt-in advisory rules.
 # Uncomment any line below to change its severity.
 [rules]
+# --- Syntax (error by default: Godot cannot load these files) ---
+# "syntax/lex-error" = "error"
+# "syntax/reserved-identifier" = "error"
+
 # --- Naming ---
 # "naming/class-name-pascal-case" = "warn"
 # "naming/function-name-snake-case" = "warn"

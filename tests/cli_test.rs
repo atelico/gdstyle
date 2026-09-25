@@ -303,3 +303,28 @@ fn issue_29_full_user_config() {
         stderr_of(&output)
     );
 }
+
+#[test]
+fn issue_32_reserved_identifiers_fail_check() {
+    // Godot 4.6 refuses to parse this file (`Expected parameter name.`),
+    // but `check` used to report it clean and exit 0.
+    let p = project(
+        "[rules]\n",
+        "extends Node\n\n\nfunc _prose(namespace: String) -> Dictionary:\n\treturn { \"namespace\": namespace }\n\n\nfunc trait(id: String) -> float:\n\treturn 0.0\n",
+    );
+    let output = check(&p.config, &p.script, &[]);
+    let stdout = stdout_of(&output);
+
+    assert_eq!(output.status.code(), Some(1), "stdout:\n{}", stdout);
+    assert!(
+        stdout.contains("4:13 error 'namespace' is a reserved word"),
+        "got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("8:6 error 'trait' is a reserved word"),
+        "got:\n{}",
+        stdout
+    );
+    assert!(stdout.contains("2 errors found"), "got:\n{}", stdout);
+}

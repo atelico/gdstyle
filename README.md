@@ -16,7 +16,7 @@ gdstyle catches style violations, naming inconsistencies, and common code-qualit
 
 ## Features
 
-- 56 lint rules across syntax, naming, formatting, ordering, and code quality.
+- 57 lint rules across syntax, naming, formatting, ordering, and code quality.
 - Formatter (`gdstyle fmt`) that's in-place and idempotent, and reorders class members into the canonical Godot order.
 - Auto-fix: `--fix` for the safe ones, `--unsafe-fix` for renames. Renames follow into other `.gd` files and into the `.tscn`/`.tres` scene wiring.
 - Single static binary. No Python, no Rust toolchain, no Godot install required to run it.
@@ -111,13 +111,14 @@ gdstyle check --max-line-length 120
 
 ## Rules
 
-gdstyle ships with 56 rules organized into five categories. Most rules are enabled by default (a few advisory rules are opt-in).
+gdstyle ships with 57 rules organized into five categories. Most rules are enabled by default (a few advisory rules are opt-in).
 
-### Syntax (1 rule)
+### Syntax (2 rules)
 
 | Rule | Description | Fixable |
 |------|-------------|---------|
 | `syntax/lex-error` | Report lexer errors: unterminated strings, invalid numbers, unexpected characters | - |
+| `syntax/reserved-identifier` | Reserved words (`namespace`, `trait`, `yield`, `self`, ...) used as a function, parameter, variable, constant, signal, enum, class or loop-variable name. Godot refuses to parse these files, so this defaults to `error` | - |
 
 ### Naming (11 rules)
 
