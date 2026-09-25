@@ -754,14 +754,15 @@ fn try_break_line(line: &str, config: &Config) -> Option<Vec<String>> {
     Some(broken)
 }
 
-/// Track whether the scanner is currently inside a string literal, including
-/// raw / `&` / `^` prefixed strings (no escape processing) and respecting
-/// the prior char so `r"foo\"bar"` terminates at the literal `"`.
+/// Track whether the scanner is currently inside a string literal.
+///
+/// A backslash always skips the next character, prefixed strings included:
+/// Godot won't let `\"` close a raw string either (`r"foo\"bar"` is one
+/// literal), so raw strings end exactly where escaped ones do.
 struct StringScanner {
     in_string: bool,
     quote: char,
     escaped: bool,
-    raw: bool,
 }
 
 impl StringScanner {
@@ -770,26 +771,22 @@ impl StringScanner {
             in_string: false,
             quote: '"',
             escaped: false,
-            raw: false,
         }
     }
     /// Step the scanner one character forward. Returns true if `ch` should
     /// be ignored (we're inside a string).
-    fn step(&mut self, prior: Option<char>, ch: char) -> bool {
+    fn step(&mut self, ch: char) -> bool {
         if self.in_string {
-            if !self.raw {
-                if self.escaped {
-                    self.escaped = false;
-                    return true;
-                }
-                if ch == '\\' {
-                    self.escaped = true;
-                    return true;
-                }
+            if self.escaped {
+                self.escaped = false;
+                return true;
+            }
+            if ch == '\\' {
+                self.escaped = true;
+                return true;
             }
             if ch == self.quote {
                 self.in_string = false;
-                self.raw = false;
             }
             return true;
         }
@@ -797,7 +794,6 @@ impl StringScanner {
             self.in_string = true;
             self.quote = ch;
             self.escaped = false;
-            self.raw = matches!(prior, Some('r' | 'R'));
             return true;
         }
         false
@@ -807,16 +803,9 @@ impl StringScanner {
 /// Find the first `(`, `[`, or `{` in content, respecting strings.
 fn find_first_delimiter(content: &str) -> Option<(usize, char, char)> {
     let mut scanner = StringScanner::new();
-    let chars: Vec<(usize, char)> = content.char_indices().collect();
 
-    for window in 0..chars.len() {
-        let (i, ch) = chars[window];
-        let prior = if window == 0 {
-            None
-        } else {
-            Some(chars[window - 1].1)
-        };
-        if scanner.step(prior, ch) {
+    for (i, ch) in content.char_indices() {
+        if scanner.step(ch) {
             continue;
         }
         if ch == '#' {
@@ -836,15 +825,12 @@ fn find_first_delimiter(content: &str) -> Option<(usize, char, char)> {
 fn find_matching_close(content: &str, open_pos: usize, open: char, close: char) -> Option<usize> {
     let mut depth = 1;
     let mut scanner = StringScanner::new();
-    let mut prior = Some(content[..open_pos + 1].chars().next_back().unwrap_or(' '));
 
     for (i, ch) in content[open_pos + 1..].char_indices() {
         let abs_pos = open_pos + 1 + i;
-        if scanner.step(prior, ch) {
-            prior = Some(ch);
+        if scanner.step(ch) {
             continue;
         }
-        prior = Some(ch);
         if ch == open {
             depth += 1;
         } else if ch == close {
@@ -863,12 +849,9 @@ fn split_top_level_commas(content: &str) -> Vec<String> {
     let mut current = String::new();
     let mut depth = 0;
     let mut scanner = StringScanner::new();
-    let mut prior: Option<char> = None;
 
     for ch in content.chars() {
-        let in_string = scanner.step(prior, ch);
-        prior = Some(ch);
-        if in_string {
+        if scanner.step(ch) {
             current.push(ch);
             continue;
         }
@@ -1015,11 +998,9 @@ fn find_statement_colon(text: &str) -> Option<usize> {
     let mut scanner = StringScanner::new();
     let mut depth: i32 = 0;
     let mut found: Option<usize> = None;
-    let mut prior: Option<char> = None;
     let bytes = text.as_bytes();
     for (i, ch) in text.char_indices() {
-        if scanner.step(prior, ch) {
-            prior = Some(ch);
+        if scanner.step(ch) {
             continue;
         }
         match ch {
@@ -1034,7 +1015,6 @@ fn find_statement_colon(text: &str) -> Option<usize> {
             }
             _ => {}
         }
-        prior = Some(ch);
     }
     found
 }

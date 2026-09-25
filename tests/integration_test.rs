@@ -6169,3 +6169,96 @@ fn issue_33_check_fix_settles_trailing_dot_float_in_two_passes() {
     assert_eq!(second, "var x := 1_000_000.0\n");
     assert!(linter::lint_source(&second, "a.gd", &config).is_empty());
 }
+
+// --- Raw strings: `\"` does not close them (Godot 4 tokenizer semantics) ---
+
+#[test]
+fn raw_string_with_escaped_quote_lints_clean() {
+    // Valid GDScript that Godot 4.6.2 prints as `a\" var self`. The lexer used
+    // to close the string at `\"`, then reported an unterminated string on
+    // the trailing `"` and read `var self` as a declaration.
+    let source = "func f() -> void:\n\tprint(r\"a\\\" var self\")\n";
+    let diagnostics = linter::lint_source(source, "raw.gd", &default_config());
+    assert!(
+        diagnostics.iter().all(|d| !d.rule.starts_with("syntax/")),
+        "got {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn raw_string_with_escaped_quote_survives_line_wrapping() {
+    // The line-wrapper's string scanner also ended raw strings at `\"`, so
+    // the `, ` inside the literal looked like an argument separator.
+    let source = "func f() -> void:\n\tsome_function_with_a_long_name(r\"C:\\\"quoted, not split\\\" (keep)\", first_argument, second_argument_value)\n";
+    let formatted = formatter::format_source(source, &default_config());
+    assert!(
+        formatted.contains("r\"C:\\\"quoted, not split\\\" (keep)\""),
+        "raw string was split or altered:\n{}",
+        formatted
+    );
+    assert!(
+        linter::lint_source(&formatted, "raw.gd", &default_config())
+            .iter()
+            .all(|d| !d.rule.starts_with("syntax/")),
+        "formatted output no longer lexes:\n{}",
+        formatted
+    );
+    assert_eq!(
+        formatter::format_source(&formatted, &default_config()),
+        formatted
+    );
+}
+
+/// Syntax diagnostics for `source`, as `line:column` pairs.
+fn syntax_error_positions(source: &str) -> Vec<String> {
+    linter::lint_source(source, "raw.gd", &default_config())
+        .into_iter()
+        .filter(|d| d.rule.starts_with("syntax/"))
+        .map(|d| format!("{}:{}", d.span.line, d.span.column))
+        .collect()
+}
+
+#[test]
+fn raw_strings_match_godot_parser_test_suite() {
+    // Godot's own `parser/features/r_strings.gd` (MIT, Godot Engine
+    // contributors), verbatim. It must parse.
+    let valid = r##"func test():
+	print(r"test ' \' \" \\ \n \t \u2023 test")
+	print(r"\n\\[\t ]*(\w+)")
+	print(r"")
+	print(r"\"")
+	print(r"\\\"")
+	print(r"\\")
+	print(r"\" \\\" \\\\\"")
+	print(r"\ \\ \\\ \\\\ \\\\\ \\")
+	print(r'"')
+	print(r'"(?:\\.|[^"])*"')
+	print(r"""""")
+	print(r"""test \t "test"="" " \" \\\" \ \\ \\\ test""")
+	print(r'''r"""test \t "test"="" " \" \\\" \ \\ \\\ test"""''')
+	print(r"\t
+			\t")
+	print(r"\t \
+			\t")
+	print(r"""\t
+			\t""")
+	print(r"""\t \
+			\t""")
+"##;
+    assert_eq!(syntax_error_positions(valid), Vec::<String>::new());
+
+    // And `parser/errors/bad_r_string_{1,2,3}.gd`, which must not.
+    assert_eq!(
+        syntax_error_positions("func test():\n\tprint(r\"\\\")\n"),
+        vec!["2:8"]
+    );
+    assert_eq!(
+        syntax_error_positions("func test():\n\tprint(r\"\\\\\"\")\n"),
+        vec!["2:13"]
+    );
+    assert_eq!(
+        syntax_error_positions("func test():\n\tprint(r\"['\"]*\")\n"),
+        vec!["2:15"]
+    );
+}

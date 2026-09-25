@@ -412,7 +412,15 @@ impl<'a> Lexer<'a> {
                 continue;
             }
 
-            if ch == '\\' && prefix != StringPrefix::Raw {
+            // A backslash always travels with the next character, raw
+            // strings included: Godot keeps both characters of `\"` and `\\`
+            // in a raw string, but still won't let that quote close it, and
+            // `r"\\"` closes at its last quote (the raw branch of
+            // `GDScriptTokenizer::string()`). Before any other character a
+            // raw backslash is literal; pairing it anyway yields the same
+            // text and the same end of string, since that character is
+            // neither the quote nor a backslash.
+            if ch == '\\' {
                 value.push(ch);
                 self.advance();
                 if !self.is_at_end() {
@@ -1328,6 +1336,66 @@ world""""#;
         assert!(
             matches!(kinds[0], TokenKind::String(ref s) if s.prefix == StringPrefix::Raw && s.value == "hello\\nworld")
         );
+    }
+
+    /// Lex `source` and return the raw string's value and the tokens after it.
+    fn raw_string_value_and_rest(source: &str) -> (String, Vec<TokenKind>) {
+        let mut kinds = token_kinds(source).into_iter();
+        let value = match kinds.next() {
+            Some(TokenKind::String(info)) if info.prefix == StringPrefix::Raw => info.value,
+            other => panic!(
+                "expected a raw string first in {:?}, got {:?}",
+                source, other
+            ),
+        };
+        (value, kinds.collect())
+    }
+
+    #[test]
+    fn raw_string_escaped_quote_does_not_close() {
+        // Values checked against Godot 4.6.2's `print()` of the same literals.
+        let (value, rest) = raw_string_value_and_rest(r#"r"a\" var self""#);
+        assert_eq!(value, r#"a\" var self"#);
+        assert!(
+            rest.is_empty(),
+            "string must swallow the whole line, got {:?}",
+            rest
+        );
+
+        let (value, rest) = raw_string_value_and_rest(r"r'it\'s'");
+        assert_eq!(value, r"it\'s");
+        assert!(rest.is_empty(), "got {:?}", rest);
+    }
+
+    #[test]
+    fn raw_string_escaped_backslash_then_quote_closes() {
+        // `\\` pairs up, so the quote after it closes the string.
+        let (value, rest) = raw_string_value_and_rest(r#"r"x\\" + "y""#);
+        assert_eq!(value, r"x\\");
+        assert_eq!(rest.len(), 2, "expected `+` and a string, got {:?}", rest);
+
+        let (value, rest) = raw_string_value_and_rest(r#"r"end\\\"""#);
+        assert_eq!(value, r#"end\\\""#);
+        assert!(rest.is_empty(), "got {:?}", rest);
+    }
+
+    #[test]
+    fn raw_string_other_quote_and_letters_keep_single_backslash() {
+        // A backslash before the *other* quote style or a letter is literal
+        // and does not consume the next character.
+        let (value, _) = raw_string_value_and_rest(r#"r"a\'b\nc""#);
+        assert_eq!(value, r"a\'b\nc");
+    }
+
+    #[test]
+    fn raw_triple_quoted_string_with_escaped_quote() {
+        let (value, rest) = raw_string_value_and_rest(r#"r"""tri\"""" + "|""#);
+        assert_eq!(value, r#"tri\""#);
+        assert_eq!(rest.len(), 2, "got {:?}", rest);
+
+        let (value, rest) = raw_string_value_and_rest(r#"r"""q\"""x""""#);
+        assert_eq!(value, r#"q\"""x"#);
+        assert!(rest.is_empty(), "got {:?}", rest);
     }
 
     #[test]
