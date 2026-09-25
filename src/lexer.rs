@@ -118,8 +118,8 @@ impl<'a> Lexer<'a> {
             return self.read_string(StringPrefix::None);
         }
 
-        // String prefixes.
-        if (ch == 'r' || ch == 'R') && self.peek_is_quote() {
+        // String prefixes. Only lowercase `r`: Godot rejects `R"..."`.
+        if ch == 'r' && self.peek_is_quote() {
             self.advance();
             return self.read_string(StringPrefix::Raw);
         }
@@ -416,7 +416,7 @@ impl<'a> Lexer<'a> {
             // strings included: Godot keeps both characters of `\"` and `\\`
             // in a raw string, but still won't let that quote close it, and
             // `r"\\"` closes at its last quote (the raw branch of
-            // `GDScriptTokenizer::string()`). Before any other character a
+            // `GDScriptTokenizerText::string()`). Before any other character a
             // raw backslash is literal; pairing it anyway yields the same
             // text and the same end of string, since that character is
             // neither the quote nor a backslash.
@@ -1381,10 +1381,42 @@ world""""#;
 
     #[test]
     fn raw_string_other_quote_and_letters_keep_single_backslash() {
-        // A backslash before the *other* quote style or a letter is literal
-        // and does not consume the next character.
+        // In Godot a raw backslash before the *other* quote style or a letter
+        // is just a backslash; the value keeps both characters either way.
         let (value, _) = raw_string_value_and_rest(r#"r"a\'b\nc""#);
         assert_eq!(value, r"a\'b\nc");
+    }
+
+    #[test]
+    fn raw_string_backslash_at_eof_is_unterminated() {
+        // `r'abc\` ends on a lone backslash; in `r"abc\"` the backslash
+        // pairs with the only quote, so neither string ever closes.
+        for source in [r"r'abc\", r#"r"abc\""#] {
+            let kinds = token_kinds(source);
+            assert!(
+                matches!(kinds.first(), Some(TokenKind::Error(message)) if message == "unterminated string"),
+                "{:?} -> {:?}",
+                source,
+                kinds
+            );
+        }
+    }
+
+    #[test]
+    fn uppercase_r_is_not_a_raw_prefix() {
+        // Godot only recognises lowercase `r`; `R"..."` is an identifier
+        // followed by an ordinary string.
+        let kinds = token_kinds(r#"R"a""#);
+        assert!(
+            matches!(&kinds[0], TokenKind::Identifier(name) if name == "R"),
+            "{:?}",
+            kinds
+        );
+        assert!(
+            matches!(&kinds[1], TokenKind::String(info) if info.prefix == StringPrefix::None),
+            "{:?}",
+            kinds
+        );
     }
 
     #[test]

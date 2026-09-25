@@ -6221,8 +6221,12 @@ fn syntax_error_positions(source: &str) -> Vec<String> {
 
 #[test]
 fn raw_strings_match_godot_parser_test_suite() {
-    // Godot's own `parser/features/r_strings.gd` (MIT, Godot Engine
-    // contributors), verbatim. It must parse.
+    // Verbatim copy of Godot's `modules/gdscript/tests/scripts/parser/
+    // features/r_strings.gd` (godotengine/godot commit 2964c7d5), which must
+    // parse. Used under the MIT license:
+    //   Copyright (c) 2014-present Godot Engine contributors (see AUTHORS.md).
+    //   Copyright (c) 2007-2014 Juan Linietsky, Ariel Manzur.
+    //   https://github.com/godotengine/godot/blob/master/LICENSE.txt
     let valid = r##"func test():
 	print(r"test ' \' \" \\ \n \t \u2023 test")
 	print(r"\n\\[\t ]*(\w+)")
@@ -6248,7 +6252,10 @@ fn raw_strings_match_godot_parser_test_suite() {
 "##;
     assert_eq!(syntax_error_positions(valid), Vec::<String>::new());
 
-    // And `parser/errors/bad_r_string_{1,2,3}.gd`, which must not.
+    // And `parser/errors/bad_r_string_{1,2,3}.gd`, which must not. The first
+    // two fail at the same spot in Godot; for the third Godot reports the
+    // stray `]` while gdstyle reports the unterminated string, but both
+    // reject the file.
     assert_eq!(
         syntax_error_positions("func test():\n\tprint(r\"\\\")\n"),
         vec!["2:8"]
@@ -6258,7 +6265,33 @@ fn raw_strings_match_godot_parser_test_suite() {
         vec!["2:13"]
     );
     assert_eq!(
-        syntax_error_positions("func test():\n\tprint(r\"['\"]*\")\n"),
-        vec!["2:15"]
+        syntax_error_positions("func test():\n\t#         v\n\tprint(r\"['\"]*\")\n"),
+        vec!["3:15"]
+    );
+}
+
+#[test]
+fn triple_quoted_strings_survive_line_wrapping() {
+    // The wrapper's scanner read `'''` as three one-character strings, so a
+    // `, ` inside the literal became a break point and the value silently
+    // gained a newline and indentation. Values checked with Godot 4.6.2.
+    let source = "func f() -> void:\n\thelper_function_with_long_name(acc, r\"\"\"n##\"\"\", \"first_argument_value, with comma\", r''''a   né,' ''', [1, 2], {\"k\": \"v, w\"})\n";
+    let formatted = formatter::format_source(source, &default_config());
+    for literal in [
+        "r\"\"\"n##\"\"\"",
+        "\"first_argument_value, with comma\"",
+        "r''''a   né,' '''",
+        "\"v, w\"",
+    ] {
+        assert!(
+            formatted.lines().any(|line| line.contains(literal)),
+            "{} was split:\n{}",
+            literal,
+            formatted
+        );
+    }
+    assert_eq!(
+        formatter::format_source(&formatted, &default_config()),
+        formatted
     );
 }
