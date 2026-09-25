@@ -69,7 +69,8 @@ pub fn is_reserved_word(word: &str) -> bool {
 
 /// Flag reserved words used where GDScript expects a declared name:
 /// function, variable, constant, signal, enum, enum member, class and loop
-/// variable names, plus function, lambda and signal parameters.
+/// variable names, plus function, lambda, signal and property-setter
+/// parameters.
 ///
 /// Godot fails to parse such a file (`Expected parameter name.` and
 /// friends), so this reports at error severity. There is no autofix: the
@@ -113,8 +114,9 @@ pub fn check_reserved_identifier(
             diagnostics.push(Diagnostic::error(
                 "syntax/reserved-identifier",
                 format!(
-                    "'{}' is a reserved word in GDScript and cannot be used as a {} name",
-                    token.text, role
+                    "'{}' is a reserved word in GDScript and cannot be used as {} name",
+                    token.text,
+                    with_article(role)
                 ),
                 token.span,
                 &file.path,
@@ -123,13 +125,25 @@ pub fn check_reserved_identifier(
     };
 
     for (index, token) in significant.iter().enumerate() {
-        // `obj.signal` and the like are member accesses, not declarations.
-        if index > 0 && significant[index - 1].kind == TokenKind::Dot {
+        // `obj.signal` is a member access and `$UI/class` or `%signal` a node
+        // path, not declarations.
+        if index > 0
+            && matches!(
+                significant[index - 1].kind,
+                TokenKind::Dot | TokenKind::Dollar | TokenKind::UniqueNodeMarker | TokenKind::Slash
+            )
+        {
             continue;
         }
         let Some(next) = significant.get(index + 1) else {
             break;
         };
+        // A declaration keyword and its name always share a line. Without
+        // this, a keyword that slipped past the checks above would pair with
+        // the first word of the next line (`if`, `return`, `var`, ...).
+        if next.span.line != token.span.line {
+            continue;
+        }
         match token.kind {
             TokenKind::Func => {
                 if next.kind == TokenKind::LeftParen {
@@ -162,9 +176,48 @@ pub fn check_reserved_identifier(
             TokenKind::Const => report(next, "constant"),
             TokenKind::Class | TokenKind::ClassName => report(next, "class"),
             TokenKind::For => report(next, "loop variable"),
+            // Property setter, `set(value):`. Requiring the `:` after the
+            // parameter list keeps calls such as `set("prop", null)` out.
+            TokenKind::Identifier(ref name)
+                if name == "set"
+                    && next.kind == TokenKind::LeftParen
+                    && closing_index(&significant, index + 1)
+                        .and_then(|close| significant.get(close + 1))
+                        .is_some_and(|t| t.kind == TokenKind::Colon) =>
+            {
+                report_list_entries(&significant, index + 1, "parameter", &mut report);
+            }
             _ => {}
         }
     }
+}
+
+/// `"a enum"` reads wrong; pick the article from the role's first letter.
+fn with_article(role: &str) -> String {
+    let article = if role.starts_with(['a', 'e', 'i', 'o', 'u']) {
+        "an"
+    } else {
+        "a"
+    };
+    format!("{} {}", article, role)
+}
+
+/// Index of the bracket closing the one opened at `open_index`, if any.
+fn closing_index(significant: &[&Token], open_index: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (index, token) in significant.iter().enumerate().skip(open_index) {
+        match token.kind {
+            TokenKind::LeftParen | TokenKind::LeftBracket | TokenKind::LeftBrace => depth += 1,
+            TokenKind::RightParen | TokenKind::RightBracket | TokenKind::RightBrace => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Report the first token of each entry in the bracketed list opening at
@@ -238,10 +291,10 @@ mod tests {
         assert_eq!(diagnostics.len(), 2, "got {:?}", diagnostics);
         assert_eq!(diagnostics[0].span.line, 4);
         assert!(diagnostics[0].message.contains("'namespace'"));
-        assert!(diagnostics[0].message.contains("parameter"));
+        assert!(diagnostics[0].message.contains("as a parameter name"));
         assert_eq!(diagnostics[1].span.line, 8);
         assert!(diagnostics[1].message.contains("'trait'"));
-        assert!(diagnostics[1].message.contains("function"));
+        assert!(diagnostics[1].message.contains("as a function name"));
         assert!(diagnostics
             .iter()
             .all(|d| d.severity == crate::diagnostic::Severity::Error));
@@ -316,8 +369,84 @@ func f(match, when, a = self, b = null) -> void:
     }
 
     #[test]
-    fn typed_array_default_does_not_start_an_entry() {
-        let source = "func f(a: Array[int] = [1, 2], b := {\"k\": 1}) -> void:\n\tpass\n";
-        assert!(reserved_diagnostics(source).is_empty());
+    fn values_nested_in_defaults_are_not_entries() {
+        // Reserved words inside a default value's brackets are expressions,
+        // not parameter names; only depth-1 commas start a new entry.
+        let source = "func f(a := [null, true], b = {\"k\": self}, c = g(1, false), d: Array[int] = [1, 2]) -> void:\n\tpass\n";
+        assert_eq!(flagged_words(source), Vec::<String>::new());
+    }
+
+    #[test]
+    fn keyword_member_access_is_not_a_declaration() {
+        // Valid in Godot 4.6: `class` here is an attribute, and `in` must not
+        // be read as the name of a class declaration.
+        assert_eq!(
+            flagged_words("func f(o) -> void:\n\tif o.class in [1]:\n\t\tpass\n"),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn node_paths_ending_in_keywords_are_not_declarations() {
+        // All valid in Godot 4.6. The lexer splits `$UI/class` into `$`, `UI`,
+        // `/`, `class`, so the keyword must not pair with what follows it,
+        // on the same line or the next.
+        let source = "\
+@onready var light = $signal
+var x = 1
+func f() -> void:
+\tvar n = $UI/class
+\tif n:
+\t\tpass
+\tvar m = %for
+\tpass
+\tif $Menu/enum and %var is Node:
+\t\treturn
+";
+        assert_eq!(flagged_words(source), Vec::<String>::new());
+    }
+
+    #[test]
+    fn keyword_never_pairs_with_the_next_line() {
+        // Even with no `$`/`/` before it, a keyword at the end of a line
+        // (lexer confusion, broken code) must not claim the next line's word.
+        let source = "var\nself.x = 1\n";
+        assert_eq!(flagged_words(source), Vec::<String>::new());
+    }
+
+    #[test]
+    fn setter_parameters_are_checked_but_set_calls_are_not() {
+        let source = "\
+var p: int:
+\tset(namespace):
+\t\tpass
+var q: int:
+\tget:
+\t\treturn 1
+\tset(value):
+\t\tpass
+func f() -> void:
+\tset(\"p\", null)
+\tobj.set(\"p\", self)
+";
+        let diagnostics = reserved_diagnostics(source);
+        assert_eq!(diagnostics.len(), 1, "got {:?}", diagnostics);
+        assert_eq!(diagnostics[0].span.line, 2);
+        assert!(diagnostics[0].message.contains("'namespace'"));
+    }
+
+    #[test]
+    fn roles_starting_with_a_vowel_take_an() {
+        let messages: Vec<String> = reserved_diagnostics("enum trait { self }\n")
+            .into_iter()
+            .map(|d| d.message)
+            .collect();
+        assert_eq!(
+            messages,
+            vec![
+                "'trait' is a reserved word in GDScript and cannot be used as an enum name",
+                "'self' is a reserved word in GDScript and cannot be used as an enum member name",
+            ]
+        );
     }
 }
