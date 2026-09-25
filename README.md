@@ -305,7 +305,7 @@ max_inner_classes = 5
 # Smallest number format/large-number-underscores asks to group (default: 10_000).
 # For floats the integer part is compared. Raise it to 1_000_000 to leave
 # five- and six-digit constants (sample rates, PCM limits) ungrouped.
-large_number_threshold = 1_000_000
+large_number_threshold = 10_000
 
 # File/directory patterns to exclude
 exclude = [".godot", "addons"]

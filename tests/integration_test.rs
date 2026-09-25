@@ -6131,7 +6131,7 @@ fn issue_33_audio_constants_are_clean_with_toml_threshold() {
 fn issue_33_default_keeps_ten_thousand_floor_and_covers_floats() {
     // No threshold configured: the original floor of 10_000 applies, now to
     // floats as well.
-    let source = "var s := 16384 / 32768.0\n";
+    let source = "var s := 16384 / 32768.0 + 9999\n";
     let flagged: Vec<String> = linter::lint_source(source, "audio.gd", &default_config())
         .into_iter()
         .filter(|d| d.rule == "format/large-number-underscores")
