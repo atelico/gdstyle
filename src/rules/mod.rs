@@ -2,6 +2,7 @@ pub mod formatting;
 pub mod naming;
 pub mod ordering;
 pub mod quality;
+pub mod syntax;
 
 use crate::ast::ScriptFile;
 use crate::config::Config;
@@ -28,6 +29,12 @@ pub fn run_all_rules_with_source(
     source: Option<&str>,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
+
+    // Syntax rules. `syntax/lex-error` is surfaced by `lint_source`, which
+    // owns the lexer output.
+    if config.is_rule_enabled("syntax/reserved-identifier") {
+        syntax::check_reserved_identifier(tokens, file, &mut diagnostics);
+    }
 
     // Naming rules.
     if config.is_rule_enabled("naming/class-name-pascal-case") {
@@ -226,6 +233,10 @@ pub fn all_rules() -> &'static [(&'static str, &'static str)] {
         (
             "syntax/lex-error",
             "Report lexer errors (unterminated strings, invalid numbers, bad characters)",
+        ),
+        (
+            "syntax/reserved-identifier",
+            "Reserved words (namespace, trait, yield, ...) can't be used as names",
         ),
         (
             "naming/class-name-pascal-case",
