@@ -44,10 +44,10 @@ pub struct Config {
     pub max_inner_classes: usize,
 
     /// Smallest number `format/large-number-underscores` asks to group with
-    /// underscores (default: 1_000_000). For floats the integer part is
-    /// compared. The default leaves five- and six-digit constants such as
-    /// sample rates (`44100`) and PCM limits (`32768`) alone, where the
-    /// grouped form is the unusual one.
+    /// underscores (default: 10_000, the rule's long-standing floor). For
+    /// floats the integer part is compared. Raise it (e.g. to 1_000_000) to
+    /// leave five- and six-digit constants such as sample rates (`44100`)
+    /// and PCM limits (`32768`) alone.
     pub large_number_threshold: u64,
 
     /// File/directory patterns to exclude from linting.
@@ -114,7 +114,7 @@ impl Default for Config {
             max_class_variables: 15,
             max_public_methods: 20,
             max_inner_classes: 5,
-            large_number_threshold: 1_000_000,
+            large_number_threshold: 10_000,
             exclude: vec![".godot".to_string(), "addons".to_string()],
             include: Vec::new(),
             rules: HashMap::new(),
