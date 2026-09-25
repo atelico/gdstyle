@@ -709,7 +709,8 @@ pub fn check_float_literal_zeros(
 /// Covers decimal integers and the integer part of floats (`1000000.5` →
 /// `1_000_000.5`); fraction and exponent digits are left alone. A number is
 /// flagged when its integer part is at least `config.large_number_threshold`.
-/// Hex/binary literals and anything already containing `_` are skipped.
+/// Hex/binary literals, integer parts that already contain `_`, and integer
+/// parts written with leading zeros (`007`) are skipped.
 ///
 /// # Example
 ///
@@ -730,12 +731,15 @@ pub fn check_large_number_underscores(
             continue;
         }
         let text = &token.text;
-        if text.contains('_') {
-            continue;
-        }
+        // An integer part with `_` already is not all digits, so it is
+        // skipped here too; underscores in the fraction don't matter.
         let Some(integer_digits) = decimal_integer_part(text) else {
             continue;
         };
+        if integer_digits.len() > 1 && integer_digits.starts_with('0') {
+            // Deliberate zero padding; grouping it would read as a new number.
+            continue;
+        }
         // An integer part too long for u64 is certainly past any threshold.
         let integer_part_value = integer_digits.parse::<u64>().unwrap_or(u64::MAX);
         if integer_part_value < config.large_number_threshold {
@@ -755,9 +759,11 @@ pub fn check_large_number_underscores(
                 &file.path,
             )
             .with_fix(Fix {
-                // Only the integer digits, so the edit nests inside (rather
-                // than collides with) whole-token float fixes such as
-                // `100000.` → `100000.0`.
+                // Only the integer digits. On `1000000.` this overlaps the
+                // whole-token trailing-zero fixes; the fixer keeps the
+                // narrower edit, so one `check --fix` pass writes
+                // `1_000_000.` and the next adds the `0` (`fmt` loops and
+                // gets there in one run).
                 replacements: vec![Replacement {
                     offset: token.span.offset,
                     length: integer_digits.len(),
@@ -1935,7 +1941,8 @@ mod tests {
 
     fn large_number_diagnostics(source: &str, config: &Config) -> Vec<Diagnostic> {
         let tokens = tokenize(source);
-        let file = make_file(&[source]);
+        let lines: Vec<&str> = source.split('\n').collect();
+        let file = make_file(&lines);
         let mut diags = Vec::new();
         check_large_number_underscores(&tokens, &file, config, &mut diags);
         diags
@@ -1982,8 +1989,7 @@ mod tests {
 
     #[test]
     fn large_number_floats_group_only_the_integer_part() {
-        let source =
-            "var a := 1234567.891011\nvar b := 1000000e3\nvar c := 0.0000001\nvar d := 1e10\n";
+        let source = "var a := 1234567.891011\nvar b := 1000000e3\nvar c := 0.0000001\nvar d := 1e10\nvar e := 1000000E5\nvar f := 1000000.000_001\nvar g := 99999999999999999999.0\n";
         let diags = large_number_diagnostics(source, &Config::default());
         let messages: Vec<&str> = diags.iter().map(|d| d.message.as_str()).collect();
         assert_eq!(
@@ -1991,6 +1997,10 @@ mod tests {
             vec![
                 "use '1_234_567.891011' instead of '1234567.891011' for readability",
                 "use '1_000_000e3' instead of '1000000e3' for readability",
+                "use '1_000_000E5' instead of '1000000E5' for readability",
+                "use '1_000_000.000_001' instead of '1000000.000_001' for readability",
+                // Integer part past u64: still well over the threshold.
+                "use '99_999_999_999_999_999_999.0' instead of '99999999999999999999.0' for readability",
             ]
         );
         // The fix rewrites only the integer digits.
@@ -2006,13 +2016,15 @@ mod tests {
     }
 
     #[test]
-    fn large_number_short_digits_never_flagged_at_zero_threshold() {
+    fn large_number_short_digits_and_zero_padding_never_flagged() {
         let config = Config {
             large_number_threshold: 0,
             ..Config::default()
         };
-        let diags =
-            large_number_diagnostics("var a := 0\nvar b := 999.5\nvar c := 1000\n", &config);
+        let diags = large_number_diagnostics(
+            "var a := 0\nvar b := 999.5\nvar c := 1000\nvar d := 0000\nvar e := 0001000000\n",
+            &config,
+        );
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("'1_000'"));
     }

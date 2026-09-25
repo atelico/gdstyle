@@ -6146,8 +6146,9 @@ fn issue_33_threshold_loads_from_toml_and_covers_floats() {
 
 #[test]
 fn issue_33_fmt_groups_float_alongside_trailing_zero_fix() {
-    // `100000.` draws two fixes on one token: the trailing-zero rules rewrite
-    // the whole token, this rule only its integer digits. They must compose.
+    // `100000.` draws two overlapping fixes on one token: the trailing-zero
+    // rules rewrite the whole token, this rule only its integer digits. The
+    // fixer applies one per pass; `fmt` loops until both have landed.
     let config = Config {
         large_number_threshold: 10_000,
         ..default_config()
@@ -6155,4 +6156,17 @@ fn issue_33_fmt_groups_float_alongside_trailing_zero_fix() {
     let formatted = formatter::format_source("var x := 100000.\n", &config);
     assert_eq!(formatted, "var x := 100_000.0\n");
     assert_eq!(formatter::format_source(&formatted, &config), formatted);
+}
+
+#[test]
+fn issue_33_check_fix_settles_trailing_dot_float_in_two_passes() {
+    // `check --fix` runs a single fixer pass. The narrow grouping edit wins
+    // the overlap, and the trailing zero follows on the next pass.
+    let source = "var x := 1000000.\n";
+    let config = default_config();
+    let first = fixer::apply_fixes(source, &linter::lint_source(source, "a.gd", &config), true);
+    assert_eq!(first, "var x := 1_000_000.\n");
+    let second = fixer::apply_fixes(&first, &linter::lint_source(&first, "a.gd", &config), true);
+    assert_eq!(second, "var x := 1_000_000.0\n");
+    assert!(linter::lint_source(&second, "a.gd", &config).is_empty());
 }
