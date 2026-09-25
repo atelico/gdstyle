@@ -1962,28 +1962,39 @@ mod tests {
     }
 
     #[test]
-    fn issue_33_audio_constants_pass_by_default() {
-        // Sample rates and PCM limits sit below the default 1_000_000 floor,
-        // as ints and as floats alike.
+    fn large_number_default_floor_is_ten_thousand() {
+        // The default keeps the rule's original floor: 9999 passes, 10000
+        // does not.
+        let diags = large_number_diagnostics("var a := 9999\nvar b := 10000\n", &Config::default());
+        assert_eq!(diags.len(), 1, "got {:?}", diags);
+        assert!(diags[0].message.contains("'10_000'"));
+    }
+
+    #[test]
+    fn issue_33_audio_constants_pass_with_raised_threshold() {
+        // Sample rates and PCM limits sit below a 1_000_000 floor, as ints
+        // and as floats alike.
+        let config = Config {
+            large_number_threshold: 1_000_000,
+            ..Config::default()
+        };
         let source = "const SAMPLE_RATE: int = 16000\nvar r := [22050, 44100, 48000, 65536]\nvar s := 16384 / 32768.0\n";
-        let diags = large_number_diagnostics(source, &Config::default());
+        let diags = large_number_diagnostics(source, &config);
         assert!(diags.is_empty(), "got {:?}", diags);
     }
 
     #[test]
     fn large_number_threshold_is_configurable() {
+        // A non-default floor between the two numbers.
         let config = Config {
-            large_number_threshold: 10_000,
+            large_number_threshold: 20_000,
             ..Config::default()
         };
-        let diags = large_number_diagnostics("var s := 16384 / 32768.0 + 9999\n", &config);
+        let diags = large_number_diagnostics("var s := 16384 / 32768.0\n", &config);
         let messages: Vec<&str> = diags.iter().map(|d| d.message.as_str()).collect();
         assert_eq!(
             messages,
-            vec![
-                "use '16_384' instead of '16384' for readability",
-                "use '32_768.0' instead of '32768.0' for readability",
-            ]
+            vec!["use '32_768.0' instead of '32768.0' for readability"]
         );
     }
 

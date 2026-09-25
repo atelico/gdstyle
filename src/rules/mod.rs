@@ -347,7 +347,7 @@ pub fn all_rules() -> &'static [(&'static str, &'static str)] {
         ),
         (
             "format/large-number-underscores",
-            "Large numbers (integer part >= large_number_threshold, default 1_000_000) should use underscores",
+            "Large numbers (integer part >= large_number_threshold, default 10_000) should use underscores",
         ),
         (
             "format/enum-one-per-line",

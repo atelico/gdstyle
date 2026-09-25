@@ -158,7 +158,7 @@ gdstyle ships with 57 rules organized into five categories. Most rules are enabl
 | `format/brace-spacing` | Single-line dictionary literals need a space after `{` and before `}` | safe |
 | `format/call-paren-spacing` | No space between a callee and its opening `(` | safe |
 | `format/float-literal-zeros` | Float literals need leading/trailing zeros (`0.5`, not `.5`) | safe |
-| `format/large-number-underscores` | Numbers at or above `large_number_threshold` (default `1_000_000`) should use underscores (`1_000_000`). Covers ints and the integer part of floats (`1_000_000.5`); hex/binary literals are skipped | safe |
+| `format/large-number-underscores` | Numbers at or above `large_number_threshold` (default `10_000`) should use underscores (`10_000`). Covers ints and the integer part of floats (`1_000_000.5`); hex/binary literals are skipped | safe |
 | `format/enum-one-per-line` | Each enum member on its own line | safe |
 
 ### Ordering (1 rule)
@@ -302,9 +302,9 @@ max_public_methods = 20
 # Maximum inner classes per file (default: 5)
 max_inner_classes = 5
 
-# Smallest number format/large-number-underscores asks to group (default: 1_000_000).
-# For floats the integer part is compared. Lower it to 10_000 to also group
-# five-digit numbers.
+# Smallest number format/large-number-underscores asks to group (default: 10_000).
+# For floats the integer part is compared. Raise it to 1_000_000 to leave
+# five- and six-digit constants (sample rates, PCM limits) ungrouped.
 large_number_threshold = 1_000_000
 
 # File/directory patterns to exclude
@@ -342,7 +342,7 @@ When no config file is found, gdstyle uses these defaults:
 | `max_class_variables` | 15 |
 | `max_public_methods` | 20 |
 | `max_inner_classes` | 5 |
-| `large_number_threshold` | `1_000_000` |
+| `large_number_threshold` | `10_000` |
 | `exclude` | `[".godot", "addons"]` |
 | `include` | `[]` |
 

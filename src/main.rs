@@ -781,8 +781,9 @@ max_file_length = 1000
 max_parameters = 5
 
 # Smallest number format/large-number-underscores asks to group with
-# underscores (default: 1_000_000). Floats compare their integer part.
-# large_number_threshold = 1_000_000
+# underscores (default: 10_000). Floats compare their integer part. Raise it
+# (e.g. to 1_000_000) to leave sample rates like 44100 ungrouped.
+# large_number_threshold = 10_000
 
 # File and directory patterns to exclude from linting.
 # These are matched as glob patterns against file paths.
