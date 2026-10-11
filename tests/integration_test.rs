@@ -3247,6 +3247,52 @@ fn fmt_reorders_normally_when_only_single_line_warning_ignore_is_present() {
     );
 }
 
+#[test]
+fn fmt_keeps_warning_ignore_region_markers_tight_against_the_region() {
+    // The gap between members goes outside the region: above the start
+    // marker and below the restore marker, never between a marker and the
+    // code it brackets.
+    let source = "extends Node\n\nvar health = 10\n@warning_ignore_start(\"unused_signal\")\n\nsignal a\nsignal b\n\n@warning_ignore_restore(\"unused_signal\")\nvar z = 1\n";
+    let formatted = formatter::format_source(source, &default_config());
+    assert_eq!(
+        formatted,
+        "extends Node\n\nvar health = 10\n\n@warning_ignore_start(\"unused_signal\")\nsignal a\nsignal b\n@warning_ignore_restore(\"unused_signal\")\n\nvar z = 1\n"
+    );
+    assert_eq!(
+        formatter::format_source(&formatted, &default_config()),
+        formatted
+    );
+}
+
+#[test]
+fn fmt_warning_ignore_region_start_attaches_above_doc_and_comment_block() {
+    let source = "extends Node\n@warning_ignore_start(\"x\")\n\n\n# Signals\n## Doc a.\nsignal a\n\n\n@warning_ignore_restore(\"x\")\n";
+    let formatted = formatter::format_source(source, &default_config());
+    assert_eq!(
+        formatted,
+        "extends Node\n\n@warning_ignore_start(\"x\")\n# Signals\n## Doc a.\nsignal a\n@warning_ignore_restore(\"x\")\n"
+    );
+}
+
+#[test]
+fn fmt_warning_ignore_region_markers_around_functions() {
+    // Two blank lines separate the functions and sit outside the region.
+    let source = "extends Node\n\n@warning_ignore_start(\"y\")\n\nfunc f():\n\tpass\n\n@warning_ignore_restore(\"y\")\nfunc h():\n\tpass\n";
+    let formatted = formatter::format_source(source, &default_config());
+    assert_eq!(
+        formatted,
+        "extends Node\n\n\n@warning_ignore_start(\"y\")\nfunc f():\n\tpass\n@warning_ignore_restore(\"y\")\n\n\nfunc h():\n\tpass\n"
+    );
+}
+
+#[test]
+fn fmt_leaves_marker_lookalike_inside_multiline_string_alone() {
+    // The blank line after the look-alike is part of the string's value.
+    let source = "extends Node\n\n\nfunc g():\n\tvar s = \"\"\"\n@warning_ignore_start(\"q\")\n\n\"\"\"\n\treturn s\n";
+    let formatted = formatter::format_source(source, &default_config());
+    assert_eq!(formatted, source);
+}
+
 // --- blank_line_between_public_and_private -----------------------------------
 
 fn public_private_separator_config() -> Config {

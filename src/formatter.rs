@@ -4,7 +4,7 @@ use crate::fixer;
 use crate::lexer::Lexer;
 use crate::linter;
 use crate::parser::Parser;
-use crate::token::TokenKind;
+use crate::token::{Token, TokenKind};
 
 /// Format a GDScript source string according to style rules.
 ///
@@ -199,39 +199,102 @@ fn leading_annotation_line(member: &ClassMember) -> Option<usize> {
 }
 
 /// First line (1-indexed) of the run of standalone `@warning_ignore(...)`
-/// lines sitting directly above `decl_start`, or `decl_start` itself when
-/// there is none.
+/// and `@warning_ignore_start(...)` lines sitting directly above `below`, or
+/// `below` itself when there is none.
 ///
-/// The parser deliberately drops `@warning_ignore` instead of attaching it
-/// to a member (it may precede any statement, including ones whose AST node
-/// has no annotation slot), so `leading_annotation_line` never sees it.
-/// Without this the annotation would count as the tail of the previous
+/// The parser deliberately drops these annotations instead of attaching them
+/// to a member (they may precede any statement, including ones whose AST
+/// node has no annotation slot), so `leading_annotation_line` never sees
+/// them. Without this the annotation would count as the tail of the previous
 /// member and the canonical gap would land between it and the declaration
-/// it applies to.
+/// it applies to (or, for a region, the first declaration it covers).
 ///
 /// `declaration_lines` holds the keyword line of every member: a line such
 /// as `@warning_ignore("x") var y = 1` is a declaration of its own and must
-/// not be absorbed. The region markers `@warning_ignore_start` /
-/// `@warning_ignore_restore` are not tied to one declaration, so they are
-/// left where they are.
+/// not be absorbed. `@warning_ignore_restore` is not matched: it closes a
+/// region, so it stays the tail of the member above it.
 fn leading_warning_ignore_start(
     lines: &[&str],
     declaration_lines: &std::collections::HashSet<usize>,
-    decl_start: usize,
+    below: usize,
 ) -> usize {
-    let mut first_line = decl_start;
+    let mut first_line = below;
     while first_line > 1 {
         let candidate = first_line - 1;
-        let is_standalone_warning_ignore = lines
-            .get(candidate - 1)
-            .is_some_and(|line| line.trim_start().starts_with("@warning_ignore("))
-            && !declaration_lines.contains(&candidate);
+        let is_standalone_warning_ignore = lines.get(candidate - 1).is_some_and(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("@warning_ignore(") || trimmed.starts_with("@warning_ignore_start(")
+        }) && !declaration_lines.contains(&candidate);
         if !is_standalone_warning_ignore {
             break;
         }
         first_line = candidate;
     }
     first_line
+}
+
+/// Remove the blank lines that separate a script-level region marker from
+/// the code it brackets: those directly below `@warning_ignore_start(...)`
+/// and those directly above `@warning_ignore_restore(...)`.
+///
+/// With the markers tight against the region, `normalize_member_spacing`
+/// can treat the start marker as the head of the first covered member and
+/// the restore marker as the tail of the last one, so the canonical gaps
+/// fall outside the region instead of between a marker and its code.
+///
+/// Marker lines are taken from the lexer's annotation tokens rather than
+/// matched as text, so a look-alike line inside a multi-line string is
+/// never touched. Only column-1 markers count; indented ones belong to an
+/// inner class or a function body, which this pass leaves alone.
+fn tighten_warning_ignore_region_markers(source: &str, tokens: &[Token]) -> String {
+    let marker_lines = |marker_name: &str| -> std::collections::HashSet<usize> {
+        tokens
+            .iter()
+            .filter(|token| {
+                token.span.column == 1
+                    && matches!(&token.kind, TokenKind::Annotation(name) if name == marker_name)
+            })
+            .map(|token| token.span.line)
+            .collect()
+    };
+    let start_lines = marker_lines("warning_ignore_start");
+    let restore_lines = marker_lines("warning_ignore_restore");
+    if start_lines.is_empty() && restore_lines.is_empty() {
+        return source.to_string();
+    }
+
+    let lines: Vec<&str> = source.split('\n').collect();
+    let is_blank = |line_number: usize| {
+        lines
+            .get(line_number - 1)
+            .is_some_and(|line| line.trim().is_empty())
+    };
+    let mut kept: Vec<&str> = Vec::with_capacity(lines.len());
+    // Line number (1-indexed) of the last non-blank line seen so far.
+    let mut last_code_line: Option<usize> = None;
+    let mut pending_blank_count = 0;
+    for (index, line) in lines.iter().enumerate() {
+        let line_number = index + 1;
+        if is_blank(line_number) {
+            pending_blank_count += 1;
+            continue;
+        }
+        let follows_start_marker =
+            last_code_line.is_some_and(|previous| start_lines.contains(&previous));
+        // A restore marker with nothing above it has no region to close up
+        // against, so its leading blank lines stay.
+        let closes_region = restore_lines.contains(&line_number) && last_code_line.is_some();
+        if !follows_start_marker && !closes_region {
+            kept.extend(std::iter::repeat_n("", pending_blank_count));
+        }
+        pending_blank_count = 0;
+        kept.push(line);
+        last_code_line = Some(line_number);
+    }
+    // Trailing blank lines (including the empty piece after the final
+    // newline) are not this pass's business.
+    kept.extend(std::iter::repeat_n("", pending_blank_count));
+    kept.join("\n")
 }
 
 /// Top-level item in the source, used by `normalize_member_spacing`. A unit
@@ -262,6 +325,8 @@ struct MemberUnit {
 /// constants and variables that would otherwise sit tight get one blank line
 /// wherever a public declaration meets a private (`_`-prefixed) one.
 fn normalize_member_spacing(source: &str, config: &Config) -> String {
+    let tightened = tighten_warning_ignore_region_markers(source, &Lexer::new(source).tokenize());
+    let source = tightened.as_str();
     let mut lexer = Lexer::new(source);
     let tokens = lexer.tokenize();
     let members = Parser::new(&tokens).parse();
@@ -400,6 +465,9 @@ fn normalize_member_spacing(source: &str, config: &Config) -> String {
                         start = c_start;
                     }
                 }
+                // A region may open above the member's doc or comment block
+                // rather than directly above the declaration.
+                let start = leading_warning_ignore_start(&lines, &declaration_lines, start);
 
                 pending_doc_start = None;
                 pending_doc_last = None;
