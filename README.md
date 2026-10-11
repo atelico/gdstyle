@@ -307,6 +307,11 @@ max_inner_classes = 5
 # five- and six-digit constants (sample rates, PCM limits) ungrouped.
 large_number_threshold = 10_000
 
+# Put one blank line between public and private (`_`-prefixed) constants and
+# variables of the same kind when formatting (default: false). Applies to
+# script-level members; inner-class bodies keep their blank lines as written.
+blank_line_between_public_and_private = false
+
 # File/directory patterns to exclude
 exclude = [".godot", "addons"]
 
@@ -343,6 +348,7 @@ When no config file is found, gdstyle uses these defaults:
 | `max_public_methods` | 20 |
 | `max_inner_classes` | 5 |
 | `large_number_threshold` | `10_000` |
+| `blank_line_between_public_and_private` | `false` |
 | `exclude` | `[".godot", "addons"]` |
 | `include` | `[]` |
 

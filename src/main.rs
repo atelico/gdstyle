@@ -785,6 +785,10 @@ max_parameters = 5
 # (e.g. to 1_000_000) to leave sample rates like 44100 ungrouped.
 # large_number_threshold = 10_000
 
+# Put one blank line between public and private (`_`-prefixed) constants and
+# variables of the same kind when formatting (default: false).
+# blank_line_between_public_and_private = false
+
 # File and directory patterns to exclude from linting.
 # These are matched as glob patterns against file paths.
 exclude = [".godot", "addons"]

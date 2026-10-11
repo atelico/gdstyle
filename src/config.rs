@@ -50,6 +50,15 @@ pub struct Config {
     /// and PCM limits (`32768`) alone.
     pub large_number_threshold: u64,
 
+    /// Whether `fmt` puts one blank line between public and private
+    /// (`_`-prefixed) constants and variables of the same kind (default:
+    /// false, which keeps them in one tight block). Applies to constants,
+    /// static variables, `@export` variables, plain variables and `@onready`
+    /// variables at script level; inner-class bodies keep the blank lines
+    /// they were written with. The line is added at every public/private
+    /// boundary, and members are not reordered to group them.
+    pub blank_line_between_public_and_private: bool,
+
     /// File/directory patterns to exclude from linting.
     pub exclude: Vec<String>,
 
@@ -115,6 +124,7 @@ impl Default for Config {
             max_public_methods: 20,
             max_inner_classes: 5,
             large_number_threshold: 10_000,
+            blank_line_between_public_and_private: false,
             exclude: vec![".godot".to_string(), "addons".to_string()],
             include: Vec::new(),
             rules: HashMap::new(),

@@ -3103,6 +3103,116 @@ fn fmt_member_spacing_one_blank_between_member_categories() {
     );
 }
 
+// --- blank_line_between_public_and_private -----------------------------------
+
+fn public_private_separator_config() -> Config {
+    Config {
+        blank_line_between_public_and_private: true,
+        ..Config::default()
+    }
+}
+
+#[test]
+fn fmt_public_private_separator_is_off_by_default() {
+    // Default output is unchanged: a hand-written separator is still removed.
+    let source =
+        "extends Node\n\nvar is_idle: bool = false\n\nvar _velocity: Vector2 = Vector2.ZERO\n";
+    let formatted = formatter::format_source(source, &default_config());
+    assert!(
+        formatted.contains("var is_idle: bool = false\nvar _velocity: Vector2 = Vector2.ZERO"),
+        "public and private vars must stay tight by default, got:\n{}",
+        formatted
+    );
+}
+
+#[test]
+fn fmt_public_private_separator_splits_plain_vars() {
+    let source = "extends Node\n\nvar is_idle: bool = false\nvar idle_timer: float = 0.0\nvar _velocity: Vector2 = Vector2.ZERO\nvar _speed: float = 1.0\n";
+    let formatted = formatter::format_source(source, &public_private_separator_config());
+    assert_eq!(
+        formatted,
+        "extends Node\n\nvar is_idle: bool = false\nvar idle_timer: float = 0.0\n\nvar _velocity: Vector2 = Vector2.ZERO\nvar _speed: float = 1.0\n"
+    );
+}
+
+#[test]
+fn fmt_public_private_separator_is_idempotent_and_collapses_extra_blanks() {
+    let source = "extends Node\n\nvar is_idle = false\n\n\n\nvar _velocity = 0.0\n";
+    let config = public_private_separator_config();
+    let formatted = formatter::format_source(source, &config);
+    assert!(
+        formatted.contains("var is_idle = false\n\nvar _velocity = 0.0"),
+        "boundary must be exactly one blank line, got:\n{}",
+        formatted
+    );
+    assert_eq!(formatter::format_source(&formatted, &config), formatted);
+}
+
+#[test]
+fn fmt_public_private_separator_covers_constants_static_and_onready_vars() {
+    let source = "extends Node\n\nconst MAX_LIVES = 3\nconst _CACHE_SIZE = 8\n\nstatic var instance_count = 0\nstatic var _registry = {}\n\n@onready var sword = $Sword\n@onready var _gun = $Gun\n";
+    let formatted = formatter::format_source(source, &public_private_separator_config());
+    for expected in [
+        "const MAX_LIVES = 3\n\nconst _CACHE_SIZE = 8",
+        "static var instance_count = 0\n\nstatic var _registry = {}",
+        "@onready var sword = $Sword\n\n@onready var _gun = $Gun",
+    ] {
+        assert!(
+            formatted.contains(expected),
+            "expected {:?} in:\n{}",
+            expected,
+            formatted
+        );
+    }
+}
+
+#[test]
+fn fmt_public_private_separator_goes_above_attached_docs_and_annotations() {
+    // The separator belongs above the private var's doc comment and
+    // annotation line, not between them and the declaration.
+    let source = "extends Node\n\n@export var health = 10\n## Cached ratio.\n@export_range(0, 1)\nvar _ratio = 0.5\n";
+    let formatted = formatter::format_source(source, &public_private_separator_config());
+    assert!(
+        formatted.contains(
+            "@export var health = 10\n\n## Cached ratio.\n@export_range(0, 1)\nvar _ratio = 0.5"
+        ),
+        "separator must sit above the doc block, got:\n{}",
+        formatted
+    );
+}
+
+#[test]
+fn fmt_public_private_separator_marks_every_boundary_without_reordering() {
+    let source = "extends Node\n\nvar a = 1\nvar _b = 2\nvar c = 3\n";
+    let formatted = formatter::format_source(source, &public_private_separator_config());
+    assert!(
+        formatted.contains("var a = 1\n\nvar _b = 2\n\nvar c = 3"),
+        "interleaved vars keep their order and get a line at each boundary, got:\n{}",
+        formatted
+    );
+}
+
+#[test]
+fn fmt_public_private_separator_leaves_signals_and_functions_alone() {
+    let source = "extends Node\n\nsignal changed\nsignal _internal_changed\n\n\nfunc run():\n	pass\n\n\nfunc _helper():\n	pass\n";
+    let formatted = formatter::format_source(source, &public_private_separator_config());
+    assert_eq!(formatted, source);
+}
+
+#[test]
+fn config_blank_line_between_public_and_private_loads_from_toml() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let config_path = dir.path().join("gdstyle.toml");
+    std::fs::write(
+        &config_path,
+        "blank_line_between_public_and_private = true\n",
+    )
+    .expect("write config");
+    let config = Config::from_file(&config_path).expect("load config");
+    assert!(config.blank_line_between_public_and_private);
+    assert!(!Config::default().blank_line_between_public_and_private);
+}
+
 // --- Computed-property var regression suite ----------------------------------
 
 #[test]

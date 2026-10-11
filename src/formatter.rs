@@ -63,7 +63,7 @@ fn format_pass(source: &str, config: &Config) -> String {
     //     canonical counts (0 between header items, 1 between member
     //     categories, 2 around functions / inner classes). This is the
     //     member-aware pass; it understands what each top-level statement is.
-    result = normalize_member_spacing(&result);
+    result = normalize_member_spacing(&result, config);
 
     // 3b. Backstop for blank lines INSIDE function bodies and anywhere the
     //     member-aware pass didn't touch: collapse 3+ to 2.
@@ -172,6 +172,19 @@ fn canonical_blank_lines_between(prev: usize, curr: usize) -> usize {
     1
 }
 
+/// Whether `member` is a constant or variable whose name marks it private
+/// (leading underscore). Other member kinds are never private here: the
+/// public/private separator only applies to data declarations, since
+/// functions already get two blank lines around them.
+fn is_private_data_member(member: &ClassMember) -> bool {
+    match member {
+        ClassMember::Constant { name, .. }
+        | ClassMember::StaticVariable { name, .. }
+        | ClassMember::Variable { name, .. } => name.starts_with('_'),
+        _ => false,
+    }
+}
+
 /// Earliest line occupied by any annotation attached to this member (e.g.
 /// `@export_range(...)` written above a `var`). Returns `None` when the
 /// member carries no annotations.
@@ -191,9 +204,12 @@ fn leading_annotation_line(member: &ClassMember) -> Option<usize> {
 /// `start` line is the unit's first line in the source. `decl_start` is the
 /// line where the declaration itself begins (after any attached `##` docs,
 /// but including annotations like `@export_range`): used to tighten the doc
-/// block against the declaration when normalising.
+/// block against the declaration when normalising. `is_private` is set for
+/// `_`-prefixed constants and variables and drives the optional
+/// public/private separator line.
 struct MemberUnit {
     category: usize,
+    is_private: bool,
     start: usize,      // 1-indexed
     decl_start: usize, // 1-indexed; >= start
 }
@@ -205,7 +221,11 @@ struct MemberUnit {
 /// The function intentionally uses each unit's `start` as the boundary rather
 /// than the AST's `end_line()` (which under-counts multi-line bodies for
 /// enums and computed properties).
-fn normalize_member_spacing(source: &str) -> String {
+///
+/// With `config.blank_line_between_public_and_private` set, same-category
+/// constants and variables that would otherwise sit tight get one blank line
+/// wherever a public declaration meets a private (`_`-prefixed) one.
+fn normalize_member_spacing(source: &str, config: &Config) -> String {
     let mut lexer = Lexer::new(source);
     let tokens = lexer.tokenize();
     let members = Parser::new(&tokens).parse();
@@ -233,6 +253,7 @@ fn normalize_member_spacing(source: &str) -> String {
             if let (Some(s), Some(_)) = (*start, *last) {
                 units.push(MemberUnit {
                     category: 3,
+                    is_private: false,
                     start: s,
                     decl_start: s,
                 });
@@ -336,6 +357,7 @@ fn normalize_member_spacing(source: &str) -> String {
                 pending_comment_last = None;
                 units.push(MemberUnit {
                     category: member.ordering_category(),
+                    is_private: is_private_data_member(member),
                     start,
                     decl_start,
                 });
@@ -366,11 +388,21 @@ fn normalize_member_spacing(source: &str) -> String {
     }
     let had_preamble = !result.is_empty();
 
-    let mut prev_category: Option<usize> = None;
+    let mut prev_unit: Option<&MemberUnit> = None;
     let total_lines = lines.len();
     for (idx, unit) in units.iter().enumerate() {
-        let blanks = if let Some(prev) = prev_category {
-            canonical_blank_lines_between(prev, unit.category)
+        let blanks = if let Some(prev) = prev_unit {
+            let canonical = canonical_blank_lines_between(prev.category, unit.category);
+            let crosses_visibility_boundary = config.blank_line_between_public_and_private
+                && prev.category == unit.category
+                && prev.is_private != unit.is_private;
+            // `max` so the separator never shrinks a gap that is already
+            // wider (it only ever opens up a tight same-category pair).
+            if crosses_visibility_boundary {
+                canonical.max(1)
+            } else {
+                canonical
+            }
         } else if had_preamble {
             // First class member after file-level comments: one blank line.
             1
@@ -416,7 +448,7 @@ fn normalize_member_spacing(source: &str) -> String {
         }
         result.extend(decl_lines);
 
-        prev_category = Some(unit.category);
+        prev_unit = Some(unit);
     }
 
     // Ensure the file ends with exactly one trailing newline.
