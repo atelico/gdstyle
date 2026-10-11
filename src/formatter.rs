@@ -198,6 +198,42 @@ fn leading_annotation_line(member: &ClassMember) -> Option<usize> {
     annotations.iter().map(|a| a.span.line).min()
 }
 
+/// First line (1-indexed) of the run of standalone `@warning_ignore(...)`
+/// lines sitting directly above `decl_start`, or `decl_start` itself when
+/// there is none.
+///
+/// The parser deliberately drops `@warning_ignore` instead of attaching it
+/// to a member (it may precede any statement, including ones whose AST node
+/// has no annotation slot), so `leading_annotation_line` never sees it.
+/// Without this the annotation would count as the tail of the previous
+/// member and the canonical gap would land between it and the declaration
+/// it applies to.
+///
+/// `declaration_lines` holds the keyword line of every member: a line such
+/// as `@warning_ignore("x") var y = 1` is a declaration of its own and must
+/// not be absorbed. The region markers `@warning_ignore_start` /
+/// `@warning_ignore_restore` are not tied to one declaration, so they are
+/// left where they are.
+fn leading_warning_ignore_start(
+    lines: &[&str],
+    declaration_lines: &std::collections::HashSet<usize>,
+    decl_start: usize,
+) -> usize {
+    let mut first_line = decl_start;
+    while first_line > 1 {
+        let candidate = first_line - 1;
+        let is_standalone_warning_ignore = lines
+            .get(candidate - 1)
+            .is_some_and(|line| line.trim_start().starts_with("@warning_ignore("))
+            && !declaration_lines.contains(&candidate);
+        if !is_standalone_warning_ignore {
+            break;
+        }
+        first_line = candidate;
+    }
+    first_line
+}
+
 /// Top-level item in the source, used by `normalize_member_spacing`. A unit
 /// is either a single declaration, or a leading `##` doc comment block plus
 /// the declaration it attaches to. The category drives the spacing rule; the
@@ -234,6 +270,18 @@ fn normalize_member_spacing(source: &str, config: &Config) -> String {
     }
 
     let lines: Vec<&str> = source.split('\n').collect();
+    let declaration_lines: std::collections::HashSet<usize> = members
+        .iter()
+        .filter(|member| {
+            !matches!(
+                member,
+                ClassMember::DocComment { .. }
+                    | ClassMember::Comment { .. }
+                    | ClassMember::BlankLine { .. }
+            )
+        })
+        .map(|member| member.span().line)
+        .collect();
 
     // Walk parsed members and group adjacent `##` doc-comment lines with the
     // next non-doc declaration (the doc "attaches" to it). A blank line
@@ -317,6 +365,8 @@ fn normalize_member_spacing(source: &str, config: &Config) -> String {
                     Some(a) => a.min(kw_line),
                     None => kw_line,
                 };
+                let decl_start =
+                    leading_warning_ignore_start(&lines, &declaration_lines, decl_start);
 
                 // A pending doc block only "attaches" to this declaration
                 // when it sits tight against it (the line after the last doc

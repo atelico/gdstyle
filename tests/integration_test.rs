@@ -3103,6 +3103,51 @@ fn fmt_member_spacing_one_blank_between_member_categories() {
     );
 }
 
+// --- Standalone @warning_ignore stays attached -------------------------------
+
+#[test]
+fn fmt_warning_ignore_line_stays_tight_against_documented_var() {
+    // Regression: the doc block was treated as standalone and a blank line
+    // was inserted between `@warning_ignore(...)` and the `var` it covers.
+    let source = "extends Node\n\nvar health = 10\n## Cached speed.\n@warning_ignore(\"unused_private_class_variable\")\nvar _speed = 300.0\n";
+    let formatted = formatter::format_source(source, &default_config());
+    assert_eq!(formatted, source);
+}
+
+#[test]
+fn fmt_warning_ignore_line_stays_tight_against_function() {
+    // Regression: the two blank lines before a function were inserted below
+    // the annotation instead of above it.
+    let source = "extends Node\n\nvar health = 10\n@warning_ignore(\"unused_parameter\")\n@warning_ignore(\"shadowed_variable\")\nfunc foo(a):\n\tpass\n";
+    let formatted = formatter::format_source(source, &default_config());
+    assert_eq!(
+        formatted,
+        "extends Node\n\nvar health = 10\n\n\n@warning_ignore(\"unused_parameter\")\n@warning_ignore(\"shadowed_variable\")\nfunc foo(a):\n\tpass\n"
+    );
+}
+
+#[test]
+fn fmt_warning_ignore_line_stays_tight_against_signal_and_const() {
+    let source = "extends Node\n\n@warning_ignore(\"unused_signal\")\nsignal hit\n@warning_ignore(\"unused_private_class_variable\")\nconst _K = 1\n";
+    let formatted = formatter::format_source(source, &default_config());
+    assert_eq!(
+        formatted,
+        "extends Node\n\n@warning_ignore(\"unused_signal\")\nsignal hit\n\n@warning_ignore(\"unused_private_class_variable\")\nconst _K = 1\n"
+    );
+}
+
+#[test]
+fn fmt_inline_warning_ignore_declaration_is_not_absorbed_by_next_member() {
+    // `@warning_ignore("x") var a = 1` is a declaration of its own. The
+    // function below must not swallow it as a leading annotation line.
+    let source = "extends Node\n\n@warning_ignore(\"x\") var a = 1\nfunc foo():\n\tpass\n";
+    let formatted = formatter::format_source(source, &default_config());
+    assert_eq!(
+        formatted,
+        "extends Node\n\n@warning_ignore(\"x\") var a = 1\n\n\nfunc foo():\n\tpass\n"
+    );
+}
+
 // --- blank_line_between_public_and_private -----------------------------------
 
 fn public_private_separator_config() -> Config {
