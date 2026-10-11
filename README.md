@@ -507,6 +507,20 @@ The directive may sit directly above the declaration (or above its
 annotations). A `# gdstyle:ignore-file=order/class-member-order` pins
 every member, disabling reordering for the whole file.
 
+#### When the formatter leaves the order alone
+
+`gdstyle fmt` skips reordering a file when moving members could change
+what the code does:
+
+- A class-level `var`/`const` initializer refers to another class-level
+  declaration. GDScript runs initializers in source order.
+- The move would change which code sits between `@warning_ignore_start`
+  and `@warning_ignore_restore`. The region would otherwise end up
+  silencing warnings on different members.
+
+`check` still reports `order/class-member-order` for such a file, so you
+can fix the order by hand.
+
 ## CLI reference
 
 ```

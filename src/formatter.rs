@@ -51,7 +51,7 @@ fn format_pass(source: &str, config: &Config) -> String {
     //    output is re-parsed to verify it has the same set of class members
     //    as the input: if anything mutated, we keep the original.
     result = safe_reorder_class_members(&result);
-    result = reorder_inner_classes(&result);
+    result = safe_reorder_inner_classes(&result);
 
     // 2. Normalize indentation.
     result = normalize_indentation(&result, config);
@@ -1239,7 +1239,89 @@ fn safe_reorder_class_members(source: &str) -> String {
     if !same_member_signatures(&original_members, &reordered_members) {
         return source.to_string();
     }
+
+    // Guard 3: keep `@warning_ignore_start` / `@warning_ignore_restore`
+    // regions covering the same code.
+    if changes_warning_ignore_regions(source, &reordered) {
+        return source.to_string();
+    }
     reordered
+}
+
+/// Reorder the members of each inner class, unless doing so would change
+/// which code a `@warning_ignore_start` region covers (see
+/// `changes_warning_ignore_regions`).
+fn safe_reorder_inner_classes(source: &str) -> String {
+    let reordered = reorder_inner_classes(source);
+    if changes_warning_ignore_regions(source, &reordered) {
+        return source.to_string();
+    }
+    reordered
+}
+
+/// True if moving lines from `original` to `reordered` changed which code is
+/// covered by a `@warning_ignore_start(...)` region.
+///
+/// The two markers are standalone lines, not part of any member. The reorder
+/// moves a marker with whichever member happens to follow it, so the pair can
+/// end up bracketing different code: a region written around two signals may
+/// afterwards also silence warnings on unrelated variables, or stop covering
+/// the signals. Skipping the reorder is the only safe answer, because there
+/// is no ordering that keeps an arbitrary region intact and still sorts.
+fn changes_warning_ignore_regions(original: &str, reordered: &str) -> bool {
+    if original == reordered || !original.contains("@warning_ignore_start") {
+        return false;
+    }
+    warning_ignore_region_coverage(original) != warning_ignore_region_coverage(reordered)
+}
+
+/// Every code line that sits inside a `@warning_ignore_start` region, paired
+/// with the warning codes ignored at that point, sorted so two sources can be
+/// compared regardless of line order. Reordering only moves lines, so equal
+/// coverage means every line is still ignored for exactly the same warnings.
+///
+/// Regions are textual in Godot: one runs from its `@warning_ignore_start`
+/// line to the matching `@warning_ignore_restore`, or to the end of the file.
+fn warning_ignore_region_coverage(source: &str) -> Vec<(&str, Vec<&str>)> {
+    let mut active_codes: Vec<&str> = Vec::new();
+    let mut coverage: Vec<(&str, Vec<&str>)> = Vec::new();
+    for line in source.split('\n') {
+        let trimmed = line.trim();
+        if let Some(arguments) = trimmed.strip_prefix("@warning_ignore_start(") {
+            for code in quoted_strings(arguments) {
+                if !active_codes.contains(&code) {
+                    active_codes.push(code);
+                }
+            }
+        } else if let Some(arguments) = trimmed.strip_prefix("@warning_ignore_restore(") {
+            let restored = quoted_strings(arguments);
+            active_codes.retain(|code| !restored.contains(code));
+        } else if !trimmed.is_empty() && !trimmed.starts_with('#') && !active_codes.is_empty() {
+            let mut codes = active_codes.clone();
+            codes.sort_unstable();
+            coverage.push((trimmed, codes));
+        }
+    }
+    coverage.sort_unstable();
+    coverage
+}
+
+/// The contents of each `"..."` or `'...'` literal in `text`, in order.
+/// Used on annotation arguments, which are plain warning names with no
+/// escapes.
+fn quoted_strings(text: &str) -> Vec<&str> {
+    let mut contents = Vec::new();
+    let mut rest = text;
+    while let Some(open) = rest.find(['"', '\'']) {
+        let quote = rest[open..].chars().next().unwrap_or('"');
+        let after_open = &rest[open + 1..];
+        let Some(close) = after_open.find(quote) else {
+            break;
+        };
+        contents.push(&after_open[..close]);
+        rest = &after_open[close + 1..];
+    }
+    contents
 }
 
 fn parse_members(source: &str) -> Vec<ClassMember> {
