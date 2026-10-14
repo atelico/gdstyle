@@ -1,7 +1,7 @@
 use crate::ast::ScriptFile;
 use crate::config::Config;
 use crate::diagnostic::{line_byte_offset, Diagnostic, Fix, Replacement};
-use crate::token::{QuoteStyle, Span, StringPrefix, Token, TokenKind};
+use crate::token::{QuoteStyle, Span, StringLines, StringPrefix, Token, TokenKind};
 
 /// Check that no line exceeds the maximum length.
 ///
@@ -44,10 +44,18 @@ fn visual_line_length(line: &str, tab_width: usize) -> usize {
     col
 }
 
-/// Check for trailing whitespace on any line.
-pub fn check_trailing_whitespace(file: &ScriptFile, diagnostics: &mut Vec<Diagnostic>) {
+/// Check for trailing whitespace on any line outside a multi-line string.
+pub fn check_trailing_whitespace(
+    tokens: &[Token],
+    file: &ScriptFile,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let strings = StringLines::new(tokens, file.lines.len());
     for (i, line) in file.lines.iter().enumerate() {
         let line_num = i + 1;
+        if strings.ends_inside(i) {
+            continue;
+        }
         if line.ends_with(' ') || line.ends_with('\t') {
             let trimmed_len = line.trim_end().len();
             let offset = line_byte_offset(&file.lines, i) + trimmed_len;
@@ -100,15 +108,18 @@ pub fn check_trailing_newline(file: &ScriptFile, diagnostics: &mut Vec<Diagnosti
     }
 }
 
-/// Check indentation style (tabs or spaces based on config).
+/// Check indentation style (tabs or spaces based on config). Lines inside a
+/// multi-line string are skipped: their leading whitespace is string data.
 pub fn check_indentation_style(
+    tokens: &[Token],
     file: &ScriptFile,
     config: &Config,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
+    let strings = StringLines::new(tokens, file.lines.len());
     for (i, line) in file.lines.iter().enumerate() {
         let line_num = i + 1;
-        if line.is_empty() {
+        if line.is_empty() || strings.is_interior(i) {
             continue;
         }
 
@@ -607,13 +618,15 @@ pub fn check_one_statement_per_line(
 
 // --- New formatting rules ---
 
-/// Check for runs of 3+ consecutive blank lines anywhere in the file.
-pub fn check_blank_lines(file: &ScriptFile, diagnostics: &mut Vec<Diagnostic>) {
+/// Check for runs of 3+ consecutive blank lines anywhere in the file,
+/// except inside a multi-line string, where a blank line is content.
+pub fn check_blank_lines(tokens: &[Token], file: &ScriptFile, diagnostics: &mut Vec<Diagnostic>) {
+    let strings = StringLines::new(tokens, file.lines.len());
     let mut consecutive_blank = 0;
     let mut run_start_idx: usize = 0;
 
     for (idx, line) in file.lines.iter().enumerate() {
-        if line.trim().is_empty() {
+        if line.trim().is_empty() && !strings.ends_inside(idx) {
             consecutive_blank += 1;
             if consecutive_blank == 1 {
                 run_start_idx = idx;
@@ -1728,9 +1741,22 @@ mod tests {
     fn test_trailing_whitespace() {
         let file = make_file(&["var x = 5   ", ""]);
         let mut diags = Vec::new();
-        check_trailing_whitespace(&file, &mut diags);
+        check_trailing_whitespace(&tokenize(&file.lines.join("\n")), &file, &mut diags);
         assert_eq!(diags.len(), 1);
         assert!(diags[0].fix.is_some());
+    }
+
+    #[test]
+    fn layout_rules_skip_multiline_string_contents() {
+        let source = "const T = \"\"\"a   \n\n\n\n    b\n\t c\n\"\"\"\n";
+        let lines: Vec<&str> = source.split('\n').collect();
+        let file = make_file(&lines);
+        let tokens = tokenize(source);
+        let mut diags = Vec::new();
+        check_trailing_whitespace(&tokens, &file, &mut diags);
+        check_blank_lines(&tokens, &file, &mut diags);
+        check_indentation_style(&tokens, &file, &Config::default(), &mut diags);
+        assert!(diags.is_empty(), "unexpected diagnostics: {:?}", diags);
     }
 
     #[test]
@@ -1755,7 +1781,12 @@ mod tests {
         let file = make_file(&["    var x = 5", ""]);
         let config = Config::default(); // use_tabs: true
         let mut diags = Vec::new();
-        check_indentation_style(&file, &config, &mut diags);
+        check_indentation_style(
+            &tokenize(&file.lines.join("\n")),
+            &file,
+            &config,
+            &mut diags,
+        );
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("tabs"));
         assert!(diags[0].fix.is_some());
@@ -1766,7 +1797,12 @@ mod tests {
         let file = make_file(&["\t var x = 5", ""]);
         let config = Config::default();
         let mut diags = Vec::new();
-        check_indentation_style(&file, &config, &mut diags);
+        check_indentation_style(
+            &tokenize(&file.lines.join("\n")),
+            &file,
+            &config,
+            &mut diags,
+        );
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("mixed"));
         assert!(diags[0].fix.is_some());

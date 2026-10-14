@@ -76,13 +76,13 @@ pub fn run_all_rules_with_source(
         formatting::check_max_line_length(file, config, &mut diagnostics);
     }
     if config.is_rule_enabled("format/trailing-whitespace") {
-        formatting::check_trailing_whitespace(file, &mut diagnostics);
+        formatting::check_trailing_whitespace(tokens, file, &mut diagnostics);
     }
     if config.is_rule_enabled("format/trailing-newline") {
         formatting::check_trailing_newline(file, &mut diagnostics);
     }
     if config.is_rule_enabled("format/no-tabs-as-spaces") {
-        formatting::check_indentation_style(file, config, &mut diagnostics);
+        formatting::check_indentation_style(tokens, file, config, &mut diagnostics);
     }
     if config.is_rule_enabled("format/boolean-operators") {
         formatting::check_boolean_operators(tokens, file, &mut diagnostics);
@@ -103,7 +103,7 @@ pub fn run_all_rules_with_source(
         formatting::check_one_statement_per_line(tokens, file, &mut diagnostics);
     }
     if config.is_rule_enabled("format/blank-lines") {
-        formatting::check_blank_lines(file, &mut diagnostics);
+        formatting::check_blank_lines(tokens, file, &mut diagnostics);
     }
     if config.is_rule_enabled("format/trailing-comma") {
         formatting::check_trailing_comma(tokens, file, &mut diagnostics);

@@ -1,5 +1,6 @@
 use gdstyle::ast::ClassMember;
 use gdstyle::config::Config;
+use gdstyle::diagnostic::Diagnostic;
 use gdstyle::fixer;
 use gdstyle::formatter;
 use gdstyle::lexer::Lexer;
@@ -6594,4 +6595,29 @@ fn triple_quoted_strings_survive_line_wrapping() {
         formatter::format_source(&formatted, &default_config()),
         formatted
     );
+}
+
+#[test]
+fn formatter_keeps_multiline_string_contents() {
+    // Trailing whitespace, blank-line runs, indentation and line length
+    // inside a `"""` literal are data, not layout.
+    let source = std::fs::read_to_string(fixture_path("multiline_string.gd")).unwrap();
+    let formatted = formatter::format_source(&source, &default_config());
+    assert_eq!(formatted, source);
+}
+
+#[test]
+fn lint_ignores_layout_inside_multiline_strings() {
+    let source = std::fs::read_to_string(fixture_path("multiline_string.gd")).unwrap();
+    let diagnostics = linter::lint_source(&source, "multiline_string.gd", &default_config());
+    let layout: Vec<&Diagnostic> = diagnostics
+        .iter()
+        .filter(|d| {
+            matches!(
+                d.rule.as_str(),
+                "format/trailing-whitespace" | "format/blank-lines" | "format/no-tabs-as-spaces"
+            )
+        })
+        .collect();
+    assert!(layout.is_empty(), "unexpected diagnostics: {:?}", layout);
 }

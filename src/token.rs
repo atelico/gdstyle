@@ -173,3 +173,66 @@ impl Token {
         Self { kind, span, text }
     }
 }
+
+/// The lines of a file that multi-line string literals cover. Layout passes
+/// and rules use it to leave string data alone: whitespace, blank lines and
+/// line length inside a literal are part of its value.
+///
+/// # Example
+///
+/// ```
+/// use gdstyle::lexer::Lexer;
+/// use gdstyle::token::StringLines;
+///
+/// let source = "var a = 1\nvar s = \"\"\"\nx\n\"\"\"\nvar b = 2\n";
+/// let lines = StringLines::new(&Lexer::new(source).tokenize(), source.split('\n').count());
+/// assert!(!lines.is_interior(1) && lines.ends_inside(1)); // `var s = """`
+/// assert!(lines.is_interior(2) && lines.ends_inside(2)); // `x`
+/// assert!(lines.is_interior(3) && !lines.ends_inside(3)); // `"""`
+/// assert!(!lines.is_interior(4) && !lines.ends_inside(4)); // `var b = 2`
+/// ```
+pub struct StringLines {
+    interior: Vec<bool>,
+    ends_inside: Vec<bool>,
+}
+
+impl StringLines {
+    /// Build the masks for `line_count` lines from the file's tokens.
+    pub fn new(tokens: &[Token], line_count: usize) -> Self {
+        let mut interior = vec![false; line_count];
+        let mut ends_inside = vec![false; line_count];
+        for token in tokens {
+            if !matches!(token.kind, TokenKind::String(_)) {
+                continue;
+            }
+            let first = token.span.line;
+            let last = first + token.text.matches('\n').count();
+            for line in first..=last {
+                let Some(idx) = line.checked_sub(1).filter(|&idx| idx < line_count) else {
+                    break;
+                };
+                // OR, not assign: a later string on the same line (`""" % "x"`)
+                // must not clear what the literal before it set.
+                interior[idx] |= line > first;
+                ends_inside[idx] |= line < last;
+            }
+        }
+        Self {
+            interior,
+            ends_inside,
+        }
+    }
+
+    /// Line `idx` (0-based) starts inside a literal: it comes after the line
+    /// that opens one, up to and including the line that closes it. The
+    /// closing line may still carry code after the `"""`.
+    pub fn is_interior(&self, idx: usize) -> bool {
+        self.interior.get(idx).copied().unwrap_or(false)
+    }
+
+    /// The end of line `idx` (0-based) is inside a literal: the opening line
+    /// and every following line before the one that closes it.
+    pub fn ends_inside(&self, idx: usize) -> bool {
+        self.ends_inside.get(idx).copied().unwrap_or(false)
+    }
+}

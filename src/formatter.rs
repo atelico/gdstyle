@@ -4,7 +4,7 @@ use crate::fixer;
 use crate::lexer::Lexer;
 use crate::linter;
 use crate::parser::Parser;
-use crate::token::{Token, TokenKind};
+use crate::token::{StringLines, Token, TokenKind};
 
 /// Format a GDScript source string according to style rules.
 ///
@@ -96,13 +96,20 @@ fn format_pass(source: &str, config: &Config) -> String {
     result
 }
 
+/// The lines of `source` that multi-line string literals cover; see
+/// [`StringLines`]. Their whitespace, blank runs and length are string data.
+fn string_lines(source: &str) -> StringLines {
+    StringLines::new(&Lexer::new(source).tokenize(), source.split('\n').count())
+}
+
 fn normalize_indentation(source: &str, config: &Config) -> String {
     let lines: Vec<&str> = source.split('\n').collect();
+    let strings = string_lines(source);
     let mut result = Vec::new();
 
-    for line in &lines {
-        if line.is_empty() {
-            result.push(String::new());
+    for (idx, line) in lines.iter().enumerate() {
+        if line.is_empty() || strings.is_interior(idx) {
+            result.push(line.to_string());
             continue;
         }
 
@@ -133,9 +140,17 @@ fn normalize_indentation(source: &str, config: &Config) -> String {
 }
 
 fn strip_trailing_whitespace(source: &str) -> String {
+    let strings = string_lines(source);
     source
         .split('\n')
-        .map(|line| line.trim_end().to_string())
+        .enumerate()
+        .map(|(idx, line)| {
+            if strings.ends_inside(idx) {
+                line.to_string()
+            } else {
+                line.trim_end().to_string()
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -580,11 +595,12 @@ fn normalize_member_spacing(source: &str, config: &Config) -> String {
 
 fn collapse_blank_lines(source: &str) -> String {
     let lines: Vec<&str> = source.split('\n').collect();
+    let strings = string_lines(source);
     let mut result = Vec::new();
     let mut blank_count = 0;
 
-    for line in &lines {
-        if line.trim().is_empty() {
+    for (idx, line) in lines.iter().enumerate() {
+        if line.trim().is_empty() && !strings.ends_inside(idx) {
             blank_count += 1;
             if blank_count <= 2 {
                 result.push(String::new());
@@ -791,6 +807,7 @@ fn break_long_lines(source: &str, config: &Config) -> String {
     const TAB_WIDTH: usize = 4;
     let max_len = config.max_line_length;
     let lines: Vec<&str> = source.split('\n').collect();
+    let strings = string_lines(source);
     let mut result: Vec<String> = Vec::new();
 
     let mut i = 0;
@@ -798,7 +815,7 @@ fn break_long_lines(source: &str, config: &Config) -> String {
         let line = lines[i];
         let visual_len = visual_line_len(line, TAB_WIDTH);
 
-        if visual_len <= max_len {
+        if visual_len <= max_len || strings.is_interior(i) {
             result.push(line.to_string());
             i += 1;
             continue;
@@ -2056,6 +2073,32 @@ mod tests {
         let source = "var x = 5   \nvar y = 10\t\t\n";
         let result = strip_trailing_whitespace(source);
         assert_eq!(result, "var x = 5\nvar y = 10\n");
+    }
+
+    #[test]
+    fn line_passes_skip_multiline_string_contents() {
+        // Everything between the opening and closing `"""` is string data.
+        let source = "extends Node\n\nconst T = \"\"\"a   \n\n\n\n    b\n\tc\n\"\"\"\n";
+        assert_eq!(strip_trailing_whitespace(source), source);
+        assert_eq!(collapse_blank_lines(source), source);
+        assert_eq!(normalize_indentation(source, &Config::default()), source);
+        let long = format!("var s = \"\"\"\nf({})\n\"\"\"\n", "a, ".repeat(60));
+        assert_eq!(break_long_lines(&long, &Config::default()), long);
+    }
+
+    #[test]
+    fn format_source_keeps_multiline_string_contents() {
+        let source = "extends Node\n\nconst T = \"\"\"a   \n\n\n\n    b\n\tc\n\"\"\"\n";
+        assert_eq!(format_source(source, &Config::default()), source);
+    }
+
+    #[test]
+    fn format_source_keeps_closing_line_followed_by_another_string() {
+        // A second string on the closing line must not clear that line's mask.
+        let tail = "func f() -> String:\n\tvar s := \"\"\"\nline\n    closing indent kept\"\"\" % \"x\"\n\treturn s\n";
+        assert_eq!(format_source(tail, &Config::default()), tail);
+        let pair = "var t := \"\"\"a\n    b\"\"\" + \"\"\"c\n    d\"\"\"\n";
+        assert_eq!(format_source(pair, &Config::default()), pair);
     }
 
     #[test]
