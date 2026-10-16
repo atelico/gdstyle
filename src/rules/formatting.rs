@@ -1191,14 +1191,16 @@ pub fn check_colon_spacing(
             }
         }
 
-        // One space after the colon, unless followed by `=` (`:=`) or end of
-        // line (`if cond:` block opener, `func f():` etc.).
+        // One space after the colon, unless followed by `=` (`:=`), end of
+        // line (`if cond:` block opener, `func f():` etc.), or a comma. A
+        // space before a comma is removed by `format/comma-spacing`, so
+        // asking for one here would make the two fixes undo each other.
         let token_end = token.span.offset + token.span.length;
         if token_end < source.len() {
             let next_byte = source.as_bytes().get(token_end);
             let no_space_required = matches!(
                 next_byte,
-                Some(&b'=') | Some(&b'\n') | Some(&b' ') | Some(&b'\t')
+                Some(&b'=') | Some(&b'\n') | Some(&b' ') | Some(&b'\t') | Some(&b',')
             );
             if !no_space_required {
                 // Also tolerate when the next token IS a Newline (the byte
@@ -1283,14 +1285,22 @@ pub fn check_comma_spacing(
             }
         }
 
-        // One space after the comma, unless followed by a newline or a
-        // closing delimiter (trailing comma in a multi-line list).
+        // One space after the comma, unless followed by a newline, a
+        // closing delimiter (trailing comma in a multi-line list), or another
+        // comma (invalid `[a,,b]`): the "no space before" check above would
+        // remove that space again, so the fixes would never settle.
         let token_end = token.span.offset + token.span.length;
         if token_end < source.len() {
             let next_byte = source.as_bytes().get(token_end);
             let no_space_required = matches!(
                 next_byte,
-                Some(&b' ') | Some(&b'\t') | Some(&b'\n') | Some(&b')') | Some(&b']') | Some(&b'}')
+                Some(&b' ')
+                    | Some(&b'\t')
+                    | Some(&b'\n')
+                    | Some(&b')')
+                    | Some(&b']')
+                    | Some(&b'}')
+                    | Some(&b',')
             );
             if !no_space_required {
                 diagnostics.push(
@@ -1482,14 +1492,30 @@ pub fn check_call_paren_spacing(
 }
 
 /// Check enum members are each on their own line.
+///
+/// The fix moves each member of a single-line enum onto its own line. It
+/// works on tokens, so a comma inside a string or a call is not a member
+/// separator, and only the text between the braces changes: `enum Name {`
+/// and anything after the closing `}`, such as a comment, stay as written.
+///
+/// # Example
+///
+/// ```
+/// use gdstyle::{config::Config, fixer, linter};
+///
+/// let source = "enum Mode {A, B = 2} # note\n";
+/// let diagnostics = linter::lint_source(source, "demo.gd", &Config::default());
+/// let fixed = fixer::apply_fixes(source, &diagnostics, true);
+/// assert_eq!(fixed, "enum Mode {\n\tA,\n\tB = 2,\n} # note\n");
+/// ```
 pub fn check_enum_one_per_line(
+    tokens: &[Token],
     file: &ScriptFile,
     source: Option<&str>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     for member in &file.members {
         if let ClassMember::Enum {
-            name,
             members: enum_members,
             span,
             ..
@@ -1502,10 +1528,7 @@ pub fn check_enum_one_per_line(
             let first_line = enum_members[0].span.line;
             let all_same_line = enum_members.iter().all(|m| m.span.line == first_line);
             if all_same_line && first_line == span.line {
-                // Build the auto-fix: reformat enum to multi-line.
-                let fix = source.and_then(|src| {
-                    build_enum_multiline_fix(src, *span, name.as_deref(), enum_members)
-                });
+                let fix = source.and_then(|src| build_enum_multiline_fix(src, tokens, *span));
 
                 let mut diag = Diagnostic::warning(
                     "format/enum-one-per-line",
@@ -1522,68 +1545,74 @@ pub fn check_enum_one_per_line(
     }
 }
 
-/// Build a Fix that reformats a single-line enum to multi-line.
-/// Extracts member text from the original source to preserve value assignments.
-fn build_enum_multiline_fix(
-    source: &str,
-    span: Span,
-    name: Option<&str>,
-    _members: &[crate::ast::EnumMember],
-) -> Option<Fix> {
-    // Find the line in the source.
-    let line_idx = span.line - 1;
-    let lines: Vec<&str> = source.split('\n').collect();
-    if line_idx >= lines.len() {
+/// Build a Fix that puts each member of the single-line enum declared at
+/// `span` on its own line. Members are the source text between top-level
+/// commas inside the braces, so value expressions are kept as written.
+/// Returns `None` when the braces can't be matched on the enum's line.
+fn build_enum_multiline_fix(source: &str, tokens: &[Token], span: Span) -> Option<Fix> {
+    let open = tokens
+        .iter()
+        .position(|token| token.span.offset >= span.offset && token.kind == TokenKind::LeftBrace)?;
+    if tokens[open].span.line != span.line {
         return None;
     }
-    let line = lines[line_idx];
-    let line_offset: usize = lines[..line_idx].iter().map(|l| l.len() + 1).sum();
 
-    // Detect the indentation of the enum declaration.
-    let indent: String = line
+    // Byte ranges of the members, split at commas outside any nested
+    // bracket. String tokens are single tokens, so their commas never split.
+    let mut members: Vec<(usize, usize)> = Vec::new();
+    let mut current: Option<(usize, usize)> = None;
+    let mut depth = 0usize;
+    let mut close = None;
+    for (idx, token) in tokens.iter().enumerate().skip(open + 1) {
+        match token.kind {
+            TokenKind::RightBrace if depth == 0 => {
+                close = Some(idx);
+                break;
+            }
+            TokenKind::Comma if depth == 0 => {
+                members.extend(current.take());
+                continue;
+            }
+            TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent | TokenKind::Eof => {
+                continue;
+            }
+            TokenKind::LeftParen | TokenKind::LeftBracket | TokenKind::LeftBrace => depth += 1,
+            TokenKind::RightParen | TokenKind::RightBracket | TokenKind::RightBrace => {
+                depth = depth.saturating_sub(1);
+            }
+            _ => {}
+        }
+        let end = token.span.offset + token.span.length;
+        current = Some(match current {
+            Some((start, _)) => (start, end),
+            None => (token.span.offset, end),
+        });
+    }
+    let close = close?;
+    members.extend(current);
+    if members.is_empty() || tokens[close].span.line != span.line {
+        return None;
+    }
+
+    let line_start = source[..span.offset].rfind('\n').map_or(0, |idx| idx + 1);
+    let indent: String = source[line_start..]
         .chars()
         .take_while(|c| *c == '\t' || *c == ' ')
         .collect();
-    let member_indent = format!("{}\t", indent);
-
-    // Extract the content between { and } from the original line to preserve
-    // value assignments like IDLE = 0.
-    let brace_open = line.find('{')?;
-    let brace_close = line.rfind('}')?;
-    let inner = &line[brace_open + 1..brace_close];
-
-    // Split by commas (top-level only, respecting nested parens for defaults).
-    let items: Vec<&str> = inner
-        .split(',')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    if items.is_empty() {
-        return None;
-    }
-
-    // Build the replacement: enum Name {\n\tMEMBER = VAL,\n...\n}
-    let mut new_text = String::new();
-    new_text.push_str(&indent);
-    new_text.push_str("enum ");
-    if let Some(n) = name {
-        new_text.push_str(n);
-        new_text.push(' ');
-    }
-    new_text.push_str("{\n");
-    for item in &items {
-        new_text.push_str(&member_indent);
-        new_text.push_str(item);
+    let mut new_text = String::from("\n");
+    for (start, end) in members {
+        new_text.push_str(&indent);
+        new_text.push('\t');
+        new_text.push_str(&source[start..end]);
         new_text.push_str(",\n");
     }
     new_text.push_str(&indent);
-    new_text.push('}');
 
+    let replace_start = tokens[open].span.offset + tokens[open].span.length;
     Some(Fix {
         replacements: vec![Replacement {
-            offset: line_offset,
-            length: line.len(),
+            offset: replace_start,
+            length: tokens[close].span.offset - replace_start,
             new_text,
         }],
         is_safe: true,
@@ -1840,6 +1869,81 @@ mod tests {
         let mut diags = Vec::new();
         check_trailing_comma(&tokenize(source), &file, &mut diags);
         assert!(diags.is_empty(), "unexpected diagnostics: {:?}", diags);
+    }
+
+    /// Apply every fix in `diags` to `source`, through the real fixer.
+    fn apply(source: &str, diags: &[Diagnostic]) -> String {
+        crate::fixer::apply_fixes(source, diags, true)
+    }
+
+    fn enum_fix(source: &str) -> String {
+        let tokens = tokenize(source);
+        let members = crate::parser::Parser::new(&tokens).parse();
+        let file = ScriptFile {
+            path: "test.gd".to_string(),
+            members,
+            lines: source.split('\n').map(str::to_string).collect(),
+        };
+        let mut diags = Vec::new();
+        check_enum_one_per_line(&tokens, &file, Some(source), &mut diags);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        apply(source, &diags)
+    }
+
+    #[test]
+    fn enum_fix_keeps_text_after_the_closing_brace() {
+        // A `}` in the trailing comment is not the enum's closer, and the
+        // comment itself survives.
+        assert_eq!(
+            enum_fix("enum E {A, B} # keep {this}\n"),
+            "enum E {\n\tA,\n\tB,\n} # keep {this}\n"
+        );
+        assert_eq!(
+            enum_fix("enum F {X = 1, Y = 2}  # note\n"),
+            "enum F {\n\tX = 1,\n\tY = 2,\n}  # note\n"
+        );
+    }
+
+    #[test]
+    fn enum_fix_splits_only_at_top_level_commas() {
+        assert_eq!(
+            enum_fix("enum G {S = \"x, y\", T = max(1, 2)}\n"),
+            "enum G {\n\tS = \"x, y\",\n\tT = max(1, 2),\n}\n"
+        );
+    }
+
+    #[test]
+    fn enum_fix_keeps_indentation_and_trailing_comma() {
+        assert_eq!(
+            enum_fix("\tenum {A, B,}\n"),
+            "\tenum {\n\t\tA,\n\t\tB,\n\t}\n"
+        );
+    }
+
+    #[test]
+    fn spacing_fixes_settle_on_consecutive_commas() {
+        // `[a,,b]` and `{k:,}` are invalid GDScript. "No space before ','"
+        // removes any space between two commas, so "space after" must not
+        // ask for one there, or the two fixes undo each other on every run.
+        let spacing_fix = |source: &str| {
+            let tokens = tokenize(source);
+            let lines: Vec<&str> = source.split('\n').collect();
+            let file = make_file(&lines);
+            let mut diags = Vec::new();
+            check_comma_spacing(&tokens, &file, source, &mut diags);
+            check_colon_spacing(&tokens, &file, source, &mut diags);
+            apply(source, &diags)
+        };
+        for (source, settled) in [
+            ("var a = [1,,2]\n", "var a = [1,, 2]\n"),
+            ("var a = [1, , 2]\n", "var a = [1,, 2]\n"),
+            ("var a = [\"x\",,,,]\n", "var a = [\"x\",,,,]\n"),
+            ("var d = {k:,}\n", "var d = {k:,}\n"),
+        ] {
+            let fixed = spacing_fix(source);
+            assert_eq!(fixed, settled, "{source:?}");
+            assert_eq!(spacing_fix(&fixed), fixed, "{source:?} keeps changing");
+        }
     }
 
     #[test]

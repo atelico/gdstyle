@@ -115,10 +115,7 @@ fn format_pass_with(source: &str, config: &Config, spanning_strings: SpanningStr
 ///
 /// The passes in [`format_pass_with`] keep string literals intact: they move,
 /// re-indent or wrap whole lines around them but don't split or join one. So
-/// the answer for a pass's input holds for every intermediate result. The one
-/// known exception is single-line enum expansion, which can split a string
-/// enum value at its commas; that only happens on invalid GDScript, since enum
-/// values must be integers.
+/// the answer for a pass's input holds for every intermediate result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SpanningStrings {
     Present,
