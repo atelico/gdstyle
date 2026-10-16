@@ -140,7 +140,7 @@ pub fn run_all_rules_with_source(
         formatting::check_large_number_underscores(tokens, file, config, &mut diagnostics);
     }
     if config.is_rule_enabled("format/enum-one-per-line") {
-        formatting::check_enum_one_per_line(tokens, file, source, &mut diagnostics);
+        formatting::check_enum_one_per_line(tokens, file, config, source, &mut diagnostics);
     }
 
     // Ordering rules.

@@ -153,13 +153,13 @@ gdstyle ships with 57 rules organized into five categories. Most rules are enabl
 | `format/blank-lines` | Collapse 3+ blank lines to 2 | safe |
 | `format/trailing-comma` | Trailing comma on last item of multi-line collections whose closing bracket starts its own line | safe |
 | `format/operator-spacing` | One space around binary operators | safe |
-| `format/colon-spacing` | No space before `:`, one space after (except `:=` and end of line) | safe |
-| `format/comma-spacing` | No space before `,`, one space after (except newline / closing bracket) | safe |
+| `format/colon-spacing` | No space before `:`, one space after (except `:=`, end of line, or before `,`) | safe |
+| `format/comma-spacing` | No space before `,`, one space after (except newline, closing bracket, or before another `,`) | safe |
 | `format/brace-spacing` | Single-line dictionary literals need a space after `{` and before `}` | safe |
 | `format/call-paren-spacing` | No space between a callee and its opening `(` | safe |
 | `format/float-literal-zeros` | Float literals need leading/trailing zeros (`0.5`, not `.5`) | safe |
 | `format/large-number-underscores` | Numbers at or above `large_number_threshold` (default `10_000`) should use underscores (`10_000`). Covers ints and the integer part of floats (`1_000_000.5`); hex/binary literals are skipped | safe |
-| `format/enum-one-per-line` | Each enum member on its own line | safe |
+| `format/enum-one-per-line` | Each enum member on its own line, including enums in inner classes | safe |
 
 ### Ordering (1 rule)
 

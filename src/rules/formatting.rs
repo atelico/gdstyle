@@ -153,6 +153,24 @@ pub fn check_trailing_newline(file: &ScriptFile, diagnostics: &mut Vec<Diagnosti
     }
 }
 
+/// `indent` (a run of tabs and spaces) as `format/no-tabs-as-spaces` rewrites
+/// it: with tabs, every 4 columns become a tab (a spaces-only indent becomes
+/// at least one); with spaces, each tab becomes 4 spaces.
+fn indent_in_configured_style(indent: &str, use_tabs: bool) -> String {
+    let has_tabs = indent.contains('\t');
+    let has_spaces = indent.contains(' ');
+    if use_tabs && has_tabs && has_spaces {
+        let width: usize = indent.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum();
+        "\t".repeat(width / 4)
+    } else if use_tabs && has_spaces {
+        "\t".repeat((indent.len() / 4).max(1))
+    } else if !use_tabs {
+        indent.replace('\t', "    ")
+    } else {
+        indent.to_string()
+    }
+}
+
 /// Check indentation style (tabs or spaces based on config). Lines inside a
 /// multi-line string are skipped: their leading whitespace is string data.
 pub fn check_indentation_style(
@@ -183,17 +201,7 @@ pub fn check_indentation_style(
 
         // Mixed indentation is always wrong.
         if has_tabs && has_spaces {
-            let new_indent = if config.use_tabs {
-                // Convert spaces to tabs (assume 4 spaces = 1 tab).
-                let tab_count =
-                    indent
-                        .chars()
-                        .fold(0usize, |acc, c| if c == '\t' { acc + 4 } else { acc + 1 });
-                "\t".repeat(tab_count / 4)
-            } else {
-                // Convert tabs to spaces (1 tab = 4 spaces).
-                indent.replace('\t', "    ")
-            };
+            let new_indent = indent_in_configured_style(&indent, config.use_tabs);
             diagnostics.push(
                 Diagnostic::warning(
                     "format/no-tabs-as-spaces",
@@ -214,8 +222,7 @@ pub fn check_indentation_style(
         }
 
         if config.use_tabs && has_spaces {
-            let tab_count = indent.len() / 4;
-            let new_indent = "\t".repeat(if tab_count == 0 { 1 } else { tab_count });
+            let new_indent = indent_in_configured_style(&indent, config.use_tabs);
             diagnostics.push(
                 Diagnostic::warning(
                     "format/no-tabs-as-spaces",
@@ -233,7 +240,7 @@ pub fn check_indentation_style(
                 }),
             );
         } else if !config.use_tabs && has_tabs {
-            let new_indent = indent.replace('\t', "    ");
+            let new_indent = indent_in_configured_style(&indent, config.use_tabs);
             diagnostics.push(
                 Diagnostic::warning(
                     "format/no-tabs-as-spaces",
@@ -1512,6 +1519,7 @@ pub fn check_call_paren_spacing(
 pub fn check_enum_one_per_line(
     tokens: &[Token],
     file: &ScriptFile,
+    config: &Config,
     source: Option<&str>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
@@ -1530,7 +1538,8 @@ pub fn check_enum_one_per_line(
             let first_line = enum_members[0].span.line;
             let all_same_line = enum_members.iter().all(|m| m.span.line == first_line);
             if all_same_line && first_line == span.line {
-                let fix = source.and_then(|src| build_enum_multiline_fix(src, tokens, *span));
+                let fix =
+                    source.and_then(|src| build_enum_multiline_fix(src, tokens, *span, config));
 
                 let mut diag = Diagnostic::warning(
                     "format/enum-one-per-line",
@@ -1550,8 +1559,21 @@ pub fn check_enum_one_per_line(
 /// Build a Fix that puts each member of the single-line enum declared at
 /// `span` on its own line. Members are the source text between top-level
 /// commas inside the braces, so value expressions are kept as written.
-/// Returns `None` when the braces can't be matched on the enum's line.
-fn build_enum_multiline_fix(source: &str, tokens: &[Token], span: Span) -> Option<Fix> {
+///
+/// Members are indented one level deeper than the enum line, in the style
+/// `format/no-tabs-as-spaces` will give that line, so one `--fix` run
+/// settles and never mixes tabs and spaces. With that rule off, the line's
+/// own style is used instead.
+///
+/// Returns `None` when the braces can't be matched on the enum's line, or
+/// when a member is empty (`{A,, B}`, a Godot parse error): the fix would
+/// otherwise drop it and silently turn invalid code into valid code.
+fn build_enum_multiline_fix(
+    source: &str,
+    tokens: &[Token],
+    span: Span,
+    config: &Config,
+) -> Option<Fix> {
     let open = tokens
         .iter()
         .position(|token| token.span.offset >= span.offset && token.kind == TokenKind::LeftBrace)?;
@@ -1572,7 +1594,8 @@ fn build_enum_multiline_fix(source: &str, tokens: &[Token], span: Span) -> Optio
                 break;
             }
             TokenKind::Comma if depth == 0 => {
-                members.extend(current.take());
+                // A comma with nothing before it marks an empty member.
+                members.push(current.take()?);
                 continue;
             }
             TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent | TokenKind::Eof => {
@@ -1601,10 +1624,24 @@ fn build_enum_multiline_fix(source: &str, tokens: &[Token], span: Span) -> Optio
         .chars()
         .take_while(|c| *c == '\t' || *c == ' ')
         .collect();
+    // Indent like `format/no-tabs-as-spaces` will rewrite the enum line, so
+    // one `--fix` run settles; with that rule off, keep the line's own style.
+    let (indent, indent_unit) = if config.is_rule_enabled("format/no-tabs-as-spaces") {
+        let unit = if config.use_tabs { "\t" } else { "    " };
+        (indent_in_configured_style(&indent, config.use_tabs), unit)
+    } else {
+        let unit = match indent.chars().next() {
+            Some('\t') => "\t",
+            Some(_) => "    ",
+            None if config.use_tabs => "\t",
+            None => "    ",
+        };
+        (indent, unit)
+    };
     let mut new_text = String::from("\n");
     for (start, end) in members {
         new_text.push_str(&indent);
-        new_text.push('\t');
+        new_text.push_str(indent_unit);
         new_text.push_str(&source[start..end]);
         new_text.push_str(",\n");
     }
@@ -1887,9 +1924,59 @@ mod tests {
             lines: source.split('\n').map(str::to_string).collect(),
         };
         let mut diags = Vec::new();
-        check_enum_one_per_line(&tokens, &file, Some(source), &mut diags);
+        check_enum_one_per_line(&tokens, &file, &Config::default(), Some(source), &mut diags);
         assert_eq!(diags.len(), 1, "{diags:?}");
         apply(source, &diags)
+    }
+
+    #[test]
+    fn enum_fix_indents_members_like_the_indentation_rule() {
+        // The indentation rule turns the enum line's four spaces into a tab
+        // in the same run, so members and `}` use tabs to match.
+        assert_eq!(
+            enum_fix("class A:\n    enum E {X, Y}\n"),
+            "class A:\n    enum E {\n\t\tX,\n\t\tY,\n\t}\n"
+        );
+        // An unindented enum follows the configured style.
+        let source = "enum E {X, Y}\n";
+        let tokens = tokenize(source);
+        let file = ScriptFile {
+            path: "test.gd".to_string(),
+            members: crate::parser::Parser::new(&tokens).parse(),
+            lines: source.split('\n').map(str::to_string).collect(),
+        };
+        let config = Config {
+            use_tabs: false,
+            ..Config::default()
+        };
+        let mut diags = Vec::new();
+        check_enum_one_per_line(&tokens, &file, &config, Some(source), &mut diags);
+        assert_eq!(apply(source, &diags), "enum E {\n    X,\n    Y,\n}\n");
+    }
+
+    #[test]
+    fn enum_fix_skips_an_empty_member() {
+        // `{X,, Y}` is a Godot parse error; dropping the gap would turn it
+        // into valid code without anyone noticing.
+        let source = "enum E {X,, Y}\n";
+        let tokens = tokenize(source);
+        let file = ScriptFile {
+            path: "test.gd".to_string(),
+            members: crate::parser::Parser::new(&tokens).parse(),
+            lines: source.split('\n').map(str::to_string).collect(),
+        };
+        let mut diags = Vec::new();
+        check_enum_one_per_line(&tokens, &file, &Config::default(), Some(source), &mut diags);
+        assert!(diags.iter().all(|d| d.fix.is_none()), "{diags:?}");
+    }
+
+    #[test]
+    fn enum_fix_keeps_a_leading_annotation() {
+        // main deleted the annotation when it rewrote the whole line.
+        assert_eq!(
+            enum_fix("@warning_ignore(\"unused\") enum E {X, Y}\n"),
+            "@warning_ignore(\"unused\") enum E {\n\tX,\n\tY,\n}\n"
+        );
     }
 
     #[test]

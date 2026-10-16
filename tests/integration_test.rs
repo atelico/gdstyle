@@ -6782,3 +6782,14 @@ fn formatter_is_idempotent_on_consecutive_commas() {
         assert_eq!(twice, once, "not idempotent for {source:?}");
     }
 }
+
+#[test]
+fn enum_fix_keeps_crlf_line_endings() {
+    let source = "extends Node\r\n\r\nenum E {X, Y} # note\r\n";
+    let config = default_config();
+    let diagnostics = linter::lint_source(source, "test.gd", &config);
+    assert_eq!(
+        fixer::apply_fixes(source, &diagnostics, true),
+        "extends Node\r\n\r\nenum E {\r\n\tX,\r\n\tY,\r\n} # note\r\n"
+    );
+}
