@@ -1565,7 +1565,8 @@ pub fn check_enum_one_per_line(
 /// settles and never mixes tabs and spaces. With that rule off, the line's
 /// own style is used instead.
 ///
-/// Returns `None` when the braces can't be matched on the enum's line, or
+/// Returns `None` when the braces can't be matched on the enum's line, when
+/// a trailing `# gdstyle:ignore` directive would end up on another line, or
 /// when a member is empty (`{A,, B}`, a Godot parse error): the fix would
 /// otherwise drop it and silently turn invalid code into valid code.
 fn build_enum_multiline_fix(
@@ -1616,6 +1617,18 @@ fn build_enum_multiline_fix(
     let close = close?;
     members.extend(current);
     if members.is_empty() || tokens[close].span.line != span.line {
+        return None;
+    }
+    // A trailing `# gdstyle:ignore` comment applies to its own line. The
+    // expansion would move it to the `}` line and stop it covering the
+    // enum line, so leave such a line for the user to expand.
+    let has_line_directive = tokens[close + 1..]
+        .iter()
+        .take_while(|token| token.span.line == span.line)
+        .any(|token| {
+            matches!(&token.kind, TokenKind::Comment(text) if text.trim_start().starts_with("gdstyle:ignore"))
+        });
+    if has_line_directive {
         return None;
     }
 
@@ -1968,6 +1981,23 @@ mod tests {
         let mut diags = Vec::new();
         check_enum_one_per_line(&tokens, &file, &Config::default(), Some(source), &mut diags);
         assert!(diags.iter().all(|d| d.fix.is_none()), "{diags:?}");
+    }
+
+    #[test]
+    fn enum_fix_leaves_a_line_with_a_suppression_directive() {
+        // Expanding would move the directive onto the `}` line, where it no
+        // longer covers the enum line.
+        let source = "enum E {X, Y} # gdstyle:ignore=format/no-tabs-as-spaces\n";
+        let tokens = tokenize(source);
+        let file = ScriptFile {
+            path: "test.gd".to_string(),
+            members: crate::parser::Parser::new(&tokens).parse(),
+            lines: source.split('\n').map(str::to_string).collect(),
+        };
+        let mut diags = Vec::new();
+        check_enum_one_per_line(&tokens, &file, &Config::default(), Some(source), &mut diags);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert!(diags[0].fix.is_none(), "{diags:?}");
     }
 
     #[test]
