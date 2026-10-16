@@ -3908,6 +3908,58 @@ fn formatter_and_fixer_keep_lf_string_in_crlf_file() {
     );
 }
 
+// Quote normalization rewrites a single-quoted string; its LF line break must
+// survive in a CRLF file rather than take the file's CRLF.
+#[test]
+fn quote_normalization_keeps_a_strings_line_endings() {
+    let source = "extends Node\r\n\r\nvar s = 'a\nb'\r\nvar x = 1\r\n";
+    let config = default_config();
+    let formatted = formatter::format_source(source, &config);
+    assert_eq!(
+        formatted,
+        "extends Node\r\n\r\nvar s = \"a\nb\"\r\nvar x = 1\r\n"
+    );
+    let diagnostics = linter::lint_source(source, "test.gd", &config);
+    assert_eq!(fixer::apply_fixes(source, &diagnostics, true), formatted);
+}
+
+// The file's style comes from the line breaks outside strings: one CRLF
+// inside a string must not turn an LF file into CRLF.
+#[test]
+fn crlf_inside_a_string_keeps_an_lf_file_lf() {
+    let source = "extends Node\n\nconst T = \"\"\"a\r\nb\"\"\"\nvar x = 1   \n";
+    let config = default_config();
+    assert_eq!(
+        formatter::format_source(source, &config),
+        "extends Node\n\nconst T = \"\"\"a\r\nb\"\"\"\n\nvar x = 1\n"
+    );
+    let diagnostics = linter::lint_source(source, "test.gd", &config);
+    assert_eq!(
+        fixer::apply_fixes(source, &diagnostics, true),
+        "extends Node\n\nconst T = \"\"\"a\r\nb\"\"\"\nvar x = 1\n"
+    );
+}
+
+// Two strings with the same text but different line endings must each keep
+// their own when the reorder swaps them.
+#[test]
+fn reordered_strings_keep_their_own_line_endings() {
+    let source = "extends Node\r\n\r\nvar b = \"\"\"x\r\ny\"\"\"\r\nconst A = \"\"\"x\ny\"\"\"\r\n";
+    let formatted = formatter::format_source(source, &default_config());
+    assert!(
+        formatted.contains("const A = \"\"\"x\ny\"\"\""),
+        "{formatted:?}"
+    );
+    assert!(
+        formatted.contains("var b = \"\"\"x\r\ny\"\"\""),
+        "{formatted:?}"
+    );
+    assert!(
+        formatted.find("const A") < formatted.find("var b"),
+        "{formatted:?}"
+    );
+}
+
 // Godot doesn't treat a `\r` without a following `\n` as a line break. It must
 // survive as-is: turning it into `\n` splits a comment (leaving code behind)
 // or changes a string's value, and must not flip the file to CRLF.

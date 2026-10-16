@@ -64,7 +64,7 @@ fn format_pass_with(source: &str, config: &Config, spanning_strings: SpanningStr
     //    output is re-parsed to verify it has the same set of class members
     //    as the input: if anything mutated, we keep the original.
     result = safe_reorder_class_members(&result);
-    result = safe_reorder_inner_classes(&result);
+    result = safe_reorder_inner_classes(&result, spanning_strings);
 
     // 2. Normalize indentation, then strip trailing whitespace. Neither pass
     //    adds or removes lines, so one string-line mask serves both.
@@ -890,10 +890,11 @@ fn break_long_lines(source: &str, config: &Config, spanning_strings: SpanningStr
 fn visual_line_len(line: &str, tab_width: usize) -> usize {
     let mut col = 0;
     for ch in line.chars() {
-        if ch == '\t' {
-            col = (col / tab_width + 1) * tab_width;
-        } else {
-            col += 1;
+        match ch {
+            '\t' => col = (col / tab_width + 1) * tab_width,
+            // A `\r` left in a string's CRLF line ending takes no columns.
+            '\r' => {}
+            _ => col += 1,
         }
     }
     col
@@ -1386,8 +1387,8 @@ fn safe_reorder_class_members(source: &str) -> String {
 /// Reorder the members of each inner class, unless doing so would change
 /// which code a `@warning_ignore_start` region covers (see
 /// `changes_warning_ignore_regions`).
-fn safe_reorder_inner_classes(source: &str) -> String {
-    let reordered = reorder_inner_classes(source);
+fn safe_reorder_inner_classes(source: &str, spanning_strings: SpanningStrings) -> String {
+    let reordered = reorder_inner_classes(source, spanning_strings);
     if changes_warning_ignore_regions(source, &reordered) {
         return source.to_string();
     }
@@ -1969,13 +1970,23 @@ fn move_class_decl_before_doc_comments(source: &str) -> String {
 }
 
 /// Find inner class blocks in the source and recursively reorder their members.
-fn reorder_inner_classes(source: &str) -> String {
+///
+/// The body is dedented, reordered and re-indented line by line, so lines
+/// inside a multi-line string are kept out of it: they are copied verbatim,
+/// never end the body, and never start a class.
+fn reorder_inner_classes(source: &str, spanning_strings: SpanningStrings) -> String {
     let lines: Vec<&str> = source.split('\n').collect();
+    let string_line_mask = string_lines(source, spanning_strings);
     let mut result: Vec<String> = Vec::new();
     let mut i = 0;
 
     while i < lines.len() {
         let trimmed = lines[i].trim();
+        if string_line_mask.is_interior(i) {
+            result.push(lines[i].to_string());
+            i += 1;
+            continue;
+        }
         // Detect inner class declaration: starts with "class " at indent > 0.
         let indent: String = lines[i]
             .chars()
@@ -1992,10 +2003,18 @@ fn reorder_inner_classes(source: &str) -> String {
             let body_start = i;
             while i < lines.len() {
                 let line = lines[i];
+                if string_line_mask.is_interior(i) {
+                    // String data belongs to the member that opened it.
+                    i += 1;
+                    continue;
+                }
                 if line.trim().is_empty() {
                     // Blank line: include if the next non-blank line is still in the body.
                     let mut next_nonblank = i + 1;
-                    while next_nonblank < lines.len() && lines[next_nonblank].trim().is_empty() {
+                    while next_nonblank < lines.len()
+                        && (lines[next_nonblank].trim().is_empty()
+                            || string_line_mask.is_interior(next_nonblank))
+                    {
                         next_nonblank += 1;
                     }
                     if next_nonblank < lines.len() {
@@ -2025,8 +2044,11 @@ fn reorder_inner_classes(source: &str) -> String {
                 // Extract body, dedent by one level, reorder, re-indent.
                 let body_lines: Vec<String> = lines[body_start..body_end]
                     .iter()
-                    .map(|l| {
-                        if l.trim().is_empty() {
+                    .enumerate()
+                    .map(|(offset, l)| {
+                        if string_line_mask.is_interior(body_start + offset) {
+                            l.to_string()
+                        } else if l.trim().is_empty() {
                             String::new()
                         } else if l.starts_with(&format!("{}\t", indent)) {
                             l[indent.len() + 1..].to_string()
@@ -2048,8 +2070,11 @@ fn reorder_inner_classes(source: &str) -> String {
 
                 // Re-indent and add to result.
                 let member_indent = format!("{}\t", indent);
-                for line in reordered.split('\n') {
-                    if line.trim().is_empty() {
+                let reordered_mask = string_lines(&reordered, spanning_strings);
+                for (idx, line) in reordered.split('\n').enumerate() {
+                    if reordered_mask.is_interior(idx) {
+                        result.push(line.to_string());
+                    } else if line.trim().is_empty() {
                         result.push(String::new());
                     } else {
                         result.push(format!("{}{}", member_indent, line));
@@ -2188,6 +2213,31 @@ mod tests {
             }
         }
         assert!(checked > 10, "only {checked} fixtures found");
+    }
+
+    #[test]
+    fn inner_class_reorder_keeps_multiline_string_contents() {
+        // The body is dedented and re-indented line by line; string lines
+        // must come through as they are: a four-space line, a spaces-only
+        // line, and a line that looks like a class header.
+        let source = "extends Node\n\n\nclass A:\n\tvar v = 1\n\tconst X = \"\"\"\nclass Fake:\n    x\n   \n\t\"\"\"\n";
+        let formatted = format_source(source, &Config::default());
+        assert!(
+            formatted.contains("\tconst X = \"\"\"\nclass Fake:\n    x\n   \n\t\"\"\"\n"),
+            "{formatted:?}"
+        );
+        assert!(
+            formatted.find("const X") < formatted.find("var v"),
+            "{formatted:?}"
+        );
+    }
+
+    #[test]
+    fn inner_class_reorder_keeps_crlf_blank_line_in_string() {
+        // Reduced from a real plugin: the blank line inside the string is
+        // `\r` once the file is normalized and must keep it.
+        let source = "class A extends B:\r\n\tconst X = \"\"\"\r\n\r\n\tconst Y = \"\"\"\r\n";
+        assert_eq!(format_source(source, &Config::default()), source);
     }
 
     #[test]

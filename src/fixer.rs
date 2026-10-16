@@ -87,10 +87,10 @@ pub struct CrossFileReference {
 /// assert_eq!(fixed, "var x = 1\n");
 /// ```
 pub fn apply_fixes(source: &str, diagnostics: &[Diagnostic], safe_only: bool) -> String {
-    // `diagnostics` was produced by `linter::lint_source`, which normalizes
-    // `\r\n`/`\r` to `\n` before computing byte offsets (see
+    // `diagnostics` was produced by `linter::lint_source`, which converts
+    // `\r\n` outside strings to `\n` before computing byte offsets (see
     // `normalize_line_endings`). Normalize here too so those offsets land on
-    // the right bytes, then restore the original line endings on the way
+    // the right bytes, then restore the file's line-ending style on the way
     // out so CRLF files stay CRLF.
     let original_source = source;
     let normalized = crate::linter::normalize_line_endings(source);

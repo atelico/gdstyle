@@ -12,8 +12,10 @@ use crate::token::{QuoteStyle, Span, StringLines, StringPrefix, Token, TokenKind
 /// String data inside a multi-line string doesn't count: `fmt` leaves it alone,
 /// so a warning there could only be cleared by changing the string's value.
 /// The opening line is code and counts in full. The closing line counts when
-/// the code after the closing quote is what pushes it past the limit; when
-/// the string data alone already exceeds it, the line is skipped.
+/// the code after the closing quote is what pushes it past the limit, even
+/// when another multi-line string opens later on it; when the string data
+/// before the closing quote already exceeds the limit, the line is skipped.
+/// A `\r` takes no columns: inside a string it is data the editor doesn't show.
 ///
 /// # Example
 ///
@@ -47,13 +49,13 @@ pub fn check_max_line_length(
     for (i, line) in file.lines.iter().enumerate() {
         let line_num = i + 1;
         if string_line_mask.is_interior(i) {
-            if string_line_mask.ends_inside(i) {
-                continue;
-            }
-            let string_data = string_line_mask
+            // A line with no closing quote is all string data.
+            let Some(string_data) = string_line_mask
                 .literal_end(i)
                 .and_then(|end| line.get(..end))
-                .unwrap_or(line);
+            else {
+                continue;
+            };
             if visual_line_length(string_data, TAB_WIDTH) > config.max_line_length {
                 continue;
             }
@@ -77,10 +79,11 @@ pub fn check_max_line_length(
 fn visual_line_length(line: &str, tab_width: usize) -> usize {
     let mut col = 0;
     for ch in line.chars() {
-        if ch == '\t' {
-            col = (col / tab_width + 1) * tab_width;
-        } else {
-            col += 1;
+        match ch {
+            '\t' => col = (col / tab_width + 1) * tab_width,
+            // A `\r` left in a string's CRLF line ending takes no columns.
+            '\r' => {}
+            _ => col += 1,
         }
     }
     col
@@ -1804,6 +1807,23 @@ mod tests {
         check_max_line_length(&tokenize(&source), &file, &Config::default(), &mut diags);
         let reported: Vec<usize> = diags.iter().map(|d| d.span.line).collect();
         assert_eq!(reported, vec![4]);
+    }
+
+    #[test]
+    fn max_line_length_reports_code_between_two_multiline_strings() {
+        // One literal closes and another opens on line 2; the code between
+        // them makes the line too long.
+        let args: Vec<String> = (0..14).map(|n| format!("value_{n:02}")).collect();
+        let source = format!(
+            "var s = \"\"\"\nabc\"\"\" + str([{}]) + \"\"\"\ndef\"\"\"\n",
+            args.join(", ")
+        );
+        let lines: Vec<&str> = source.split('\n').collect();
+        let file = make_file(&lines);
+        let mut diags = Vec::new();
+        check_max_line_length(&tokenize(&source), &file, &Config::default(), &mut diags);
+        let reported: Vec<usize> = diags.iter().map(|d| d.span.line).collect();
+        assert_eq!(reported, vec![2]);
     }
 
     #[test]

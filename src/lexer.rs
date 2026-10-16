@@ -83,9 +83,17 @@ impl<'a> Lexer<'a> {
 
         let ch = self.current_char();
 
-        // Line continuation with backslash.
+        // Line continuation with backslash, before an LF or a CRLF line break.
         if ch == '\\' && self.peek_char() == Some('\n') {
             self.advance(); // skip backslash
+            self.advance(); // skip newline
+            self.line += 1;
+            self.column = 1;
+            return self.next_token();
+        }
+        if ch == '\\' && self.peek_char() == Some('\r') && self.peek_char_at(2) == Some('\n') {
+            self.advance(); // skip backslash
+            self.advance(); // skip carriage return
             self.advance(); // skip newline
             self.line += 1;
             self.column = 1;
@@ -1005,6 +1013,16 @@ mod tests {
     fn tokenize(source: &str) -> Vec<Token> {
         let mut lexer = Lexer::new(source);
         lexer.tokenize()
+    }
+
+    #[test]
+    fn backslash_continuation_before_crlf_matches_lf() {
+        // Line-ending helpers lex the raw CRLF source, so a continuation
+        // must read the same either way.
+        assert_eq!(
+            token_kinds("var x = 1 + \\\r\n\t2\r\n"),
+            token_kinds("var x = 1 + \\\n\t2\n")
+        );
     }
 
     fn token_kinds(source: &str) -> Vec<TokenKind> {

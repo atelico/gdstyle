@@ -253,7 +253,7 @@ The formatter normalizes indentation, trailing whitespace, blank lines (includin
 
 The contents of multi-line strings are data, so the formatter leaves them alone: indentation, trailing whitespace, blank lines and line length inside a string that spans lines (a `"""..."""` literal, or a quoted string with a raw newline or a backslash continuation) are kept. The layout rules don't report those lines either. The one exception is `format/max-line-length` on a string's closing line: when the code after the closing quote is what makes the line too long, it is still reported.
 
-Line endings are kept too. A CRLF file stays CRLF, as it does with `check --fix`, and a string keeps its own line endings even when they differ from the rest of the file, because Godot keeps a `\r` inside a string as part of its value.
+Line endings are kept too, by `fmt` and `check --fix` alike. A file keeps the style most of its line breaks outside strings use, so a CRLF file stays CRLF. A string keeps its own line endings even when they differ from the rest of the file, because Godot keeps a `\r` inside a string as part of its value.
 
 > **Note:** Line wrapping breaks at comma boundaries inside delimiters (parentheses, brackets, braces), `and`/`or` operators in `if`/`elif`/`while` conditions, and word boundaries in long comments. Lines without any breakable pattern (e.g., long strings, property chains, continuation lines without enclosing delimiters) are left alone.
 
