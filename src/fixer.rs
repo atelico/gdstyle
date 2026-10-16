@@ -2,7 +2,7 @@ use crate::ast::ClassMember;
 use crate::diagnostic::{Diagnostic, Replacement};
 use crate::lexer::Lexer;
 use crate::parser::Parser as GdParser;
-use crate::token::{Token, TokenKind};
+use crate::token::{StringLines, Token, TokenKind};
 
 /// Classification of an identifier rename, used to decide which token contexts
 /// it is safe to rewrite.
@@ -1008,11 +1008,26 @@ fn find_enum_for_member(members: &[ClassMember], member_old_name: &str) -> Optio
     None
 }
 
+/// Cut runs of 3+ blank lines down to 2. A blank-looking line inside a
+/// multi-line string is string data: it is kept and ends a run.
 fn collapse_blank_lines(source: &str) -> String {
+    // Most fixed sources have no run to collapse; skip lexing for those.
+    let has_long_blank_run = source
+        .split('\n')
+        .scan(0, |run, line| {
+            *run = if line.trim().is_empty() { *run + 1 } else { 0 };
+            Some(*run)
+        })
+        .any(|run| run > 2);
+    if !has_long_blank_run {
+        return source.to_string();
+    }
+    let string_line_mask =
+        StringLines::new(&Lexer::new(source).tokenize(), source.split('\n').count());
     let mut result = String::with_capacity(source.len());
     let mut consecutive_empty = 0;
-    for line in source.split('\n') {
-        if line.trim().is_empty() {
+    for (idx, line) in source.split('\n').enumerate() {
+        if line.trim().is_empty() && !string_line_mask.ends_inside(idx) {
             consecutive_empty += 1;
             if consecutive_empty <= 2 {
                 if !result.is_empty() {

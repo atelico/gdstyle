@@ -6722,10 +6722,11 @@ fn string_values(source: &str) -> Vec<String> {
     values
 }
 
-// `fmt` may move, re-indent and re-quote strings, but never change a value.
+// `fmt` and `--fix` may move, re-indent and re-quote strings, but never change
+// a value.
 // Checked on every fixture and example, as written and converted to CRLF.
 #[test]
-fn formatting_never_changes_a_string_value() {
+fn formatting_and_fixing_never_change_a_string_value() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let config = default_config();
     let mut checked = 0;
@@ -6743,9 +6744,20 @@ fn formatting_never_changes_a_string_value() {
                 assert_eq!(
                     string_values(&formatted),
                     string_values(&source),
-                    "{}",
+                    "fmt: {}",
                     path.display()
                 );
+                // `check --fix` and `--unsafe-fix` apply fixes directly.
+                let diagnostics = linter::lint_source(&source, "test.gd", &config);
+                for safe_only in [true, false] {
+                    let fixed = fixer::apply_fixes(&source, &diagnostics, safe_only);
+                    assert_eq!(
+                        string_values(&fixed),
+                        string_values(&source),
+                        "fix (safe_only: {safe_only}): {}",
+                        path.display()
+                    );
+                }
             }
             checked += 1;
         }

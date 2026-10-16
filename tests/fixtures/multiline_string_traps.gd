@@ -12,10 +12,13 @@ const TEMPLATE = """
 extends Node
 """
 
+# Three blank-looking lines; the enum gives the fixer something to fix.
+enum Mode {A, B}
 const SPACED = """
 a
    
 	
+
 b
 """
 
