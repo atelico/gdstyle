@@ -9,9 +9,11 @@ use crate::token::{QuoteStyle, Span, StringLines, StringPrefix, Token, TokenKind
 /// rather than as a single character, so indented lines are measured as they
 /// appear in the editor.
 ///
-/// Lines after the opening line of a multi-line string are skipped: their
-/// length is string data, and `fmt` leaves them alone for the same reason, so
-/// a warning there could only be cleared by changing the string's value.
+/// String data inside a multi-line string doesn't count: `fmt` leaves it alone,
+/// so a warning there could only be cleared by changing the string's value.
+/// The opening line is code and counts in full. The closing line counts when
+/// the code after the closing quote is what pushes it past the limit; when
+/// the string data alone already exceeds it, the line is skipped.
 ///
 /// # Example
 ///
@@ -41,11 +43,20 @@ pub fn check_max_line_length(
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     const TAB_WIDTH: usize = 4;
-    let strings = StringLines::new(tokens, file.lines.len());
+    let string_line_mask = StringLines::new(tokens, file.lines.len());
     for (i, line) in file.lines.iter().enumerate() {
         let line_num = i + 1;
-        if strings.is_interior(i) {
-            continue;
+        if string_line_mask.is_interior(i) {
+            if string_line_mask.ends_inside(i) {
+                continue;
+            }
+            let string_data = string_line_mask
+                .literal_end(i)
+                .and_then(|end| line.get(..end))
+                .unwrap_or(line);
+            if visual_line_length(string_data, TAB_WIDTH) > config.max_line_length {
+                continue;
+            }
         }
         let visual_len = visual_line_length(line, TAB_WIDTH);
         if visual_len > config.max_line_length {
@@ -81,10 +92,10 @@ pub fn check_trailing_whitespace(
     file: &ScriptFile,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let strings = StringLines::new(tokens, file.lines.len());
+    let string_line_mask = StringLines::new(tokens, file.lines.len());
     for (i, line) in file.lines.iter().enumerate() {
         let line_num = i + 1;
-        if strings.ends_inside(i) {
+        if string_line_mask.ends_inside(i) {
             continue;
         }
         if line.ends_with(' ') || line.ends_with('\t') {
@@ -147,10 +158,10 @@ pub fn check_indentation_style(
     config: &Config,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let strings = StringLines::new(tokens, file.lines.len());
+    let string_line_mask = StringLines::new(tokens, file.lines.len());
     for (i, line) in file.lines.iter().enumerate() {
         let line_num = i + 1;
-        if line.is_empty() || strings.is_interior(i) {
+        if line.is_empty() || string_line_mask.is_interior(i) {
             continue;
         }
 
@@ -652,12 +663,12 @@ pub fn check_one_statement_per_line(
 /// Check for runs of 3+ consecutive blank lines anywhere in the file,
 /// except inside a multi-line string, where a blank line is content.
 pub fn check_blank_lines(tokens: &[Token], file: &ScriptFile, diagnostics: &mut Vec<Diagnostic>) {
-    let strings = StringLines::new(tokens, file.lines.len());
+    let string_line_mask = StringLines::new(tokens, file.lines.len());
     let mut consecutive_blank = 0;
     let mut run_start_idx: usize = 0;
 
     for (idx, line) in file.lines.iter().enumerate() {
-        if line.trim().is_empty() && !strings.ends_inside(idx) {
+        if line.trim().is_empty() && !string_line_mask.ends_inside(idx) {
             consecutive_blank += 1;
             if consecutive_blank == 1 {
                 run_start_idx = idx;
@@ -1776,6 +1787,23 @@ mod tests {
         check_max_line_length(&tokenize(&source), &file, &Config::default(), &mut diags);
         let reported: Vec<usize> = diags.iter().map(|d| d.span.line).collect();
         assert_eq!(reported, vec![1]);
+    }
+
+    #[test]
+    fn max_line_length_reports_code_after_a_closing_quote() {
+        // The string data on the closing line is short; the code after it
+        // is what makes the line too long, so it is reported.
+        let args: Vec<String> = (0..14).map(|n| format!("value_{n:02}")).collect();
+        let source = format!(
+            "func f() -> String:\n\treturn \"\"\"\nabc\n\"\"\" % [{}]\n",
+            args.join(", ")
+        );
+        let lines: Vec<&str> = source.split('\n').collect();
+        let file = make_file(&lines);
+        let mut diags = Vec::new();
+        check_max_line_length(&tokenize(&source), &file, &Config::default(), &mut diags);
+        let reported: Vec<usize> = diags.iter().map(|d| d.span.line).collect();
+        assert_eq!(reported, vec![4]);
     }
 
     #[test]

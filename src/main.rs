@@ -723,8 +723,10 @@ fn print_diff(path: &Path, original: &str, formatted: &str) {
     println!("--- a/{}", path_str);
     println!("+++ b/{}", path_str);
 
-    let orig_lines: Vec<&str> = original.lines().collect();
-    let fmt_lines: Vec<&str> = formatted.lines().collect();
+    // Split on `\n` only, so a line keeps its `\r` and a change that only
+    // touches line endings still shows up as a changed line.
+    let orig_lines: Vec<&str> = original.split_terminator('\n').collect();
+    let fmt_lines: Vec<&str> = formatted.split_terminator('\n').collect();
 
     // Simple line-by-line diff.
     let max_lines = orig_lines.len().max(fmt_lines.len());
@@ -733,16 +735,22 @@ fn print_diff(path: &Path, original: &str, formatted: &str) {
         let fmt = fmt_lines.get(i).copied().unwrap_or("");
         if orig != fmt {
             if !orig.is_empty() || i < orig_lines.len() {
-                println!("{}", format!("-{}", orig).red());
+                println!("{}", format!("-{}", show_carriage_returns(orig)).red());
             }
             if !fmt.is_empty() || i < fmt_lines.len() {
-                println!("{}", format!("+{}", fmt).green());
+                println!("{}", format!("+{}", show_carriage_returns(fmt)).green());
             }
         } else {
-            println!(" {}", orig);
+            println!(" {}", orig.trim_end_matches('\r'));
         }
     }
     println!();
+}
+
+/// `line` with each `\r` shown as `^M`, so lines that differ only in line
+/// endings don't print identically.
+fn show_carriage_returns(line: &str) -> String {
+    line.replace('\r', "^M")
 }
 
 fn run_init(force: bool) {

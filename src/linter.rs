@@ -1,9 +1,12 @@
+use std::collections::{HashMap, VecDeque};
+
 use crate::ast::ScriptFile;
 use crate::config::Config;
 use crate::diagnostic::Diagnostic;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::rules;
+use crate::token::TokenKind;
 
 /// Lint a single GDScript source string and return diagnostics.
 ///
@@ -81,13 +84,84 @@ pub fn lint_source(source: &str, file_path: &str, config: &Config) -> Vec<Diagno
     diagnostics
 }
 
-/// Convert any `\r\n` or bare `\r` to `\n`. We do this before any byte-offset
-/// computation so the rest of the pipeline can assume LF-only newlines.
+/// Convert every `\r\n` to `\n`. We do this before any byte-offset
+/// computation so the rest of the pipeline can assume LF-only line breaks.
+///
+/// A `\r` that isn't followed by `\n` is left alone: Godot doesn't treat it
+/// as a line break (it is part of a string or comment, or a "stray carriage
+/// return" error in code), so turning it into `\n` would split the line.
+///
+/// # Example
+///
+/// ```
+/// use gdstyle::linter::normalize_line_endings;
+///
+/// assert_eq!(normalize_line_endings("var a = 1\r\nvar s = \"x\ry\"\r\n"), "var a = 1\nvar s = \"x\ry\"\n");
+/// ```
 pub fn normalize_line_endings(source: &str) -> String {
-    if !source.contains('\r') {
+    if !source.contains("\r\n") {
         return source.to_string();
     }
-    source.replace("\r\n", "\n").replace('\r', "\n")
+    source.replace("\r\n", "\n")
+}
+
+/// Put `source`'s line endings back on `normalized`: the output of
+/// [`normalize_line_endings`] for `source`, after any edits.
+///
+/// Line breaks outside string literals take the file's convention, which is
+/// CRLF when `source` has any `\r\n` and LF otherwise. A literal that spans
+/// lines gets its original bytes back, since Godot keeps a `\r` inside a
+/// string as part of its value: an LF string in a CRLF file stays LF, and the
+/// reverse. Literals are matched by their normalized text, so this still
+/// works after an edit moved them around. A literal an edit changed has no
+/// match and takes the file's convention.
+///
+/// # Example
+///
+/// ```
+/// use gdstyle::linter::{normalize_line_endings, restore_line_endings};
+///
+/// // CRLF file whose string holds an LF line break.
+/// let source = "var a = 1  \r\nvar s = \"\"\"x\ny\"\"\"\r\n";
+/// let edited = normalize_line_endings(source).replace("1  ", "1");
+/// assert_eq!(restore_line_endings(source, &edited), "var a = 1\r\nvar s = \"\"\"x\ny\"\"\"\r\n");
+/// ```
+pub fn restore_line_endings(source: &str, normalized: &str) -> String {
+    if !source.contains("\r\n") {
+        return normalized.to_string();
+    }
+
+    // Original text of every literal that spans lines, keyed by its
+    // normalized text; a queue per key keeps duplicates in source order.
+    let mut original_literals: HashMap<String, VecDeque<String>> = HashMap::new();
+    for token in Lexer::new(source).tokenize() {
+        if matches!(token.kind, TokenKind::String(_)) && token.text.contains('\n') {
+            original_literals
+                .entry(normalize_line_endings(&token.text))
+                .or_default()
+                .push_back(token.text);
+        }
+    }
+
+    let mut restored = String::with_capacity(source.len());
+    let mut cursor = 0;
+    for token in Lexer::new(normalized).tokenize() {
+        if !matches!(token.kind, TokenKind::String(_)) || !token.text.contains('\n') {
+            continue;
+        }
+        let start = token.span.offset;
+        restored.push_str(&normalized[cursor..start].replace('\n', "\r\n"));
+        match original_literals
+            .get_mut(&token.text)
+            .and_then(VecDeque::pop_front)
+        {
+            Some(original) => restored.push_str(&original),
+            None => restored.push_str(&token.text.replace('\n', "\r\n")),
+        }
+        cursor = start + token.span.length;
+    }
+    restored.push_str(&normalized[cursor..].replace('\n', "\r\n"));
+    restored
 }
 
 /// Lint a file from disk.

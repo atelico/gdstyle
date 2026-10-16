@@ -90,9 +90,9 @@ pub fn apply_fixes(source: &str, diagnostics: &[Diagnostic], safe_only: bool) ->
     // `diagnostics` was produced by `linter::lint_source`, which normalizes
     // `\r\n`/`\r` to `\n` before computing byte offsets (see
     // `normalize_line_endings`). Normalize here too so those offsets land on
-    // the right bytes, then restore the original line-ending convention on
-    // the way out so CRLF files stay CRLF.
-    let has_crlf = source.contains('\r');
+    // the right bytes, then restore the original line endings on the way
+    // out so CRLF files stay CRLF.
+    let original_source = source;
     let normalized = crate::linter::normalize_line_endings(source);
     let source = normalized.as_str();
 
@@ -197,11 +197,7 @@ pub fn apply_fixes(source: &str, diagnostics: &[Diagnostic], safe_only: bool) ->
         apply_replacements(source, replacements)
     };
 
-    if has_crlf {
-        fixed.replace('\n', "\r\n")
-    } else {
-        fixed
-    }
+    crate::linter::restore_line_endings(original_source, &fixed)
 }
 
 fn apply_replacements(source: &str, replacements: Vec<Replacement>) -> String {

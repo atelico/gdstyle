@@ -251,7 +251,9 @@ gdstyle fmt --diff
 
 The formatter normalizes indentation, trailing whitespace, blank lines (including the spacing between class members), boolean operators (`&&`/`||`/`!` to `and`/`or`/`not`), string quotes, comment spacing, colon and comma spacing, float and hex literals, trailing newlines, and single-line enums (expanded to multi-line). It reorders class members to match the canonical style guide order, and wraps long lines at commas inside parentheses, brackets, and braces. Running it twice produces the same output.
 
-The contents of multi-line strings are data, so the formatter leaves them alone: indentation, trailing whitespace, blank lines and line length inside a string that spans lines (a `"""..."""` literal, or a quoted string with a raw newline or a backslash continuation) are kept. The layout rules, `format/max-line-length` included, don't report those lines either. Line endings are kept too, so a CRLF file stays CRLF, as it does with `check --fix`.
+The contents of multi-line strings are data, so the formatter leaves them alone: indentation, trailing whitespace, blank lines and line length inside a string that spans lines (a `"""..."""` literal, or a quoted string with a raw newline or a backslash continuation) are kept. The layout rules don't report those lines either. The one exception is `format/max-line-length` on a string's closing line: when the code after the closing quote is what makes the line too long, it is still reported.
+
+Line endings are kept too. A CRLF file stays CRLF, as it does with `check --fix`, and a string keeps its own line endings even when they differ from the rest of the file, because Godot keeps a `\r` inside a string as part of its value.
 
 > **Note:** Line wrapping breaks at comma boundaries inside delimiters (parentheses, brackets, braces), `and`/`or` operators in `if`/`elif`/`while` conditions, and word boundaries in long comments. Lines without any breakable pattern (e.g., long strings, property chains, continuation lines without enclosing delimiters) are left alone.
 

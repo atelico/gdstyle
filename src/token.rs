@@ -189,11 +189,13 @@ impl Token {
 /// assert!(!lines.is_interior(1) && lines.ends_inside(1)); // `var s = """`
 /// assert!(lines.is_interior(2) && lines.ends_inside(2)); // `x`
 /// assert!(lines.is_interior(3) && !lines.ends_inside(3)); // `"""`
+/// assert_eq!(lines.literal_end(3), Some(3)); // just past the closing `"""`
 /// assert!(!lines.is_interior(4) && !lines.ends_inside(4)); // `var b = 2`
 /// ```
 pub struct StringLines {
     interior: Vec<bool>,
     ends_inside: Vec<bool>,
+    literal_end: Vec<Option<usize>>,
 }
 
 impl StringLines {
@@ -201,12 +203,19 @@ impl StringLines {
     pub fn new(tokens: &[Token], line_count: usize) -> Self {
         let mut interior = vec![false; line_count];
         let mut ends_inside = vec![false; line_count];
+        let mut literal_end = vec![None; line_count];
         for token in tokens {
             if !matches!(token.kind, TokenKind::String(_)) {
                 continue;
             }
             let first = token.span.line;
             let last = first + token.text.matches('\n').count();
+            if last > first {
+                if let Some(slot) = last.checked_sub(1).and_then(|idx| literal_end.get_mut(idx)) {
+                    // The closing line starts with the literal's last segment.
+                    *slot = token.text.rsplit('\n').next().map(str::len);
+                }
+            }
             for line in first..=last {
                 let Some(idx) = line.checked_sub(1).filter(|&idx| idx < line_count) else {
                     break;
@@ -220,6 +229,7 @@ impl StringLines {
         Self {
             interior,
             ends_inside,
+            literal_end,
         }
     }
 
@@ -234,5 +244,12 @@ impl StringLines {
     /// and every following line before the one that closes it.
     pub fn ends_inside(&self, idx: usize) -> bool {
         self.ends_inside.get(idx).copied().unwrap_or(false)
+    }
+
+    /// When a literal that spans lines closes on line `idx` (0-based), the
+    /// byte offset in that line just past its closing quote. Everything
+    /// before it is string data; anything after it is code.
+    pub fn literal_end(&self, idx: usize) -> Option<usize> {
+        self.literal_end.get(idx).copied().flatten()
     }
 }

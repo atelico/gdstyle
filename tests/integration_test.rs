@@ -3888,6 +3888,38 @@ fn formatter_keeps_crlf_inside_multiline_strings() {
     assert_eq!(formatted, source);
 }
 
+// A string keeps its own line endings even when they differ from the file's:
+// an LF string in a CRLF file must not gain `\r`s, which would change its value.
+#[test]
+fn formatter_and_fixer_keep_lf_string_in_crlf_file() {
+    let source = "extends Node\r\n\r\nconst T = \"\"\"a\nb\n\"\"\"\r\nvar x = 1   \r\n";
+    let config = default_config();
+    // `fmt` also puts a blank line between the constant and the variable.
+    let formatted = formatter::format_source(source, &config);
+    assert_eq!(
+        formatted,
+        "extends Node\r\n\r\nconst T = \"\"\"a\nb\n\"\"\"\r\n\r\nvar x = 1\r\n"
+    );
+    assert_eq!(formatter::format_source(&formatted, &config), formatted);
+    let diagnostics = linter::lint_source(source, "test.gd", &config);
+    assert_eq!(
+        fixer::apply_fixes(source, &diagnostics, true),
+        "extends Node\r\n\r\nconst T = \"\"\"a\nb\n\"\"\"\r\nvar x = 1\r\n"
+    );
+}
+
+// Godot doesn't treat a `\r` without a following `\n` as a line break. It must
+// survive as-is: turning it into `\n` splits a comment (leaving code behind)
+// or changes a string's value, and must not flip the file to CRLF.
+#[test]
+fn formatter_keeps_stray_carriage_returns() {
+    let source = "extends Node\n\n# odd\r comment\nvar s = \"a\rb\"\n";
+    let config = default_config();
+    assert_eq!(formatter::format_source(source, &config), source);
+    let diagnostics = linter::lint_source(source, "test.gd", &config);
+    assert_eq!(fixer::apply_fixes(source, &diagnostics, true), source);
+}
+
 // Regression test for https://github.com/atelico/gdstyle/issues/24: --fix
 // on a CRLF file must not drift replacement offsets (which corrupted
 // identifiers) and must preserve the CRLF line endings.

@@ -13,8 +13,9 @@ use crate::token::{StringLines, Token, TokenKind};
 /// already-formatted source returns it unchanged.
 ///
 /// Line endings are kept: a CRLF file comes back as CRLF, like it does from
-/// `--fix`. Godot keeps a `\r` that sits inside a multi-line string, so
-/// converting the file to LF would change those strings' values.
+/// `--fix`, and a string that spans lines keeps its own line endings, since
+/// Godot keeps a `\r` inside a string as part of its value. See
+/// [`crate::linter::restore_line_endings`].
 ///
 /// # Example
 ///
@@ -29,7 +30,6 @@ pub fn format_source(source: &str, config: &Config) -> String {
     // Normalize line endings up front so byte-offset computations don't
     // disagree across passes. See `linter::normalize_line_endings` for the
     // full motivation. Idempotent on LF-only input.
-    let has_crlf = source.contains('\r');
     let mut result = crate::linter::normalize_line_endings(source);
 
     // Multi-pass: apply formatting until stable (idempotent).
@@ -41,21 +41,19 @@ pub fn format_source(source: &str, config: &Config) -> String {
         result = formatted;
     }
 
-    // Same convention as `fixer::apply_fixes`: restore CRLF on the way out.
-    if has_crlf {
-        result.replace('\n', "\r\n")
-    } else {
-        result
-    }
+    crate::linter::restore_line_endings(source, &result)
 }
 
 fn format_pass(source: &str, config: &Config) -> String {
-    let mut result = source.to_string();
-
     // Lex once to learn whether any string runs over several lines. The
-    // string-aware passes below only need a mask when one does, which most
-    // files never have, so they can skip lexing the source again.
-    let has_line_spanning_strings = has_line_spanning_strings(source);
+    // string-aware passes only need a mask when one does, which most files
+    // never have, so they can skip lexing the source again.
+    format_pass_with(source, config, SpanningStrings::find(source))
+}
+
+/// [`format_pass`] with the [`SpanningStrings`] answer for `source` given.
+fn format_pass_with(source: &str, config: &Config, spanning_strings: SpanningStrings) -> String {
+    let mut result = source.to_string();
 
     // 1. Reorder class members FIRST, before any line-changing transformations,
     //    so that parser spans are valid against the source lines.
@@ -70,9 +68,9 @@ fn format_pass(source: &str, config: &Config) -> String {
 
     // 2. Normalize indentation, then strip trailing whitespace. Neither pass
     //    adds or removes lines, so one string-line mask serves both.
-    let strings = string_lines(&result, has_line_spanning_strings);
-    result = normalize_indentation(&result, config, &strings);
-    result = strip_trailing_whitespace(&result, &strings);
+    let string_line_mask = string_lines(&result, spanning_strings);
+    result = normalize_indentation(&result, config, &string_line_mask);
+    result = strip_trailing_whitespace(&result, &string_line_mask);
 
     // 3a. Normalize blank lines BETWEEN top-level class members to their
     //     canonical counts (0 between header items, 1 between member
@@ -82,7 +80,7 @@ fn format_pass(source: &str, config: &Config) -> String {
 
     // 3b. Backstop for blank lines INSIDE function bodies and anywhere the
     //     member-aware pass didn't touch: collapse 3+ to 2.
-    result = collapse_blank_lines(&result, has_line_spanning_strings);
+    result = collapse_blank_lines(&result, spanning_strings);
 
     // 4. Replace && || ! with and or not.
     result = normalize_boolean_operators(&result);
@@ -106,43 +104,58 @@ fn format_pass(source: &str, config: &Config) -> String {
     result = lint_then_fix(&result, config);
 
     // 11. Break long lines by wrapping at commas inside delimiters.
-    result = break_long_lines(&result, config, has_line_spanning_strings);
+    result = break_long_lines(&result, config, spanning_strings);
 
     result
 }
 
-/// Whether any string literal in `source` runs over more than one line: a
-/// `"""` literal, a backslash continuation, or a quoted string with a raw
+/// Whether a source has a string literal that runs over more than one line:
+/// a `"""` literal, a backslash continuation, or a quoted string with a raw
 /// newline, which Godot also accepts.
 ///
-/// No formatter pass creates such a literal or splits one, so when this holds
-/// for the input of [`format_pass`] it holds for every intermediate result.
-fn has_line_spanning_strings(source: &str) -> bool {
-    Lexer::new(source)
-        .tokenize()
-        .iter()
-        .any(|token| matches!(token.kind, TokenKind::String(_)) && token.text.contains('\n'))
+/// The passes in [`format_pass_with`] keep string literals intact: they move,
+/// re-indent or wrap whole lines around them but don't split or join one. So
+/// the answer for a pass's input holds for every intermediate result. The one
+/// known exception is single-line enum expansion, which can split a string
+/// enum value at its commas; that only happens on invalid GDScript, since enum
+/// values must be integers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SpanningStrings {
+    Present,
+    Absent,
+}
+
+impl SpanningStrings {
+    fn find(source: &str) -> Self {
+        let is_spanning =
+            |token: &Token| matches!(token.kind, TokenKind::String(_)) && token.text.contains('\n');
+        if Lexer::new(source).tokenize().iter().any(is_spanning) {
+            Self::Present
+        } else {
+            Self::Absent
+        }
+    }
 }
 
 /// The lines of `source` that multi-line string literals cover; see
 /// [`StringLines`]. Their whitespace, blank runs and length are string data.
-/// When `has_line_spanning_strings` is false no line is covered, so the
-/// source isn't lexed.
-fn string_lines(source: &str, has_line_spanning_strings: bool) -> StringLines {
+/// With [`SpanningStrings::Absent`] no line is covered, so the source isn't
+/// lexed.
+fn string_lines(source: &str, spanning_strings: SpanningStrings) -> StringLines {
     let line_count = source.split('\n').count();
-    if !has_line_spanning_strings {
-        return StringLines::new(&[], line_count);
+    match spanning_strings {
+        SpanningStrings::Absent => StringLines::new(&[], line_count),
+        SpanningStrings::Present => StringLines::new(&Lexer::new(source).tokenize(), line_count),
     }
-    StringLines::new(&Lexer::new(source).tokenize(), line_count)
 }
 
-/// `strings` must describe `source` line for line.
-fn normalize_indentation(source: &str, config: &Config, strings: &StringLines) -> String {
+/// `string_line_mask` must describe `source` line for line.
+fn normalize_indentation(source: &str, config: &Config, string_line_mask: &StringLines) -> String {
     let lines: Vec<&str> = source.split('\n').collect();
     let mut result = Vec::new();
 
     for (idx, line) in lines.iter().enumerate() {
-        if line.is_empty() || strings.is_interior(idx) {
+        if line.is_empty() || string_line_mask.is_interior(idx) {
             result.push(line.to_string());
             continue;
         }
@@ -173,13 +186,13 @@ fn normalize_indentation(source: &str, config: &Config, strings: &StringLines) -
     result.join("\n")
 }
 
-/// `strings` must describe `source` line for line.
-fn strip_trailing_whitespace(source: &str, strings: &StringLines) -> String {
+/// `string_line_mask` must describe `source` line for line.
+fn strip_trailing_whitespace(source: &str, string_line_mask: &StringLines) -> String {
     source
         .split('\n')
         .enumerate()
         .map(|(idx, line)| {
-            if strings.ends_inside(idx) {
+            if string_line_mask.ends_inside(idx) {
                 line.to_string()
             } else {
                 line.trim_end().to_string()
@@ -627,16 +640,15 @@ fn normalize_member_spacing(source: &str, config: &Config) -> String {
     result.join("\n")
 }
 
-/// `has_line_spanning_strings` is as [`has_line_spanning_strings`] reports for
-/// `source`; see [`string_lines`].
-fn collapse_blank_lines(source: &str, has_line_spanning_strings: bool) -> String {
+/// `spanning_strings` is the [`SpanningStrings`] answer for `source`.
+fn collapse_blank_lines(source: &str, spanning_strings: SpanningStrings) -> String {
     let lines: Vec<&str> = source.split('\n').collect();
-    let strings = string_lines(source, has_line_spanning_strings);
+    let string_line_mask = string_lines(source, spanning_strings);
     let mut result = Vec::new();
     let mut blank_count = 0;
 
     for (idx, line) in lines.iter().enumerate() {
-        if line.trim().is_empty() && !strings.ends_inside(idx) {
+        if line.trim().is_empty() && !string_line_mask.ends_inside(idx) {
             blank_count += 1;
             if blank_count <= 2 {
                 result.push(String::new());
@@ -840,13 +852,12 @@ fn lint_then_fix(source: &str, config: &Config) -> String {
 /// - Lines where the content inside delimiters has only one item
 /// - Lines where breaking wouldn't reduce the length below the limit
 ///
-/// `has_line_spanning_strings` is as [`has_line_spanning_strings`] reports for
-/// `source`; see [`string_lines`].
-fn break_long_lines(source: &str, config: &Config, has_line_spanning_strings: bool) -> String {
+/// `spanning_strings` is the [`SpanningStrings`] answer for `source`.
+fn break_long_lines(source: &str, config: &Config, spanning_strings: SpanningStrings) -> String {
     const TAB_WIDTH: usize = 4;
     let max_len = config.max_line_length;
     let lines: Vec<&str> = source.split('\n').collect();
-    let strings = string_lines(source, has_line_spanning_strings);
+    let string_line_mask = string_lines(source, spanning_strings);
     let mut result: Vec<String> = Vec::new();
 
     let mut i = 0;
@@ -854,7 +865,7 @@ fn break_long_lines(source: &str, config: &Config, has_line_spanning_strings: bo
         let line = lines[i];
         let visual_len = visual_line_len(line, TAB_WIDTH);
 
-        if visual_len <= max_len || strings.is_interior(i) {
+        if visual_len <= max_len || string_line_mask.is_interior(i) {
             result.push(line.to_string());
             i += 1;
             continue;
@@ -2110,7 +2121,8 @@ mod tests {
     #[test]
     fn test_strip_trailing_whitespace() {
         let source = "var x = 5   \nvar y = 10\t\t\n";
-        let result = strip_trailing_whitespace(source, &string_lines(source, false));
+        let result =
+            strip_trailing_whitespace(source, &string_lines(source, SpanningStrings::Absent));
         assert_eq!(result, "var x = 5\nvar y = 10\n");
     }
 
@@ -2118,30 +2130,64 @@ mod tests {
     fn line_passes_skip_multiline_string_contents() {
         // Everything between the opening and closing `"""` is string data.
         let source = "extends Node\n\nconst T = \"\"\"a   \n\n\n\n    b\n\tc\n\"\"\"\n";
-        assert!(has_line_spanning_strings(source));
-        let strings = string_lines(source, true);
-        assert_eq!(strip_trailing_whitespace(source, &strings), source);
-        assert_eq!(collapse_blank_lines(source, true), source);
+        assert_eq!(SpanningStrings::find(source), SpanningStrings::Present);
+        let string_line_mask = string_lines(source, SpanningStrings::Present);
+        assert_eq!(strip_trailing_whitespace(source, &string_line_mask), source);
         assert_eq!(
-            normalize_indentation(source, &Config::default(), &strings),
+            collapse_blank_lines(source, SpanningStrings::Present),
+            source
+        );
+        assert_eq!(
+            normalize_indentation(source, &Config::default(), &string_line_mask),
             source
         );
         let long = format!("var s = \"\"\"\nf({})\n\"\"\"\n", "a, ".repeat(60));
-        assert_eq!(break_long_lines(&long, &Config::default(), true), long);
+        assert_eq!(
+            break_long_lines(&long, &Config::default(), SpanningStrings::Present),
+            long
+        );
     }
 
     #[test]
-    fn has_line_spanning_strings_detects_every_kind_of_spanning_literal() {
+    fn spanning_strings_detects_every_kind_of_spanning_literal() {
+        use SpanningStrings::{Absent, Present};
         // Triple-quoted, a quoted string with a raw newline (Godot accepts
         // it), and a backslash continuation.
-        assert!(has_line_spanning_strings("var s = \"\"\"a\nb\"\"\"\n"));
-        assert!(has_line_spanning_strings("var s = \"a\nb\"\n"));
-        assert!(has_line_spanning_strings("var s = 'a\\\nb'\n"));
+        assert_eq!(SpanningStrings::find("var s = \"\"\"a\nb\"\"\"\n"), Present);
+        assert_eq!(SpanningStrings::find("var s = \"a\nb\"\n"), Present);
+        assert_eq!(SpanningStrings::find("var s = 'a\\\nb'\n"), Present);
         // Single-line strings, including a `"""` one, and no strings at all.
-        assert!(!has_line_spanning_strings(
-            "var s = \"a\"\nvar t = \"\"\"b\"\"\"\n# \"\"\"\n"
-        ));
-        assert!(!has_line_spanning_strings("var x = 1\n"));
+        let single = "var s = \"a\"\nvar t = \"\"\"b\"\"\"\n# \"\"\"\n";
+        assert_eq!(SpanningStrings::find(single), Absent);
+        assert_eq!(SpanningStrings::find("var x = 1\n"), Absent);
+    }
+
+    #[test]
+    fn skipping_masks_without_spanning_strings_changes_no_output() {
+        // `format_pass` skips the string masks when `SpanningStrings::find`
+        // says there are none. Always building them must give the same
+        // output on every fixture and example.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut checked = 0;
+        for dir in ["tests/fixtures", "examples"] {
+            let entries = std::fs::read_dir(root.join(dir)).expect("fixture dir is readable");
+            for entry in entries {
+                let path = entry.expect("fixture dir entry is readable").path();
+                if path.extension().is_none_or(|ext| ext != "gd") {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).expect("fixture is UTF-8");
+                let config = Config::default();
+                assert_eq!(
+                    format_pass(&source, &config),
+                    format_pass_with(&source, &config, SpanningStrings::Present),
+                    "{}",
+                    path.display()
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 10, "only {checked} fixtures found");
     }
 
     #[test]
@@ -2204,7 +2250,7 @@ mod tests {
     #[test]
     fn test_collapse_blank_lines() {
         let source = "a\n\n\n\n\nb\n";
-        let result = collapse_blank_lines(source, false);
+        let result = collapse_blank_lines(source, SpanningStrings::Absent);
         assert_eq!(result, "a\n\n\nb\n");
     }
 
