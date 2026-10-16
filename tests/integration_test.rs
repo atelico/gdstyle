@@ -3874,17 +3874,18 @@ fn formatter_handles_crlf_input() {
     let source = "var x = 'hello'\r\nvar y = 'world'\r\n";
     let config = default_config();
     let formatted = formatter::format_source(source, &config);
-    // Should normalize to LF and convert quotes
-    assert!(
-        formatted.contains("\"hello\""),
-        "quotes should be normalized, got:\n{}",
-        formatted
-    );
-    assert!(
-        !formatted.contains('\r'),
-        "\\r should be stripped from output, got:\n{:?}",
-        formatted
-    );
+    // Quotes are normalized and the CRLF line endings are kept.
+    assert_eq!(formatted, "var x = \"hello\"\r\nvar y = \"world\"\r\n");
+    assert_eq!(formatter::format_source(&formatted, &config), formatted);
+}
+
+// Godot keeps the `\r` of a CRLF line inside a multi-line string, so turning
+// the file into LF would change the string's value.
+#[test]
+fn formatter_keeps_crlf_inside_multiline_strings() {
+    let source = "extends Node\r\n\r\nconst T = \"\"\"a   \r\n\r\n\r\n\r\n    b\r\n\"\"\"\r\n";
+    let formatted = formatter::format_source(source, &default_config());
+    assert_eq!(formatted, source);
 }
 
 // Regression test for https://github.com/atelico/gdstyle/issues/24: --fix

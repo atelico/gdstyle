@@ -251,6 +251,8 @@ gdstyle fmt --diff
 
 The formatter normalizes indentation, trailing whitespace, blank lines (including the spacing between class members), boolean operators (`&&`/`||`/`!` to `and`/`or`/`not`), string quotes, comment spacing, colon and comma spacing, float and hex literals, trailing newlines, and single-line enums (expanded to multi-line). It reorders class members to match the canonical style guide order, and wraps long lines at commas inside parentheses, brackets, and braces. Running it twice produces the same output.
 
+The contents of multi-line strings are data, so the formatter leaves them alone: indentation, trailing whitespace, blank lines and line length inside a `"""..."""` literal are kept, and `format/max-line-length` doesn't report those lines. Line endings are kept too, so a CRLF file stays CRLF, as it does with `check --fix`.
+
 > **Note:** Line wrapping breaks at comma boundaries inside delimiters (parentheses, brackets, braces), `and`/`or` operators in `if`/`elif`/`while` conditions, and word boundaries in long comments. Lines without any breakable pattern (e.g., long strings, property chains, continuation lines without enclosing delimiters) are left alone.
 
 ## Configuration

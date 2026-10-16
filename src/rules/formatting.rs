@@ -8,14 +8,45 @@ use crate::token::{QuoteStyle, Span, StringLines, StringPrefix, Token, TokenKind
 /// Tabs are counted at their visual width (4 columns, matching Godot's default)
 /// rather than as a single character, so indented lines are measured as they
 /// appear in the editor.
+///
+/// Lines after the opening line of a multi-line string are skipped: their
+/// length is string data, and `fmt` leaves them alone for the same reason, so
+/// a warning there could only be cleared by changing the string's value.
+///
+/// # Example
+///
+/// ```
+/// use gdstyle::ast::ScriptFile;
+/// use gdstyle::config::Config;
+/// use gdstyle::lexer::Lexer;
+/// use gdstyle::rules::formatting::check_max_line_length;
+///
+/// let long = "x".repeat(120);
+/// let source = format!("var a = \"{long}\"\nvar s = \"\"\"\n{long}\n\"\"\"\n");
+/// let file = ScriptFile {
+///     path: "example.gd".to_string(),
+///     members: vec![],
+///     lines: source.split('\n').map(str::to_string).collect(),
+/// };
+/// let mut diagnostics = Vec::new();
+/// check_max_line_length(&Lexer::new(&source).tokenize(), &file, &Config::default(), &mut diagnostics);
+/// // Only the first line is reported; the long line inside the `"""` literal is data.
+/// assert_eq!(diagnostics.len(), 1);
+/// assert_eq!(diagnostics[0].span.line, 1);
+/// ```
 pub fn check_max_line_length(
+    tokens: &[Token],
     file: &ScriptFile,
     config: &Config,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     const TAB_WIDTH: usize = 4;
+    let strings = StringLines::new(tokens, file.lines.len());
     for (i, line) in file.lines.iter().enumerate() {
         let line_num = i + 1;
+        if strings.is_interior(i) {
+            continue;
+        }
         let visual_len = visual_line_length(line, TAB_WIDTH);
         if visual_len > config.max_line_length {
             diagnostics.push(Diagnostic::warning(
@@ -1723,9 +1754,28 @@ mod tests {
         let file = make_file(&[&long_line, ""]);
         let config = Config::default();
         let mut diags = Vec::new();
-        check_max_line_length(&file, &config, &mut diags);
+        check_max_line_length(
+            &tokenize(&file.lines.join("\n")),
+            &file,
+            &config,
+            &mut diags,
+        );
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("120"));
+    }
+
+    #[test]
+    fn max_line_length_skips_multiline_string_contents() {
+        let long = "x".repeat(120);
+        // The opening line is code and still counts; the lines after it,
+        // closing line included, are string data.
+        let source = format!("var s = \"\"\"{long}\n{long}\n{long}\"\"\"\n");
+        let lines: Vec<&str> = source.split('\n').collect();
+        let file = make_file(&lines);
+        let mut diags = Vec::new();
+        check_max_line_length(&tokenize(&source), &file, &Config::default(), &mut diags);
+        let reported: Vec<usize> = diags.iter().map(|d| d.span.line).collect();
+        assert_eq!(reported, vec![1]);
     }
 
     #[test]
@@ -1733,7 +1783,12 @@ mod tests {
         let file = make_file(&["var x = 5", ""]);
         let config = Config::default();
         let mut diags = Vec::new();
-        check_max_line_length(&file, &config, &mut diags);
+        check_max_line_length(
+            &tokenize(&file.lines.join("\n")),
+            &file,
+            &config,
+            &mut diags,
+        );
         assert!(diags.is_empty());
     }
 

@@ -73,7 +73,7 @@ pub fn run_all_rules_with_source(
 
     // Formatting rules.
     if config.is_rule_enabled("format/max-line-length") {
-        formatting::check_max_line_length(file, config, &mut diagnostics);
+        formatting::check_max_line_length(tokens, file, config, &mut diagnostics);
     }
     if config.is_rule_enabled("format/trailing-whitespace") {
         formatting::check_trailing_whitespace(tokens, file, &mut diagnostics);

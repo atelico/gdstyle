@@ -12,6 +12,10 @@ use crate::token::{StringLines, Token, TokenKind};
 /// which only fixes flagged violations. The result is idempotent: formatting
 /// already-formatted source returns it unchanged.
 ///
+/// Line endings are kept: a CRLF file comes back as CRLF, like it does from
+/// `--fix`. Godot keeps a `\r` that sits inside a multi-line string, so
+/// converting the file to LF would change those strings' values.
+///
 /// # Example
 ///
 /// ```
@@ -25,6 +29,7 @@ pub fn format_source(source: &str, config: &Config) -> String {
     // Normalize line endings up front so byte-offset computations don't
     // disagree across passes. See `linter::normalize_line_endings` for the
     // full motivation. Idempotent on LF-only input.
+    let has_crlf = source.contains('\r');
     let mut result = crate::linter::normalize_line_endings(source);
 
     // Multi-pass: apply formatting until stable (idempotent).
@@ -36,7 +41,12 @@ pub fn format_source(source: &str, config: &Config) -> String {
         result = formatted;
     }
 
-    result
+    // Same convention as `fixer::apply_fixes`: restore CRLF on the way out.
+    if has_crlf {
+        result.replace('\n', "\r\n")
+    } else {
+        result
+    }
 }
 
 fn format_pass(source: &str, config: &Config) -> String {
@@ -53,11 +63,11 @@ fn format_pass(source: &str, config: &Config) -> String {
     result = safe_reorder_class_members(&result);
     result = safe_reorder_inner_classes(&result);
 
-    // 2. Normalize indentation.
-    result = normalize_indentation(&result, config);
-
-    // 2. Strip trailing whitespace from every line.
-    result = strip_trailing_whitespace(&result);
+    // 2. Normalize indentation, then strip trailing whitespace. Neither pass
+    //    adds or removes lines, so one string-line mask serves both.
+    let strings = string_lines(&result);
+    result = normalize_indentation(&result, config, &strings);
+    result = strip_trailing_whitespace(&result, &strings);
 
     // 3a. Normalize blank lines BETWEEN top-level class members to their
     //     canonical counts (0 between header items, 1 between member
@@ -102,9 +112,9 @@ fn string_lines(source: &str) -> StringLines {
     StringLines::new(&Lexer::new(source).tokenize(), source.split('\n').count())
 }
 
-fn normalize_indentation(source: &str, config: &Config) -> String {
+/// `strings` must describe `source` line for line.
+fn normalize_indentation(source: &str, config: &Config, strings: &StringLines) -> String {
     let lines: Vec<&str> = source.split('\n').collect();
-    let strings = string_lines(source);
     let mut result = Vec::new();
 
     for (idx, line) in lines.iter().enumerate() {
@@ -139,8 +149,8 @@ fn normalize_indentation(source: &str, config: &Config) -> String {
     result.join("\n")
 }
 
-fn strip_trailing_whitespace(source: &str) -> String {
-    let strings = string_lines(source);
+/// `strings` must describe `source` line for line.
+fn strip_trailing_whitespace(source: &str, strings: &StringLines) -> String {
     source
         .split('\n')
         .enumerate()
@@ -2071,7 +2081,7 @@ mod tests {
     #[test]
     fn test_strip_trailing_whitespace() {
         let source = "var x = 5   \nvar y = 10\t\t\n";
-        let result = strip_trailing_whitespace(source);
+        let result = strip_trailing_whitespace(source, &string_lines(source));
         assert_eq!(result, "var x = 5\nvar y = 10\n");
     }
 
@@ -2079,9 +2089,13 @@ mod tests {
     fn line_passes_skip_multiline_string_contents() {
         // Everything between the opening and closing `"""` is string data.
         let source = "extends Node\n\nconst T = \"\"\"a   \n\n\n\n    b\n\tc\n\"\"\"\n";
-        assert_eq!(strip_trailing_whitespace(source), source);
+        let strings = string_lines(source);
+        assert_eq!(strip_trailing_whitespace(source, &strings), source);
         assert_eq!(collapse_blank_lines(source), source);
-        assert_eq!(normalize_indentation(source, &Config::default()), source);
+        assert_eq!(
+            normalize_indentation(source, &Config::default(), &strings),
+            source
+        );
         let long = format!("var s = \"\"\"\nf({})\n\"\"\"\n", "a, ".repeat(60));
         assert_eq!(break_long_lines(&long, &Config::default()), long);
     }
