@@ -1620,9 +1620,10 @@ struct Block {
 type Anchor = (usize, usize, usize);
 
 /// Collect a top-level anchor for each real class member, merging anchors that
-/// share a source line (e.g. `class_name X extends Y`). Members the parser
-/// surfaced from inside an inner-class body (indented decl lines) are skipped
-/// so they don't get torn away from their `class X:` header.
+/// share a source line (e.g. `class_name X extends Y`). Indented declaration
+/// lines are skipped so a member can't be torn away from its `class X:`
+/// header. The parser nests inner-class members properly, but it is tolerant
+/// of malformed input, so this stays as a guard.
 fn collect_member_anchors(members: &[ClassMember], source_lines: &[&str]) -> Vec<Anchor> {
     let is_top_level_line = |line: usize| -> bool {
         match source_lines.get(line) {

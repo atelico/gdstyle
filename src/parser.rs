@@ -530,10 +530,17 @@ impl<'t> Parser<'t> {
 
         let (name, name_span) = self.expect_identifier();
 
-        // Skip extends if present.
+        // Skip extends if present. The base can be a dotted name
+        // (`Node2D.Foo`) or a script path (`"res://base.gd"`), so skip to the
+        // header's colon rather than reading a single identifier; stopping
+        // short would leave the colon unread and the body unparsed.
         if !self.is_at_end() && self.current_kind() == TokenKind::Extends {
             self.advance();
-            let _ = self.expect_identifier(); // base class name
+            while !self.is_at_end()
+                && !matches!(self.current_kind(), TokenKind::Colon | TokenKind::Newline)
+            {
+                self.advance();
+            }
         }
 
         // Skip colon.
@@ -799,6 +806,16 @@ impl<'t> Parser<'t> {
                 TokenKind::DocComment(_) => {
                     members.push(self.parse_doc_comment());
                 }
+                TokenKind::Class => {
+                    // A nested inner class. Without this arm its header was
+                    // skipped token by token, its members were read as this
+                    // block's own, and its closing Dedent ended this block
+                    // early. Like the script-level arm, the AST has no slot
+                    // for an inner class's annotations, so drop them rather
+                    // than let them attach to the next member.
+                    pending_annotations.clear();
+                    members.push(self.parse_inner_class());
+                }
                 _ => {
                     self.advance();
                 }
@@ -889,6 +906,65 @@ mod tests {
         let mut lexer = Lexer::new(source);
         let tokens = lexer.tokenize();
         Parser::new(&tokens).parse()
+    }
+
+    /// Names of `members`' inner classes with their own members' names, for
+    /// asserting the shape of a parse.
+    fn shape(members: &[ClassMember]) -> Vec<String> {
+        members
+            .iter()
+            .filter_map(|member| match member {
+                ClassMember::InnerClass { name, members, .. } => {
+                    Some(format!("{name}[{}]", shape(members).join(" ")))
+                }
+                ClassMember::Variable { name, .. } | ClassMember::Constant { name, .. } => {
+                    Some(name.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn nested_inner_class_keeps_its_members_and_its_parents() {
+        // `class D` used to be skipped token by token: its members were read
+        // as C's, and its closing Dedent ended C early, so `after` landed at
+        // the top level.
+        let source = "var top = 0\n\n\nclass C:\n\tvar v = 1\n\n\tclass D:\n\t\tconst K = 1\n\n\tvar after = 2\n\n\nvar last = 3\n";
+        assert_eq!(
+            shape(&parse_source(source)),
+            vec!["top", "C[v D[K] after]", "last"]
+        );
+    }
+
+    #[test]
+    fn deeply_nested_inner_classes_parse() {
+        let source =
+            "class A:\n\tclass B:\n\t\tclass C:\n\t\t\tvar x = 1\n\t\tvar y = 2\n\tvar z = 3\n";
+        assert_eq!(shape(&parse_source(source)), vec!["A[B[C[x] y] z]"]);
+    }
+
+    #[test]
+    fn annotation_before_nested_class_does_not_attach_to_the_next_member() {
+        let source = "class C:\n\t@abstract\n\tclass D:\n\t\tpass\n\tvar v = 1\n";
+        let members = parse_source(source);
+        let ClassMember::InnerClass { members: inner, .. } = &members[0] else {
+            panic!("expected an inner class: {members:?}");
+        };
+        let annotations = inner.iter().find_map(|member| match member {
+            ClassMember::Variable { annotations, .. } => Some(annotations),
+            _ => None,
+        });
+        assert_eq!(annotations.map(Vec::len), Some(0), "{inner:?}");
+    }
+
+    #[test]
+    fn inner_class_extending_a_dotted_name_or_path_keeps_its_body() {
+        let source = "class A extends Node2D.Foo:\n\tvar v = 1\n\n\nclass B extends \"res://base.gd\":\n\tvar w = 2\n\n\nclass E extends \"res://e.gd\".Inner:\n\tvar u = 3\n\n\nvar after = 4\n";
+        assert_eq!(
+            shape(&parse_source(source)),
+            vec!["A[v]", "B[w]", "E[u]", "after"]
+        );
     }
 
     #[test]

@@ -202,7 +202,7 @@ The canonical ordering enforced by `order/class-member-order` is:
 | `quality/empty-function` | Empty or pass-only functions | **off** | - |
 | `quality/max-class-variables` | Too many class-level variables (default: 15) | on | - |
 | `quality/max-public-methods` | Too many public methods per class (default: 20) | on | - |
-| `quality/max-inner-classes` | Too many inner classes per file (default: 5) | on | - |
+| `quality/max-inner-classes` | Too many inner classes per file, nested ones included (default: 5) | on | - |
 | `quality/no-else-return` | Unnecessary `else`/`elif` after `return` | on | - |
 | `quality/unreachable-code` | Code after `return`, `break`, or `continue` | on | - |
 | `quality/await-in-loop` | `await` used inside a `for`/`while` loop | on | - |

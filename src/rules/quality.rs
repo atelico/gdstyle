@@ -1014,11 +1014,14 @@ pub fn check_max_inner_classes(
     config: &Config,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let count = file
-        .members
-        .iter()
-        .filter(|m| matches!(m, ClassMember::InnerClass { .. }))
-        .count();
+    // Every inner class in the file counts, nested ones included: the limit
+    // is per file, and a class nested in another is still one more class.
+    let mut count = 0;
+    for_each_member(&file.members, |member| {
+        if matches!(member, ClassMember::InnerClass { .. }) {
+            count += 1;
+        }
+    });
 
     if count > config.max_inner_classes {
         diagnostics.push(Diagnostic::warning(
@@ -2329,5 +2332,29 @@ mod tests {
         let mut diags = Vec::new();
         check_max_inner_classes(&file, &config, &mut diags);
         assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn max_inner_classes_counts_nested_classes() {
+        // Two top-level classes holding four nested ones: six in the file.
+        let class = |name: &str, line: usize, members: Vec<ClassMember>| ClassMember::InnerClass {
+            name: name.to_string(),
+            name_span: span(line),
+            members,
+            span: span(line),
+        };
+        let members = vec![
+            class("A", 1, vec![class("A1", 2, vec![]), class("A2", 3, vec![])]),
+            class("B", 4, vec![class("B1", 5, vec![class("B2", 6, vec![])])]),
+        ];
+        let file = ScriptFile {
+            path: "test.gd".to_string(),
+            lines: vec![],
+            members,
+        };
+        let mut diags = Vec::new();
+        check_max_inner_classes(&file, &Config::default(), &mut diags);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("6 inner classes"), "{diags:?}");
     }
 }
