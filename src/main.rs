@@ -650,7 +650,7 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
         })
         .collect();
 
-    let mut would_change = false;
+    let mut changed_count = 0;
     let mut formatted_count = 0;
     for r in &format_results {
         if let Some(e) = &r.read_error {
@@ -669,7 +669,7 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
         if !r.changed {
             continue;
         }
-        would_change = true;
+        changed_count += 1;
         if diff {
             if let (Some(src), Some(fmt)) = (&r.source, &r.formatted) {
                 print_diff(&r.path, src, fmt);
@@ -683,13 +683,13 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
     }
 
     if check || diff {
-        if would_change {
+        if changed_count > 0 {
             println!(
                 "{}",
                 format!(
                     "{} file{} would be reformatted.",
-                    files.len(),
-                    if files.len() == 1 { "" } else { "s" }
+                    changed_count,
+                    if changed_count == 1 { "" } else { "s" }
                 )
                 .yellow()
             );

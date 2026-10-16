@@ -6706,3 +6706,49 @@ fn lint_ignores_layout_inside_multiline_strings() {
         .collect();
     assert!(layout.is_empty(), "unexpected diagnostics: {:?}", layout);
 }
+
+/// The value of every string literal in `source`, sorted so the comparison
+/// ignores reordering.
+fn string_values(source: &str) -> Vec<String> {
+    let mut values: Vec<String> = Lexer::new(source)
+        .tokenize()
+        .into_iter()
+        .filter_map(|token| match token.kind {
+            gdstyle::token::TokenKind::String(info) => Some(info.value),
+            _ => None,
+        })
+        .collect();
+    values.sort();
+    values
+}
+
+// `fmt` may move, re-indent and re-quote strings, but never change a value.
+// Checked on every fixture and example, as written and converted to CRLF.
+#[test]
+fn formatting_never_changes_a_string_value() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let config = default_config();
+    let mut checked = 0;
+    for dir in ["tests/fixtures", "examples"] {
+        for entry in std::fs::read_dir(root.join(dir)).expect("fixture dir is readable") {
+            let path = entry.expect("fixture dir entry is readable").path();
+            if path.extension().is_none_or(|ext| ext != "gd") {
+                continue;
+            }
+            let lf = std::fs::read_to_string(&path)
+                .expect("fixture is UTF-8")
+                .replace("\r\n", "\n");
+            for source in [lf.clone(), lf.replace('\n', "\r\n")] {
+                let formatted = formatter::format_source(&source, &config);
+                assert_eq!(
+                    string_values(&formatted),
+                    string_values(&source),
+                    "{}",
+                    path.display()
+                );
+            }
+            checked += 1;
+        }
+    }
+    assert!(checked > 10, "only {checked} fixtures found");
+}

@@ -326,19 +326,18 @@ fn tighten_warning_ignore_region_markers(source: &str, tokens: &[Token]) -> Stri
     }
 
     let lines: Vec<&str> = source.split('\n').collect();
-    let is_blank = |line_number: usize| {
-        lines
-            .get(line_number - 1)
-            .is_some_and(|line| line.trim().is_empty())
-    };
+    // A blank-looking line inside a multi-line string is string data, not
+    // spacing: it is never dropped, and it ends a run of blank lines.
+    let string_line_mask = StringLines::new(tokens, lines.len());
     let mut kept: Vec<&str> = Vec::with_capacity(lines.len());
     // Line number (1-indexed) of the last non-blank line seen so far.
     let mut last_code_line: Option<usize> = None;
-    let mut pending_blank_count = 0;
+    // Blank lines since `last_code_line`, as written, in case they stay.
+    let mut pending_blank_lines: Vec<&str> = Vec::new();
     for (index, line) in lines.iter().enumerate() {
         let line_number = index + 1;
-        if is_blank(line_number) {
-            pending_blank_count += 1;
+        if line.trim().is_empty() && !string_line_mask.is_interior(index) {
+            pending_blank_lines.push(line);
             continue;
         }
         let follows_start_marker =
@@ -347,15 +346,15 @@ fn tighten_warning_ignore_region_markers(source: &str, tokens: &[Token]) -> Stri
         // against, so its leading blank lines stay.
         let closes_region = restore_lines.contains(&line_number) && last_code_line.is_some();
         if !follows_start_marker && !closes_region {
-            kept.extend(std::iter::repeat_n("", pending_blank_count));
+            kept.append(&mut pending_blank_lines);
         }
-        pending_blank_count = 0;
+        pending_blank_lines.clear();
         kept.push(line);
         last_code_line = Some(line_number);
     }
     // Trailing blank lines (including the empty piece after the final
     // newline) are not this pass's business.
-    kept.extend(std::iter::repeat_n("", pending_blank_count));
+    kept.append(&mut pending_blank_lines);
     kept.join("\n")
 }
 
@@ -1669,7 +1668,12 @@ fn collect_member_anchors(members: &[ClassMember], source_lines: &[&str]) -> Vec
 
 /// For each anchor, walk backward from its declaration line to find attached
 /// comments / annotations: those belong to the member and move with it.
-fn compute_attached_starts(merged: &[Anchor], lines: &[&str]) -> Vec<usize> {
+/// The walk stops at string data, even a line that looks like a comment.
+fn compute_attached_starts(
+    merged: &[Anchor],
+    lines: &[&str],
+    string_line_mask: &StringLines,
+) -> Vec<usize> {
     let mut attached_starts: Vec<usize> = Vec::new();
     for (i, &(decl_line, _, _)) in merged.iter().enumerate() {
         let prev_boundary = if i > 0 { merged[i - 1].0 + 1 } else { 0 };
@@ -1677,12 +1681,18 @@ fn compute_attached_starts(merged: &[Anchor], lines: &[&str]) -> Vec<usize> {
         let mut j = decl_line;
         while j > prev_boundary {
             j -= 1;
+            if string_line_mask.is_interior(j) {
+                break;
+            }
             let content = if j < lines.len() { lines[j].trim() } else { "" };
             if content.starts_with('#') || content.starts_with('@') {
                 start = j;
             } else if content.is_empty() {
                 // Blank line: keep looking only if a comment sits directly above.
-                let above = if j > prev_boundary && j - 1 < lines.len() {
+                let above = if j > prev_boundary
+                    && j - 1 < lines.len()
+                    && !string_line_mask.is_interior(j - 1)
+                {
                     lines[j - 1].trim()
                 } else {
                     ""
@@ -1725,7 +1735,8 @@ fn reorder_class_members(source: &str) -> String {
         return move_class_decl_before_doc_comments(source);
     }
 
-    let attached_starts = compute_attached_starts(&merged, &lines);
+    let string_line_mask = StringLines::new(&tokens, lines.len());
+    let attached_starts = compute_attached_starts(&merged, &lines, &string_line_mask);
 
     // A member carrying a `# gdstyle:ignore=order/class-member-order` directive
     // opts out of reordering: it is pinned to its source position while the
@@ -1945,6 +1956,15 @@ fn move_class_decl_before_doc_comments(source: &str) -> String {
         } else {
             break;
         }
+    }
+
+    // The search above reads raw lines, so it can match text inside a
+    // multi-line string (a script template, say). Moving those lines would
+    // rewrite the string, so leave the source alone if any of them is string
+    // data. Lexing only here keeps the common case cheap.
+    let string_line_mask = StringLines::new(&Lexer::new(source).tokenize(), lines.len());
+    if (doc_start..=decl_end).any(|idx| string_line_mask.is_interior(idx)) {
+        return source.to_string();
     }
 
     // Reconstruct: lines before docs, then decl lines, blank, doc lines, rest.
@@ -2238,6 +2258,35 @@ mod tests {
         // `\r` once the file is normalized and must keep it.
         let source = "class A extends B:\r\n\tconst X = \"\"\"\r\n\r\n\tconst Y = \"\"\"\r\n";
         assert_eq!(format_source(source, &Config::default()), source);
+    }
+
+    #[test]
+    fn region_marker_pass_keeps_blank_looking_string_lines() {
+        // A column-1 region marker makes the pass rebuild the file's blank
+        // lines; lines inside a string are data, with LF or CRLF.
+        let crlf = "extends Node\r\n\r\nconst T = \"\"\"\r\na\r\n\r\nb\r\n\"\"\"\r\n@warning_ignore_restore(\"unused\")\r\n";
+        assert_eq!(format_source(crlf, &Config::default()), crlf);
+        let lf = "extends Node\n\nconst T = \"\"\"\na\n   \n\t\nb\n\"\"\"\n@warning_ignore_restore(\"unused\")\n";
+        assert_eq!(format_source(lf, &Config::default()), lf);
+    }
+
+    #[test]
+    fn doc_comment_move_leaves_a_template_string_alone() {
+        let source =
+            "extends Node\n\nconst TEMPLATE = \"\"\"\n## Generated script\nextends Node\n\"\"\"\n";
+        assert_eq!(format_source(source, &Config::default()), source);
+    }
+
+    #[test]
+    fn reorder_does_not_attach_a_comment_looking_closing_line() {
+        // Walking back from `var b` must stop at the string's closing line,
+        // even though it starts with `#`.
+        let source = "extends Node\n\nfunc f():\n\tpass\n\n\nconst A = \"\"\"\nx\n\n# note\n## doc\"\"\"\nvar b = 1\n";
+        let formatted = format_source(source, &Config::default());
+        assert!(
+            formatted.contains("const A = \"\"\"\nx\n\n# note\n## doc\"\"\"\n"),
+            "{formatted:?}"
+        );
     }
 
     #[test]

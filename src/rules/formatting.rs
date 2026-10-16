@@ -924,7 +924,11 @@ pub fn check_trailing_comma(
                 // prettier) writes it. GDScript has no block comments, so
                 // "close is on a later line than the last item" is equivalent
                 // to "close is the first non-whitespace token on its line".
-                let closer_starts_own_line = tokens[k].span.line > tokens[last_item].span.line;
+                // The last item can be a string spanning lines, so compare
+                // with the line it ends on, not the one it starts on.
+                let last_item_end_line =
+                    tokens[last_item].span.line + tokens[last_item].text.matches('\n').count();
+                let closer_starts_own_line = tokens[k].span.line > last_item_end_line;
 
                 if last_item > i
                     && tokens[last_item].kind != TokenKind::Comma
@@ -1824,6 +1828,18 @@ mod tests {
         check_max_line_length(&tokenize(&source), &file, &Config::default(), &mut diags);
         let reported: Vec<usize> = diags.iter().map(|d| d.span.line).collect();
         assert_eq!(reported, vec![2]);
+    }
+
+    #[test]
+    fn trailing_comma_ignores_closer_after_a_multiline_string() {
+        // `"""}` closes the literal and the dictionary on one line, so the
+        // closer doesn't start its own line and no comma is wanted.
+        let source = "var d = {\"a\": 1, \"b\": \"\"\"\nx\n\"\"\"}\n";
+        let lines: Vec<&str> = source.split('\n').collect();
+        let file = make_file(&lines);
+        let mut diags = Vec::new();
+        check_trailing_comma(&tokenize(source), &file, &mut diags);
+        assert!(diags.is_empty(), "unexpected diagnostics: {:?}", diags);
     }
 
     #[test]
