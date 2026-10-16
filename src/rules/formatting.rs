@@ -1491,7 +1491,8 @@ pub fn check_call_paren_spacing(
     }
 }
 
-/// Check enum members are each on their own line.
+/// Check enum members are each on their own line, in the script and in
+/// every inner class.
 ///
 /// The fix moves each member of a single-line enum onto its own line. It
 /// works on tokens, so a comma inside a string or a call is not a member
@@ -1514,7 +1515,8 @@ pub fn check_enum_one_per_line(
     source: Option<&str>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    for member in &file.members {
+    // Inner classes too: an enum there is a class member like any other.
+    crate::ast::for_each_member(&file.members, |member| {
         if let ClassMember::Enum {
             members: enum_members,
             span,
@@ -1522,7 +1524,7 @@ pub fn check_enum_one_per_line(
         } = member
         {
             if enum_members.len() <= 1 {
-                continue;
+                return;
             }
             // Check if all members are on the same line.
             let first_line = enum_members[0].span.line;
@@ -1542,7 +1544,7 @@ pub fn check_enum_one_per_line(
                 diagnostics.push(diag);
             }
         }
-    }
+    });
 }
 
 /// Build a Fix that puts each member of the single-line enum declared at
@@ -1909,6 +1911,18 @@ mod tests {
         assert_eq!(
             enum_fix("enum G {S = \"x, y\", T = max(1, 2)}\n"),
             "enum G {\n\tS = \"x, y\",\n\tT = max(1, 2),\n}\n"
+        );
+    }
+
+    #[test]
+    fn enum_rule_covers_inner_classes() {
+        assert_eq!(
+            enum_fix("class Inner:\n\tenum H {P, Q = 1 << 2}\n"),
+            "class Inner:\n\tenum H {\n\t\tP,\n\t\tQ = 1 << 2,\n\t}\n"
+        );
+        assert_eq!(
+            enum_fix("class A:\n\tclass B:\n\t\tenum {X, Y}\n"),
+            "class A:\n\tclass B:\n\t\tenum {\n\t\t\tX,\n\t\t\tY,\n\t\t}\n"
         );
     }
 
