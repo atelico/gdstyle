@@ -4,7 +4,7 @@ A short summary of every gdstyle release, newest first. The full notes for
 each version are on its
 [GitHub release](https://github.com/atelico/gdstyle/releases).
 
-## 0.4.0 (2026-10-16)
+## 0.4.0 (2026-10-17)
 
 - Fixed: `fmt` and `check --fix` no longer change the contents of multi-line
   strings, and layout rules skip them (#42, #43).
