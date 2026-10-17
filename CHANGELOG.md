@@ -4,6 +4,21 @@ A short summary of every gdstyle release, newest first. The full notes for
 each version are on its
 [GitHub release](https://github.com/atelico/gdstyle/releases).
 
+## 0.4.0 (2026-10-16)
+
+- Fixed: `fmt` and `check --fix` no longer change the contents of multi-line
+  strings, and layout rules skip them (#42, #43).
+- Fixed: `fmt` and `check --fix` keep a file's line endings, and strings keep
+  their own (#43).
+- Fixed: `format/enum-one-per-line` keeps comments, annotations and commas
+  inside members, and covers inner classes (#44).
+- Fixed: `fmt` settles on consecutive commas (#44).
+- Fixed: nested inner classes and dotted or path `extends` parse correctly
+  (#45).
+- Changed: `quality/max-inner-classes` counts nested classes (#45).
+- Library: rule functions in `rules::formatting` take the token list (#42,
+  #43, #44).
+
 ## 0.3.3 (2026-10-11)
 
 - Fixed: `fmt` no longer changes which members a `@warning_ignore_start` /
