@@ -484,6 +484,17 @@ fn formatter_normalizes_boolean_operators() {
 }
 
 #[test]
+fn boolean_operator_rewrite_keeps_words_apart() {
+    let source = "func f(a, b, c):\n\tvar o = a&&b||!c\n\tvar s = \"\"\"\nq\n\"\"\" if a&&b else \"n\"\n\treturn [o, s]\n";
+    let expected = "func f(a, b, c):\n\tvar o = a and b or not c\n\tvar s = \"\"\"\nq\n\"\"\" if a and b else \"n\"\n\treturn [o, s]\n";
+    let config = default_config();
+    assert_eq!(formatter::format_source(source, &config), expected);
+    let diagnostics = linter::lint_source(source, "test.gd", &config);
+    let fixed = fixer::apply_fixes(source, &diagnostics, true);
+    assert_eq!(fixed, expected);
+}
+
+#[test]
 fn formatter_strips_trailing_whitespace() {
     let source = "var x = 5   \nvar y = 10\t\n";
     let config = default_config();
