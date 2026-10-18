@@ -1,7 +1,9 @@
 use crate::ast::ScriptFile;
 use crate::config::Config;
 use crate::diagnostic::{line_byte_offset, Diagnostic, Fix, Replacement};
-use crate::token::{QuoteStyle, Span, StringLines, StringPrefix, Token, TokenKind};
+use crate::token::{
+    boolean_operator_word, QuoteStyle, Span, StringLines, StringPrefix, Token, TokenKind,
+};
 
 /// Check that no line exceeds the maximum length.
 ///
@@ -267,64 +269,26 @@ pub fn check_boolean_operators(
     file: &ScriptFile,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    for token in tokens {
-        match &token.kind {
-            TokenKind::AmpersandAmpersand => {
-                diagnostics.push(
-                    Diagnostic::warning(
-                        "format/boolean-operators",
-                        "use 'and' instead of '&&'".to_string(),
-                        token.span,
-                        &file.path,
-                    )
-                    .with_fix(Fix {
-                        replacements: vec![Replacement {
-                            offset: token.span.offset,
-                            length: token.span.length,
-                            new_text: "and".to_string(),
-                        }],
-                        is_safe: true,
-                    }),
-                );
-            }
-            TokenKind::PipePipe => {
-                diagnostics.push(
-                    Diagnostic::warning(
-                        "format/boolean-operators",
-                        "use 'or' instead of '||'".to_string(),
-                        token.span,
-                        &file.path,
-                    )
-                    .with_fix(Fix {
-                        replacements: vec![Replacement {
-                            offset: token.span.offset,
-                            length: token.span.length,
-                            new_text: "or".to_string(),
-                        }],
-                        is_safe: true,
-                    }),
-                );
-            }
-            TokenKind::Bang => {
-                diagnostics.push(
-                    Diagnostic::warning(
-                        "format/boolean-operators",
-                        "use 'not' instead of '!'".to_string(),
-                        token.span,
-                        &file.path,
-                    )
-                    .with_fix(Fix {
-                        replacements: vec![Replacement {
-                            offset: token.span.offset,
-                            length: token.span.length,
-                            new_text: "not ".to_string(),
-                        }],
-                        is_safe: true,
-                    }),
-                );
-            }
-            _ => {}
-        }
+    for (idx, token) in tokens.iter().enumerate() {
+        let Some(new_text) = boolean_operator_word(tokens, idx) else {
+            continue;
+        };
+        diagnostics.push(
+            Diagnostic::warning(
+                "format/boolean-operators",
+                format!("use '{}' instead of '{}'", new_text.trim(), token.text),
+                token.span,
+                &file.path,
+            )
+            .with_fix(Fix {
+                replacements: vec![Replacement {
+                    offset: token.span.offset,
+                    length: token.span.length,
+                    new_text,
+                }],
+                is_safe: true,
+            }),
+        );
     }
 }
 
@@ -2196,6 +2160,29 @@ mod tests {
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("'not'"));
         assert!(diags[0].fix.is_some());
+    }
+
+    #[test]
+    fn boolean_operator_fix_keeps_words_apart() {
+        let cases = [
+            ("a&&b", "a and b"),
+            ("a||b", "a or b"),
+            ("!c", "not c"),
+            ("a&&b||!c", "a and b or not c"),
+            ("(a)&&(b)", "(a) and (b)"),
+            ("a &&b", "a and b"),
+            ("! a", "not a"),
+            ("(!a)", "(not a)"),
+            ("a && b", "a and b"),
+            ("\"a&&b||!c\"", "\"a&&b||!c\""),
+        ];
+        for (expr, expected) in cases {
+            let source = format!("var o = {expr}\n");
+            let lines: Vec<&str> = source.split('\n').collect();
+            let mut diags = Vec::new();
+            check_boolean_operators(&tokenize(&source), &make_file(&lines), &mut diags);
+            assert_eq!(apply(&source, &diags), format!("var o = {expected}\n"));
+        }
     }
 
     #[test]

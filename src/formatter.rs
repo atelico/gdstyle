@@ -662,20 +662,11 @@ fn normalize_boolean_operators(source: &str) -> String {
     // Use the lexer to find && || ! tokens and replace them.
     let mut lexer = crate::lexer::Lexer::new(source);
     let tokens = lexer.tokenize();
-    let mut replacements: Vec<(usize, usize, &str)> = Vec::new();
+    let mut replacements: Vec<(usize, usize, String)> = Vec::new();
 
-    for token in &tokens {
-        match &token.kind {
-            crate::token::TokenKind::AmpersandAmpersand => {
-                replacements.push((token.span.offset, token.span.length, "and"));
-            }
-            crate::token::TokenKind::PipePipe => {
-                replacements.push((token.span.offset, token.span.length, "or"));
-            }
-            crate::token::TokenKind::Bang => {
-                replacements.push((token.span.offset, token.span.length, "not "));
-            }
-            _ => {}
+    for (idx, token) in tokens.iter().enumerate() {
+        if let Some(word) = crate::token::boolean_operator_word(&tokens, idx) {
+            replacements.push((token.span.offset, token.span.length, word));
         }
     }
 
@@ -687,7 +678,7 @@ fn normalize_boolean_operators(source: &str) -> String {
     let mut result = source.to_string();
     for (offset, length, new_text) in replacements.into_iter().rev() {
         let end = (offset + length).min(result.len());
-        result.replace_range(offset..end, new_text);
+        result.replace_range(offset..end, &new_text);
     }
     result
 }
@@ -2360,6 +2351,26 @@ mod tests {
         assert!(result.contains("not "));
         assert!(!result.contains("&&"));
         assert!(!result.contains("||"));
+    }
+
+    #[test]
+    fn normalize_boolean_operators_keeps_words_apart() {
+        let cases = [
+            ("a&&b", "a and b"),
+            ("a||b", "a or b"),
+            ("!c", "not c"),
+            ("a&&b||!c", "a and b or not c"),
+            ("(a)&&(b)", "(a) and (b)"),
+            ("a &&b", "a and b"),
+            ("! a", "not a"),
+            ("(!a)", "(not a)"),
+            ("a && b", "a and b"),
+            ("\"a&&b||!c\"", "\"a&&b||!c\""),
+        ];
+        for (expr, expected) in cases {
+            let result = normalize_boolean_operators(&format!("var o = {expr}\n"));
+            assert_eq!(result, format!("var o = {expected}\n"));
+        }
     }
 
     #[test]
