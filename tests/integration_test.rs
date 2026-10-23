@@ -727,6 +727,89 @@ fn formatter_preserves_hash_section_headers() {
 }
 
 #[test]
+fn formatter_preserves_hash_banner_blocks() {
+    // Pure-hash separators are decorative comments, not class documentation.
+    let source = "extends Node\n\n\n################################################################################\n# signal handlers\n################################################################################\nfunc _on_event() -> void:\n\tpass\n";
+    for source in [source.to_string(), source.replace('\n', "\r\n")] {
+        let formatted = formatter::format_source(&source, &default_config());
+        assert_eq!(formatted, source);
+        assert_eq!(
+            formatter::format_source(&formatted, &default_config()),
+            formatted,
+            "formatting a banner must be idempotent"
+        );
+    }
+}
+
+#[test]
+fn formatter_keeps_hash_banners_with_their_declaration() {
+    let source =
+        "extends Node\n###  \n# signal handlers\n###\t\nfunc _on_event() -> void:\n\tpass\n";
+    let expected =
+        "extends Node\n\n\n###\n# signal handlers\n###\nfunc _on_event() -> void:\n\tpass\n";
+    let formatted = formatter::format_source(source, &default_config());
+    assert_eq!(formatted, expected);
+    assert_eq!(
+        formatter::format_source(&formatted, &default_config()),
+        expected
+    );
+}
+
+#[test]
+fn formatter_preserves_standalone_hash_banner_blocks() {
+    let source = "extends Node\n\n########\n# Signals\n########\n\nsignal happened\n";
+    let formatted = formatter::format_source(source, &default_config());
+    assert_eq!(formatted, source);
+    assert_eq!(
+        formatter::format_source(&formatted, &default_config()),
+        source
+    );
+}
+
+#[test]
+fn formatter_keeps_empty_and_hash_heading_doc_comments() {
+    // A bare `##` is a blank documentation line; `## ###` is a doc heading.
+    let source = "extends Node\n\n## Class documentation.\n##\n## ###\n## More documentation.\n\nsignal happened\n";
+    let expected = "extends Node\n## Class documentation.\n##\n## ###\n## More documentation.\n\nsignal happened\n";
+    let formatted = formatter::format_source(source, &default_config());
+    assert_eq!(formatted, expected);
+    assert_eq!(
+        formatter::format_source(&formatted, &default_config()),
+        expected
+    );
+}
+
+#[test]
+fn formatter_preserves_hash_banners_before_class_headers() {
+    let source = "########\nextends Node\n";
+    assert_eq!(formatter::format_source(source, &default_config()), source);
+
+    // Reordering members takes a different path when emitting the class header.
+    let source = "########\n# Script\n########\nextends Node\n\nvar value = 1\n\nsignal changed\n";
+    let expected =
+        "########\n# Script\n########\nextends Node\n\nsignal changed\n\nvar value = 1\n";
+    let formatted = formatter::format_source(source, &default_config());
+    assert_eq!(formatted, expected);
+    assert_eq!(
+        formatter::format_source(&formatted, &default_config()),
+        expected
+    );
+}
+
+#[test]
+fn formatter_preserves_indented_and_quoted_hash_banners() {
+    for source in [
+        "extends Node\n\n\nfunc run() -> void:\n\t########\n\t# Local section\n\t########\n\tpass # ########\n",
+        "extends Node\n\n\nclass Inner:\n\textends Node\n\n\n\t########\n\t# Methods\n\t########\n\tfunc run() -> void:\n\t\tpass\n",
+        "extends Node\n\nconst TEMPLATE = \"\"\"\n########\n# Script\n########\nextends Node\n\"\"\"\n",
+    ] {
+        let formatted = formatter::format_source(source, &default_config());
+        assert_eq!(formatted, source);
+        assert_eq!(formatter::format_source(&formatted, &default_config()), source);
+    }
+}
+
+#[test]
 fn formatter_trailing_comma_skips_comments() {
     // Regression: trailing comma was inserted into comments instead of after the
     // actual last element. Multi-pass caused repeated comma insertion: `# comment,,,,,`
