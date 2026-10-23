@@ -297,6 +297,25 @@ fn fmt_diff_shows_line_ending_changes() {
 }
 
 #[test]
+fn fmt_preserves_hash_banner_blocks() {
+    let source = "extends Node\n\n\n################################################################################\n# signal handlers\n################################################################################\nfunc _on_event() -> void:\n\tpass\n";
+    let p = project("", source);
+    for extra in [vec!["--check"], vec![]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_gdstyle"))
+            .arg("fmt")
+            .arg(&p.script)
+            .arg("--config")
+            .arg(&p.config)
+            .arg("--no-color")
+            .args(extra)
+            .output()
+            .expect("run gdstyle fmt");
+        assert!(output.status.success(), "{}", stdout_of(&output));
+        assert_eq!(std::fs::read_to_string(&p.script).unwrap(), source);
+    }
+}
+
+#[test]
 fn the_generated_config_names_only_real_rules() {
     // `gdstyle init` writes a template listing every rule. Now that an
     // unrecognised name is reported, the tool's own output must pass its
