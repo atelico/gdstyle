@@ -371,6 +371,20 @@ struct MemberUnit {
     decl_start: usize, // 1-indexed; >= start
 }
 
+// The lexer treats every `##` prefix as documentation. An uninterrupted run
+// of at least three hashes is a decorative separator instead; a bare `##`
+// remains an empty documentation line, and `## ###` remains documentation.
+fn is_hash_banner_content(content: &str) -> bool {
+    let content = content.trim_end();
+    !content.is_empty() && content.bytes().all(|b| b == b'#')
+}
+
+fn is_doc_comment_line(line: &str) -> bool {
+    line.trim()
+        .strip_prefix("##")
+        .is_some_and(|content| !is_hash_banner_content(content))
+}
+
 /// Rewrite the source so the blank lines BETWEEN top-level class members match
 /// the canonical Godot style guide spacing. The contents of each member are
 /// preserved verbatim; only the gaps between them change.
@@ -435,7 +449,7 @@ fn normalize_member_spacing(source: &str, config: &Config) -> String {
 
     for member in &members {
         match member {
-            ClassMember::DocComment { span, .. } => {
+            ClassMember::DocComment { span, text } if !is_hash_banner_content(text) => {
                 if let Some(prev_last) = pending_doc_last {
                     if span.line != prev_last + 1 {
                         // Non-consecutive: the older block is a standalone
@@ -452,8 +466,8 @@ fn normalize_member_spacing(source: &str, config: &Config) -> String {
                 }
                 pending_doc_last = Some(span.line);
             }
-            ClassMember::Comment { span, .. } => {
-                // Track a contiguous block of plain `#` comments so a block
+            ClassMember::Comment { span, .. } | ClassMember::DocComment { span, .. } => {
+                // Track plain `#` comments and pure-hash banners so a block
                 // sitting tight against the next declaration can attach to it
                 // as a leading comment (see the declaration arm). A
                 // non-consecutive comment starts a fresh block. Pending docs
@@ -1840,7 +1854,7 @@ fn emit_reordered_blocks(blocks: &[Block], lines: &[&str], attached_starts: &[us
                 .iter()
                 .position(|l| {
                     let t = l.trim();
-                    !t.starts_with("##") && !t.is_empty()
+                    !is_doc_comment_line(t) && !t.is_empty()
                 })
                 .unwrap_or(0);
             if doc_end > 0 {
@@ -1918,7 +1932,7 @@ fn move_class_decl_before_doc_comments(source: &str) -> String {
     let lines: Vec<&str> = source.split('\n').collect();
 
     // Find the first ## doc comment line.
-    let doc_start = lines.iter().position(|l| l.trim().starts_with("##"));
+    let doc_start = lines.iter().position(|l| is_doc_comment_line(l));
     if doc_start.is_none() {
         return source.to_string();
     }
@@ -1928,7 +1942,7 @@ fn move_class_decl_before_doc_comments(source: &str) -> String {
     let mut doc_end = doc_start;
     for (i, line) in lines.iter().enumerate().skip(doc_start) {
         let t = line.trim();
-        if t.starts_with("##") || t.is_empty() {
+        if is_doc_comment_line(t) || t.is_empty() {
             doc_end = i;
         } else {
             break;
