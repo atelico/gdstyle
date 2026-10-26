@@ -1,9 +1,7 @@
 use crate::ast::ScriptFile;
 use crate::config::Config;
 use crate::diagnostic::{line_byte_offset, Diagnostic, Fix, Replacement};
-use crate::token::{
-    boolean_operator_word, QuoteStyle, Span, StringLines, StringPrefix, Token, TokenKind,
-};
+use crate::token::{QuoteStyle, Span, StringLines, StringPrefix, Token, TokenKind};
 
 /// Check that no line exceeds the maximum length.
 ///
@@ -269,8 +267,8 @@ pub fn check_boolean_operators(
     file: &ScriptFile,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    for (idx, token) in tokens.iter().enumerate() {
-        let Some(new_text) = boolean_operator_word(tokens, idx) else {
+    for (index, token) in tokens.iter().enumerate() {
+        let Some(new_text) = boolean_operator_word(tokens, index) else {
             continue;
         };
         diagnostics.push(
@@ -290,6 +288,42 @@ pub fn check_boolean_operators(
             }),
         );
     }
+}
+
+/// The word that replaces the `&&`, `||` or `!` token at `index`, with a
+/// space added where the token touches its neighbour, so the word cannot join
+/// an identifier: `a&&b||!c` becomes `a and b or not c`, not `aandbornot c`.
+/// Returns `None` when the token at `index` is not one of those operators.
+fn boolean_operator_word(tokens: &[Token], index: usize) -> Option<String> {
+    let token = tokens.get(index)?;
+    let word = match token.kind {
+        TokenKind::AmpersandAmpersand => "and",
+        TokenKind::PipePipe => "or",
+        TokenKind::Bang => "not",
+        _ => return None,
+    };
+    let start = token.span.offset;
+    let end = start + token.span.length;
+    let char_before = index
+        .checked_sub(1)
+        .and_then(|previous_index| tokens.get(previous_index))
+        .filter(|previous| previous.span.offset + previous.span.length == start)
+        .and_then(|previous| previous.text.chars().next_back());
+    let char_after = tokens
+        .get(index + 1)
+        .filter(|next| next.span.offset == end)
+        .and_then(|next| next.text.chars().next());
+    // `not` is a prefix: `(!a)` becomes `(not a)`, but `if!a` needs the space.
+    let needs_space_before = match token.kind {
+        TokenKind::Bang => char_before.is_some_and(|c| c.is_alphanumeric() || c == '_'),
+        _ => char_before.is_some_and(|c| !c.is_whitespace()),
+    };
+    let needs_space_after = char_after.is_some_and(|c| !c.is_whitespace());
+    Some(format!(
+        "{}{word}{}",
+        if needs_space_before { " " } else { "" },
+        if needs_space_after { " " } else { "" }
+    ))
 }
 
 /// Check that strings prefer double quotes.

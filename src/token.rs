@@ -174,58 +174,6 @@ impl Token {
     }
 }
 
-/// The word that replaces the `&&`, `||` or `!` token at `idx`, with a space
-/// added where the token touches its neighbour, so the word cannot join an
-/// identifier: `a&&b||!c` becomes `a and b or not c`, not `aandbornot c`.
-/// Returns `None` when the token at `idx` is not one of those operators.
-///
-/// # Example
-///
-/// ```
-/// use gdstyle::lexer::Lexer;
-/// use gdstyle::token::{boolean_operator_word, TokenKind};
-///
-/// let tokens = Lexer::new("x = a&&b or (!c)").tokenize();
-/// let index_of = |kind: TokenKind| tokens.iter().position(|t| t.kind == kind).unwrap();
-/// let and_word = boolean_operator_word(&tokens, index_of(TokenKind::AmpersandAmpersand));
-/// assert_eq!(and_word.as_deref(), Some(" and "));
-/// // `not` after `(` needs no leading space.
-/// assert_eq!(boolean_operator_word(&tokens, index_of(TokenKind::Bang)).as_deref(), Some("not "));
-/// // Any other token yields `None`.
-/// assert_eq!(boolean_operator_word(&tokens, 0), None);
-/// ```
-pub fn boolean_operator_word(tokens: &[Token], idx: usize) -> Option<String> {
-    let token = tokens.get(idx)?;
-    let word = match token.kind {
-        TokenKind::AmpersandAmpersand => "and",
-        TokenKind::PipePipe => "or",
-        TokenKind::Bang => "not",
-        _ => return None,
-    };
-    let start = token.span.offset;
-    let end = start + token.span.length;
-    let before = idx
-        .checked_sub(1)
-        .and_then(|i| tokens.get(i))
-        .filter(|prev| prev.span.offset + prev.span.length == start)
-        .and_then(|prev| prev.text.chars().next_back());
-    let after = tokens
-        .get(idx + 1)
-        .filter(|next| next.span.offset == end)
-        .and_then(|next| next.text.chars().next());
-    // `not` is a prefix: `(!a)` becomes `(not a)`, but `if!a` needs the space.
-    let space_before = match token.kind {
-        TokenKind::Bang => before.is_some_and(|c| c.is_alphanumeric() || c == '_'),
-        _ => before.is_some_and(|c| !c.is_whitespace()),
-    };
-    let space_after = after.is_some_and(|c| !c.is_whitespace());
-    Some(format!(
-        "{}{word}{}",
-        if space_before { " " } else { "" },
-        if space_after { " " } else { "" }
-    ))
-}
-
 /// The lines of a file that multi-line string literals cover. Layout passes
 /// and rules use it to leave string data alone: whitespace, blank lines and
 /// line length inside a literal are part of its value.

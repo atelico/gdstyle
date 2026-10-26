@@ -440,22 +440,61 @@ impl<'t> Parser<'t> {
     }
 
     /// Skip the rest of a `var` or `static var` declaration after its type
-    /// hint, including an indented `set` / `get` block. Returns whether there
-    /// was one.
+    /// hint, including the indented block a trailing `:` opens. Returns
+    /// whether that block holds `set` / `get` accessors (a multi-line lambda
+    /// initializer opens a block too, but it is not one).
     ///
-    /// The line has to be checked for a trailing `:` (computed property)
-    /// before it is consumed: the block that follows must be consumed too, or
-    /// its contents would be read as script-level members.
+    /// The line has to be checked for the `:` before it is consumed: the
+    /// block that follows must be consumed too, or its contents would be read
+    /// as script-level members.
     fn skip_variable_rest(&mut self) -> bool {
-        let mut ends_with_colon = false;
+        let mut opens_block = false;
         while !self.is_at_end()
             && self.current_kind() != TokenKind::Newline
             && self.current_kind() != TokenKind::Eof
         {
-            ends_with_colon = matches!(self.current_kind(), TokenKind::Colon);
+            // A trailing comment doesn't change what the line ends with.
+            if !matches!(
+                self.current_kind(),
+                TokenKind::Comment(_) | TokenKind::DocComment(_)
+            ) {
+                opens_block = self.current_kind() == TokenKind::Colon;
+            }
             self.advance();
         }
-        ends_with_colon && self.skip_indented_block()
+        if !opens_block {
+            return false;
+        }
+        let starts_with_accessor = self.indented_block_starts_with_accessor();
+        self.skip_indented_block() && starts_with_accessor
+    }
+
+    /// Whether the indented block ahead begins with a `set` or `get`
+    /// accessor. Looks ahead without consuming anything.
+    fn indented_block_starts_with_accessor(&self) -> bool {
+        let mut ahead = self.tokens[self.position..].iter().skip_while(|token| {
+            matches!(
+                token.kind,
+                TokenKind::Newline | TokenKind::Comment(_) | TokenKind::DocComment(_)
+            )
+        });
+        if !ahead
+            .next()
+            .is_some_and(|token| token.kind == TokenKind::Indent)
+        {
+            return false;
+        }
+        ahead
+            .find(|token| {
+                !matches!(
+                    token.kind,
+                    TokenKind::Newline | TokenKind::Comment(_) | TokenKind::DocComment(_)
+                )
+            })
+            .is_some_and(|token| {
+                matches!(token.kind, TokenKind::Identifier(_))
+                    && (token.text == "set" || token.text == "get")
+            })
     }
 
     /// Skip an optional indented block following a `:`-terminated line. Walks
@@ -1016,7 +1055,7 @@ mod tests {
 
     #[test]
     fn variable_records_whether_an_accessor_block_follows() {
-        let source = "var a: int:\n\tget:\n\t\treturn 1\nvar b: int = 0: set = _set_b\nvar c = [\n\t1,\n]\nvar d\n";
+        let source = "var a: int:\n\tget:\n\t\treturn 1\nvar b: int = 0: set = _set_b\nvar c = [\n\t1,\n]\nvar d\nvar e: int:  # computed\n\tget:\n\t\treturn 2\nvar f = func():\n\tvar inside = 1\nvar g = 3\n";
         let flags: Vec<(String, bool)> = parse_source(source)
             .into_iter()
             .filter_map(|member| match member {
@@ -1028,7 +1067,17 @@ mod tests {
                 _ => None,
             })
             .collect();
-        let expected = [("a", true), ("b", false), ("c", false), ("d", false)];
+        // `e` has a comment after its `:`; `f` is a lambda, whose body is
+        // consumed but is not an accessor block.
+        let expected = [
+            ("a", true),
+            ("b", false),
+            ("c", false),
+            ("d", false),
+            ("e", true),
+            ("f", false),
+            ("g", false),
+        ];
         assert_eq!(
             flags,
             expected

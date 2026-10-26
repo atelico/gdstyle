@@ -18,6 +18,18 @@ fn default_config() -> Config {
     Config::default()
 }
 
+/// The default config with each of `rule_names` set to `"off"`.
+fn config_with_rules_off(rule_names: &[&str]) -> Config {
+    let mut config = Config::default();
+    for rule_name in rule_names {
+        config.rules.insert(
+            rule_name.to_string(),
+            gdstyle::config::RuleSeverityConfig::Off,
+        );
+    }
+    config
+}
+
 fn fixture_path(name: &str) -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -142,11 +154,7 @@ fn suppression_comments_work() {
 
 #[test]
 fn config_overrides_work() {
-    let mut config = default_config();
-    config.rules.insert(
-        "naming/class-name-pascal-case".to_string(),
-        gdstyle::config::RuleSeverityConfig::Off,
-    );
+    let config = config_with_rules_off(&["naming/class-name-pascal-case"]);
 
     let diagnostics = linter::lint_file(&fixture_path("bad_naming.gd"), &config).unwrap();
     let class_name_diags: Vec<_> = diagnostics
@@ -2332,6 +2340,11 @@ fn fmt_moves_class_doc_below_annotated_headers() {
             "## doc\n@icon(\"res://icon.svg\") @tool class_name Foo\nextends Node\n",
             "@icon(\"res://icon.svg\") @tool class_name Foo\nextends Node\n## doc\n",
         ),
+        // A `)` inside an annotation argument.
+        (
+            "## doc\n@icon(\"res://a(1).svg\")\nclass_name Foo\nextends Node\n",
+            "@icon(\"res://a(1).svg\")\nclass_name Foo\nextends Node\n## doc\n",
+        ),
         // An annotated member is not part of the header.
         (
             "## doc for x\n@export\nvar x = 1\n",
@@ -2986,11 +2999,7 @@ fn fmt_keeps_member_order_when_the_order_rule_is_off() {
         "the default config must reorder this source"
     );
 
-    let mut config = default_config();
-    config.rules.insert(
-        "order/class-member-order".to_string(),
-        gdstyle::config::RuleSeverityConfig::Off,
-    );
+    let config = config_with_rules_off(&["order/class-member-order"]);
     assert_eq!(formatter::format_source(source, &config), source);
 }
 
@@ -3026,9 +3035,47 @@ fn fmt_keeps_variables_without_accessor_blocks_tight() {
 }
 
 #[test]
-fn fmt_skips_each_formatting_pass_whose_rule_is_off() {
-    // Each source breaks one rule that `fmt` applies with a dedicated pass.
-    // The default config rewrites it; with the rule off it must stay as is.
+fn fmt_finds_accessor_blocks_after_a_trailing_comment() {
+    // A comment after the `:` hid the block, so its contents were read as
+    // members and `fmt` put a blank line inside the getter.
+    let source = "extends Node\n\nstatic var b: int:  # computed\n\tget:\n\t\tvar tmp = 1\n\t\treturn tmp\nstatic var c = 2\n";
+    let expected = "extends Node\n\nstatic var b: int:  # computed\n\tget:\n\t\tvar tmp = 1\n\t\treturn tmp\n\nstatic var c = 2\n";
+    assert_eq!(
+        formatter::format_source(source, &default_config()),
+        expected
+    );
+}
+
+#[test]
+fn fmt_keeps_a_multi_line_lambda_variable_tight() {
+    // A lambda body is an indented block but not an accessor block.
+    let source = "extends Node\n\nvar a = 1\nvar f = func():\n\tprint(1)\nvar b = 2\n";
+    assert_eq!(formatter::format_source(source, &default_config()), source);
+}
+
+#[test]
+fn fmt_honors_suppression_comments_for_boolean_operators() {
+    let source = "var a = b && c  # gdstyle:ignore=format/boolean-operators\nvar d = e&&f\n";
+    let expected = "var a = b && c  # gdstyle:ignore=format/boolean-operators\nvar d = e and f\n";
+    assert_eq!(
+        formatter::format_source(source, &default_config()),
+        expected
+    );
+}
+
+#[test]
+fn fmt_reorder_keeps_a_missing_final_newline_when_the_rule_is_off() {
+    let source = "func f():\n\tpass\n\n\nvar x = 1";
+    let formatted =
+        formatter::format_source(source, &config_with_rules_off(&["format/trailing-newline"]));
+    assert!(formatted.starts_with("var x = 1"), "got:\n{formatted}");
+    assert!(!formatted.ends_with('\n'), "got:\n{formatted}");
+}
+
+#[test]
+fn fmt_leaves_each_rule_alone_when_it_is_off() {
+    // Each source breaks one rule that `fmt` applies. The default config
+    // rewrites it; with the rule off it must stay as is.
     // Missing float zeros are reported by two rules, so both go off.
     let cases: [(&[&str], &str); 10] = [
         (&["format/boolean-operators"], "var a = true && false\n"),
@@ -3057,15 +3104,8 @@ fn fmt_skips_each_formatting_pass_whose_rule_is_off() {
             source,
             "the default config must rewrite the {rule_names:?} case"
         );
-        let mut config = default_config();
-        for rule_name in rule_names {
-            config.rules.insert(
-                rule_name.to_string(),
-                gdstyle::config::RuleSeverityConfig::Off,
-            );
-        }
         assert_eq!(
-            formatter::format_source(source, &config),
+            formatter::format_source(source, &config_with_rules_off(rule_names)),
             source,
             "{rule_names:?} off"
         );

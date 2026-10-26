@@ -8,8 +8,9 @@ use crate::token::{StringLines, Token, TokenKind};
 
 /// Format a GDScript source string according to style rules.
 ///
-/// This applies ALL formatting transformations unconditionally, unlike --fix
-/// which only fixes flagged violations. The result is idempotent: formatting
+/// This applies every formatting rule the config leaves on, including the
+/// layout `check` doesn't report, such as the spacing between members. A rule
+/// set to `"off"` is not applied. The result is idempotent: formatting
 /// already-formatted source returns it unchanged.
 ///
 /// Line endings are kept: a CRLF file comes back as CRLF, like it does from
@@ -51,13 +52,45 @@ fn format_pass(source: &str, config: &Config) -> String {
     format_pass_with(source, config, SpanningStrings::find(source))
 }
 
+/// The rules [`format_pass_with`] applies through a pass of its own; it applies
+/// the others through [`lint_then_fix`]. Turning a rule off in the config
+/// turns its pass off.
+///
+/// [`Config::is_rule_enabled`] treats a name it doesn't know as enabled, so a
+/// typo here would leave a pass on for good. A test checks every name against
+/// the rule registry.
+mod pass_rule {
+    pub const CLASS_MEMBER_ORDER: &str = "order/class-member-order";
+    pub const NO_TABS_AS_SPACES: &str = "format/no-tabs-as-spaces";
+    pub const TRAILING_WHITESPACE: &str = "format/trailing-whitespace";
+    pub const BLANK_LINES: &str = "format/blank-lines";
+    pub const DOUBLE_QUOTES: &str = "format/double-quotes";
+    pub const COMMENT_SPACING: &str = "format/comment-spacing";
+    pub const FLOAT_LITERAL_ZEROS: &str = "format/float-literal-zeros";
+    pub const NUMBER_LITERALS: &str = "format/number-literals";
+    pub const TRAILING_NEWLINE: &str = "format/trailing-newline";
+    pub const MAX_LINE_LENGTH: &str = "format/max-line-length";
+
+    #[cfg(test)]
+    pub const ALL: [&str; 10] = [
+        CLASS_MEMBER_ORDER,
+        NO_TABS_AS_SPACES,
+        TRAILING_WHITESPACE,
+        BLANK_LINES,
+        DOUBLE_QUOTES,
+        COMMENT_SPACING,
+        FLOAT_LITERAL_ZEROS,
+        NUMBER_LITERALS,
+        TRAILING_NEWLINE,
+        MAX_LINE_LENGTH,
+    ];
+}
+
 /// [`format_pass`] with the [`SpanningStrings`] answer for `source` given.
 fn format_pass_with(source: &str, config: &Config, spanning_strings: SpanningStrings) -> String {
     let mut result = source.to_string();
-    // Each pass below applies one lint rule (named next to it), so turning
-    // that rule off in the config turns the pass off too. The remaining
-    // rules are applied through `lint_then_fix`, which honors the config
-    // already.
+    // Most passes below apply one rule and run only while the config leaves
+    // it on; see `pass_rule`. Member spacing (3a) has no rule.
     let is_enabled = |rule_name: &str| config.is_rule_enabled(rule_name);
 
     // 1. Reorder class members FIRST, before any line-changing transformations,
@@ -68,7 +101,7 @@ fn format_pass_with(source: &str, config: &Config, spanning_strings: SpanningStr
     //    (because reordering could change the runtime init order), and the
     //    output is re-parsed to verify it has the same set of class members
     //    as the input: if anything mutated, we keep the original.
-    if is_enabled("order/class-member-order") {
+    if is_enabled(pass_rule::CLASS_MEMBER_ORDER) {
         result = safe_reorder_class_members(&result);
         result = safe_reorder_inner_classes(&result, spanning_strings);
     }
@@ -76,10 +109,10 @@ fn format_pass_with(source: &str, config: &Config, spanning_strings: SpanningStr
     // 2. Normalize indentation, then strip trailing whitespace. Neither pass
     //    adds or removes lines, so one string-line mask serves both.
     let string_line_mask = string_lines(&result, spanning_strings);
-    if is_enabled("format/no-tabs-as-spaces") {
+    if is_enabled(pass_rule::NO_TABS_AS_SPACES) {
         result = normalize_indentation(&result, config, &string_line_mask);
     }
-    if is_enabled("format/trailing-whitespace") {
+    if is_enabled(pass_rule::TRAILING_WHITESPACE) {
         result = strip_trailing_whitespace(&result, &string_line_mask);
     }
 
@@ -92,46 +125,42 @@ fn format_pass_with(source: &str, config: &Config, spanning_strings: SpanningStr
 
     // 3b. Backstop for blank lines INSIDE function bodies and anywhere the
     //     member-aware pass didn't touch: collapse 3+ to 2.
-    if is_enabled("format/blank-lines") {
+    if is_enabled(pass_rule::BLANK_LINES) {
         result = collapse_blank_lines(&result, spanning_strings);
     }
 
-    // 4. Replace && || ! with and or not.
-    if is_enabled("format/boolean-operators") {
-        result = normalize_boolean_operators(&result);
-    }
-
-    // 5. Normalize quotes (single -> double unless contains double quotes).
-    if is_enabled("format/double-quotes") {
+    // 4. Normalize quotes (single -> double unless contains double quotes).
+    if is_enabled(pass_rule::DOUBLE_QUOTES) {
         result = normalize_quotes(&result);
     }
 
-    // 6. Normalize comment spacing (add space after #, except #region/#endregion).
-    if is_enabled("format/comment-spacing") {
+    // 5. Normalize comment spacing (add space after #, except #region/#endregion).
+    if is_enabled(pass_rule::COMMENT_SPACING) {
         result = normalize_comment_spacing(&result);
     }
 
-    // 7. Normalize float literals (add leading/trailing zeros). Both rules
+    // 6. Normalize float literals (add leading/trailing zeros). Both rules
     //    ask for the zeros, so either one keeps the pass on.
-    if is_enabled("format/float-literal-zeros") || is_enabled("format/number-literals") {
+    if is_enabled(pass_rule::FLOAT_LITERAL_ZEROS) || is_enabled(pass_rule::NUMBER_LITERALS) {
         result = normalize_float_literals(&result);
     }
 
-    // 8. Normalize hex to lowercase.
-    if is_enabled("format/number-literals") {
+    // 7. Normalize hex to lowercase.
+    if is_enabled(pass_rule::NUMBER_LITERALS) {
         result = normalize_hex_literals(&result);
     }
 
-    // 9. Ensure file ends with exactly one \n.
-    if is_enabled("format/trailing-newline") {
+    // 8. Ensure file ends with exactly one \n.
+    if is_enabled(pass_rule::TRAILING_NEWLINE) {
         result = ensure_trailing_newline(&result);
     }
 
-    // 10. Use lint+fix for remaining token-based transformations.
+    // 9. Use lint+fix for the remaining rules, such as `&&` / `||` / `!` to
+    //    `and` / `or` / `not`. Fixes honor `# gdstyle:ignore` comments.
     result = lint_then_fix(&result, config);
 
-    // 11. Break long lines by wrapping at commas inside delimiters.
-    if is_enabled("format/max-line-length") {
+    // 10. Break long lines by wrapping at commas inside delimiters.
+    if is_enabled(pass_rule::MAX_LINE_LENGTH) {
         result = break_long_lines(&result, config, spanning_strings);
     }
 
@@ -271,6 +300,21 @@ fn is_private_data_member(member: &ClassMember) -> bool {
         | ClassMember::Variable { name, .. } => name.starts_with('_'),
         _ => false,
     }
+}
+
+/// Whether `member` is a `var` or `static var` with an indented `set` / `get`
+/// block, which the member spacing sets apart like a small function.
+fn has_accessor_block(member: &ClassMember) -> bool {
+    matches!(
+        member,
+        ClassMember::Variable {
+            has_accessor_block: true,
+            ..
+        } | ClassMember::StaticVariable {
+            has_accessor_block: true,
+            ..
+        }
+    )
 }
 
 /// Earliest line occupied by any annotation attached to this member (e.g.
@@ -566,16 +610,7 @@ fn normalize_member_spacing(source: &str, config: &Config) -> String {
                 units.push(MemberUnit {
                     category: member.ordering_category(),
                     is_private: is_private_data_member(member),
-                    has_accessor_block: matches!(
-                        member,
-                        ClassMember::Variable {
-                            has_accessor_block: true,
-                            ..
-                        } | ClassMember::StaticVariable {
-                            has_accessor_block: true,
-                            ..
-                        }
-                    ),
+                    has_accessor_block: has_accessor_block(member),
                     start,
                     decl_start,
                 });
@@ -704,31 +739,6 @@ fn collapse_blank_lines(source: &str, spanning_strings: SpanningStrings) -> Stri
     }
 
     result.join("\n")
-}
-
-fn normalize_boolean_operators(source: &str) -> String {
-    // Use the lexer to find && || ! tokens and replace them.
-    let mut lexer = crate::lexer::Lexer::new(source);
-    let tokens = lexer.tokenize();
-    let mut replacements: Vec<(usize, usize, String)> = Vec::new();
-
-    for (idx, token) in tokens.iter().enumerate() {
-        if let Some(word) = crate::token::boolean_operator_word(&tokens, idx) {
-            replacements.push((token.span.offset, token.span.length, word));
-        }
-    }
-
-    if replacements.is_empty() {
-        return source.to_string();
-    }
-
-    // Apply from end to start.
-    let mut result = source.to_string();
-    for (offset, length, new_text) in replacements.into_iter().rev() {
-        let end = (offset + length).min(result.len());
-        result.replace_range(offset..end, &new_text);
-    }
-    result
 }
 
 fn normalize_quotes(source: &str) -> String {
@@ -1443,11 +1453,11 @@ fn changes_region_coverage(original: &str, reordered: &str) -> bool {
     if original == reordered {
         return false;
     }
-    let changes_warning_ignore = original.contains("@warning_ignore_start")
+    let changes_warning_ignore_regions = original.contains("@warning_ignore_start")
         && warning_ignore_region_coverage(original) != warning_ignore_region_coverage(reordered);
-    changes_warning_ignore
-        || (original.contains("#region")
-            && fold_region_coverage(original) != fold_region_coverage(reordered))
+    let changes_fold_regions = original.contains("#region")
+        && fold_region_coverage(original) != fold_region_coverage(reordered);
+    changes_warning_ignore_regions || changes_fold_regions
 }
 
 /// Every code line paired with the `#region` names enclosing it, outermost
@@ -1793,7 +1803,7 @@ fn reorder_class_members(source: &str) -> String {
     let already_ordered = merged.windows(2).all(|w| w[0].1 <= w[1].1);
     if already_ordered {
         // Even when ordered, fix ## doc comments appearing before class_name/extends.
-        return move_class_decl_before_doc_comments(source);
+        return move_class_decl_before_doc_comments(source, &members, &tokens);
     }
 
     let string_line_mask = StringLines::new(&tokens, lines.len());
@@ -1966,18 +1976,27 @@ fn emit_reordered_blocks(blocks: &[Block], lines: &[&str], attached_starts: &[us
         result.extend(deferred_doc_lines);
     }
 
-    // Ensure file ends with exactly one newline.
+    // Drop blank lines at the end of the file. A final newline is kept but
+    // not added: `ensure_trailing_newline` adds it, under its own rule. The
+    // source ended with one when its last `\n`-split piece is empty.
     while result.last().is_some_and(|l| l.is_empty()) {
         result.pop();
     }
-    result.push(String::new());
+    if lines.last().is_some_and(|line| line.is_empty()) {
+        result.push(String::new());
+    }
 
     result.join("\n")
 }
 
 /// If ## doc comments appear before the first class_name/extends, move the
 /// declaration above the doc comments. Returns source unchanged if not needed.
-fn move_class_decl_before_doc_comments(source: &str) -> String {
+/// `members` and `tokens` are the parse and the lex of `source`.
+fn move_class_decl_before_doc_comments(
+    source: &str,
+    members: &[ClassMember],
+    tokens: &[Token],
+) -> String {
     let lines: Vec<&str> = source.split('\n').collect();
 
     // Find the first ## doc comment line.
@@ -1998,28 +2017,39 @@ fn move_class_decl_before_doc_comments(source: &str) -> String {
         }
     }
 
-    // The class header follows the doc block: `class_name` and `extends`
-    // lines, possibly with annotations such as `@tool` or `@abstract` before
-    // them or on lines of their own. It ends at the last `class_name` or
-    // `extends`, so an `@export` above the first variable stays put.
+    // The class header follows the doc block: the lines holding class-level
+    // annotations (`@tool`, `@abstract`, ...), `class_name` or `extends`,
+    // which the parser sorts into ordering categories 0 to 2. It ends at its
+    // last `class_name` or `extends` line. An annotation on a variable, such
+    // as `@export`, belongs to the variable and is not part of it.
+    let line_indexes_where = |is_wanted: fn(&ClassMember) -> bool| {
+        members
+            .iter()
+            .filter(|member| is_wanted(member))
+            .map(|member| member.span().line - 1)
+            .collect::<std::collections::HashSet<usize>>()
+    };
+    let header_lines = line_indexes_where(|member| member.ordering_category() <= 2);
+    let keyword_lines = line_indexes_where(|member| {
+        matches!(
+            member,
+            ClassMember::ClassNameDecl { .. } | ClassMember::ExtendsDecl { .. }
+        )
+    });
     let decl_start = doc_end + 1;
-    let mut decl_end = None;
-    for (i, line) in lines.iter().enumerate().skip(decl_start) {
-        match class_header_keyword_line(line.trim()) {
-            Some(true) => decl_end = Some(i),
-            Some(false) => {}
-            None => break,
-        }
-    }
+    let decl_end = (decl_start..lines.len())
+        .take_while(|line_index| header_lines.contains(line_index))
+        .filter(|line_index| keyword_lines.contains(line_index))
+        .last();
     let Some(decl_end) = decl_end else {
         return source.to_string();
     };
 
-    // The search above reads raw lines, so it can match text inside a
-    // multi-line string (a script template, say). Moving those lines would
-    // rewrite the string, so leave the source alone if any of them is string
-    // data. Lexing only here keeps the common case cheap.
-    let string_line_mask = StringLines::new(&Lexer::new(source).tokenize(), lines.len());
+    // The doc block is found by reading raw lines, so it can match text
+    // inside a multi-line string (a script template, say). Moving those
+    // lines would rewrite the string, so leave the source alone if any of
+    // them is string data.
+    let string_line_mask = StringLines::new(tokens, lines.len());
     if (doc_start..=decl_end).any(|idx| string_line_mask.is_interior(idx)) {
         return source.to_string();
     }
@@ -2044,33 +2074,6 @@ fn move_class_decl_before_doc_comments(source: &str) -> String {
     }
 
     result.join("\n")
-}
-
-/// Classify a trimmed line of a class header. `Some(true)` for a
-/// `class_name` or `extends` line, with or without annotations before the
-/// keyword (`@abstract extends Node`); `Some(false)` for a line holding only
-/// annotations (`@tool`), which may belong to the header; `None` otherwise.
-fn class_header_keyword_line(trimmed: &str) -> Option<bool> {
-    let mut rest = trimmed;
-    while let Some(after_at) = rest.strip_prefix('@') {
-        let name_len = after_at
-            .find(|c: char| !(c.is_alphanumeric() || c == '_'))
-            .unwrap_or(after_at.len());
-        rest = &after_at[name_len..];
-        // Skip arguments such as `@icon("res://icon.svg")`.
-        if rest.starts_with('(') {
-            let close = rest.find(')')?;
-            rest = &rest[close + 1..];
-        }
-        rest = rest.trim_start();
-    }
-    if rest.starts_with("class_name") || rest.starts_with("extends") {
-        Some(true)
-    } else if rest.is_empty() && trimmed.starts_with('@') {
-        Some(false)
-    } else {
-        None
-    }
 }
 
 /// Find inner class blocks in the source and recursively reorder their members.
@@ -2438,33 +2441,13 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_boolean_operators() {
-        let source = "if a && b || !c:\n\tpass\n";
-        let result = normalize_boolean_operators(source);
-        assert!(result.contains("and"));
-        assert!(result.contains("or"));
-        assert!(result.contains("not "));
-        assert!(!result.contains("&&"));
-        assert!(!result.contains("||"));
-    }
-
-    #[test]
-    fn normalize_boolean_operators_keeps_words_apart() {
-        let cases = [
-            ("a&&b", "a and b"),
-            ("a||b", "a or b"),
-            ("!c", "not c"),
-            ("a&&b||!c", "a and b or not c"),
-            ("(a)&&(b)", "(a) and (b)"),
-            ("a &&b", "a and b"),
-            ("! a", "not a"),
-            ("(!a)", "(not a)"),
-            ("a && b", "a and b"),
-            ("\"a&&b||!c\"", "\"a&&b||!c\""),
-        ];
-        for (expr, expected) in cases {
-            let result = normalize_boolean_operators(&format!("var o = {expr}\n"));
-            assert_eq!(result, format!("var o = {expected}\n"));
+    fn pass_rule_names_are_registered() {
+        let registered: Vec<&str> = crate::rules::all_rules()
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
+        for name in pass_rule::ALL {
+            assert!(registered.contains(&name), "unknown rule {name}");
         }
     }
 
