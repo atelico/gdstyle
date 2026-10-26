@@ -394,13 +394,14 @@ impl<'t> Parser<'t> {
                 self.advance(); // skip var
                 let (name, name_span) = self.expect_identifier();
                 let type_hint = self.try_parse_type_hint();
-                self.skip_to_newline();
+                let has_accessor_block = self.skip_variable_rest();
 
                 ClassMember::StaticVariable {
                     name,
                     name_span,
                     type_hint,
                     annotations,
+                    has_accessor_block,
                     span,
                 }
             }
@@ -413,6 +414,7 @@ impl<'t> Parser<'t> {
                     name_span: Span::new(0, 0, 0, 0),
                     type_hint: None,
                     annotations,
+                    has_accessor_block: false,
                     span,
                 }
             }
@@ -425,21 +427,7 @@ impl<'t> Parser<'t> {
 
         let (name, name_span) = self.expect_identifier();
         let type_hint = self.try_parse_type_hint();
-
-        // Track whether the signature ends in `:` (computed property
-        // shorthand) before we consume the rest of the line: in that case we
-        // need to consume the indented get/set block too, so the outer parse
-        // loop doesn't trip on stray Indent/Dedent tokens.
-        let mut ends_with_colon = false;
-        while !self.is_at_end()
-            && self.current_kind() != TokenKind::Newline
-            && self.current_kind() != TokenKind::Eof
-        {
-            ends_with_colon = matches!(self.current_kind(), TokenKind::Colon);
-            self.advance();
-        }
-
-        let has_accessor_block = ends_with_colon && self.skip_indented_block();
+        let has_accessor_block = self.skip_variable_rest();
 
         ClassMember::Variable {
             name,
@@ -449,6 +437,25 @@ impl<'t> Parser<'t> {
             has_accessor_block,
             span,
         }
+    }
+
+    /// Skip the rest of a `var` or `static var` declaration after its type
+    /// hint, including an indented `set` / `get` block. Returns whether there
+    /// was one.
+    ///
+    /// The line has to be checked for a trailing `:` (computed property)
+    /// before it is consumed: the block that follows must be consumed too, or
+    /// its contents would be read as script-level members.
+    fn skip_variable_rest(&mut self) -> bool {
+        let mut ends_with_colon = false;
+        while !self.is_at_end()
+            && self.current_kind() != TokenKind::Newline
+            && self.current_kind() != TokenKind::Eof
+        {
+            ends_with_colon = matches!(self.current_kind(), TokenKind::Colon);
+            self.advance();
+        }
+        ends_with_colon && self.skip_indented_block()
     }
 
     /// Skip an optional indented block following a `:`-terminated line. Walks
@@ -981,6 +988,30 @@ mod tests {
             })
             .collect();
         assert_eq!(kinds, vec!["doc@1", "_a+0", "doc@5", "_b+0"]);
+    }
+
+    #[test]
+    fn static_variable_consumes_its_accessor_block() {
+        // The setter body must not leak out as script-level members.
+        let source = "static var count: int = 0:\n\tset(value):\n\t\tvar clamped = value\n\t\tcount = clamped\nstatic var other = 1\nvar after = 2\n";
+        let members = parse_source(source);
+        let summary: Vec<String> = members
+            .iter()
+            .filter(|member| !matches!(member, ClassMember::BlankLine { .. }))
+            .map(|member| match member {
+                ClassMember::StaticVariable {
+                    name,
+                    has_accessor_block,
+                    ..
+                } => format!("static {name} {has_accessor_block}"),
+                ClassMember::Variable { name, .. } => format!("var {name}"),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            vec!["static count true", "static other false", "var after"]
+        );
     }
 
     #[test]

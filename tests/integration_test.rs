@@ -3007,6 +3007,18 @@ fn fmt_sets_properties_with_accessor_blocks_apart() {
 }
 
 #[test]
+fn fmt_treats_static_var_accessor_blocks_like_var_ones() {
+    // The parser used to read a `static var` setter body as script-level
+    // members, so `fmt` put a blank line inside the setter.
+    let source = "extends Node\n\nstatic var count: int = 0:\n\tset(value):\n\t\tvar clamped = clampi(value, 0, 10)\n\t\tcount = clamped\nstatic var other: int = 1\n";
+    let expected = "extends Node\n\nstatic var count: int = 0:\n\tset(value):\n\t\tvar clamped = clampi(value, 0, 10)\n\t\tcount = clamped\n\nstatic var other: int = 1\n";
+    let config = default_config();
+    let formatted = formatter::format_source(source, &config);
+    assert_eq!(formatted, expected);
+    assert_eq!(formatter::format_source(&formatted, &config), expected);
+}
+
+#[test]
 fn fmt_keeps_variables_without_accessor_blocks_tight() {
     // A multi-line initializer and an inline setter are not accessor blocks.
     let source = "extends Node\n\nvar items = [\n\t1,\n\t2,\n]\nvar value: int = 0: set = _set_value\nvar plain = 1\n";

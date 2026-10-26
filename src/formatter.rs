@@ -571,6 +571,9 @@ fn normalize_member_spacing(source: &str, config: &Config) -> String {
                         ClassMember::Variable {
                             has_accessor_block: true,
                             ..
+                        } | ClassMember::StaticVariable {
+                            has_accessor_block: true,
+                            ..
                         }
                     ),
                     start,
