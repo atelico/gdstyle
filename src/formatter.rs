@@ -54,6 +54,11 @@ fn format_pass(source: &str, config: &Config) -> String {
 /// [`format_pass`] with the [`SpanningStrings`] answer for `source` given.
 fn format_pass_with(source: &str, config: &Config, spanning_strings: SpanningStrings) -> String {
     let mut result = source.to_string();
+    // Each pass below applies one lint rule (named next to it), so turning
+    // that rule off in the config turns the pass off too. The remaining
+    // rules are applied through `lint_then_fix`, which honors the config
+    // already.
+    let is_enabled = |rule_name: &str| config.is_rule_enabled(rule_name);
 
     // 1. Reorder class members FIRST, before any line-changing transformations,
     //    so that parser spans are valid against the source lines.
@@ -63,10 +68,7 @@ fn format_pass_with(source: &str, config: &Config, spanning_strings: SpanningStr
     //    (because reordering could change the runtime init order), and the
     //    output is re-parsed to verify it has the same set of class members
     //    as the input: if anything mutated, we keep the original.
-    //
-    //    Reordering is how `fmt` applies `order/class-member-order`, so
-    //    turning the rule off in the config turns the reorder off too.
-    if config.is_rule_enabled("order/class-member-order") {
+    if is_enabled("order/class-member-order") {
         result = safe_reorder_class_members(&result);
         result = safe_reorder_inner_classes(&result, spanning_strings);
     }
@@ -74,42 +76,64 @@ fn format_pass_with(source: &str, config: &Config, spanning_strings: SpanningStr
     // 2. Normalize indentation, then strip trailing whitespace. Neither pass
     //    adds or removes lines, so one string-line mask serves both.
     let string_line_mask = string_lines(&result, spanning_strings);
-    result = normalize_indentation(&result, config, &string_line_mask);
-    result = strip_trailing_whitespace(&result, &string_line_mask);
+    if is_enabled("format/no-tabs-as-spaces") {
+        result = normalize_indentation(&result, config, &string_line_mask);
+    }
+    if is_enabled("format/trailing-whitespace") {
+        result = strip_trailing_whitespace(&result, &string_line_mask);
+    }
 
     // 3a. Normalize blank lines BETWEEN top-level class members to their
     //     canonical counts (0 between header items, 1 between member
     //     categories, 2 around functions / inner classes). This is the
     //     member-aware pass; it understands what each top-level statement is.
+    //     No lint rule covers it, so it always runs.
     result = normalize_member_spacing(&result, config);
 
     // 3b. Backstop for blank lines INSIDE function bodies and anywhere the
     //     member-aware pass didn't touch: collapse 3+ to 2.
-    result = collapse_blank_lines(&result, spanning_strings);
+    if is_enabled("format/blank-lines") {
+        result = collapse_blank_lines(&result, spanning_strings);
+    }
 
     // 4. Replace && || ! with and or not.
-    result = normalize_boolean_operators(&result);
+    if is_enabled("format/boolean-operators") {
+        result = normalize_boolean_operators(&result);
+    }
 
     // 5. Normalize quotes (single -> double unless contains double quotes).
-    result = normalize_quotes(&result);
+    if is_enabled("format/double-quotes") {
+        result = normalize_quotes(&result);
+    }
 
     // 6. Normalize comment spacing (add space after #, except #region/#endregion).
-    result = normalize_comment_spacing(&result);
+    if is_enabled("format/comment-spacing") {
+        result = normalize_comment_spacing(&result);
+    }
 
-    // 7. Normalize float literals (add leading/trailing zeros).
-    result = normalize_float_literals(&result);
+    // 7. Normalize float literals (add leading/trailing zeros). Both rules
+    //    ask for the zeros, so either one keeps the pass on.
+    if is_enabled("format/float-literal-zeros") || is_enabled("format/number-literals") {
+        result = normalize_float_literals(&result);
+    }
 
     // 8. Normalize hex to lowercase.
-    result = normalize_hex_literals(&result);
+    if is_enabled("format/number-literals") {
+        result = normalize_hex_literals(&result);
+    }
 
     // 9. Ensure file ends with exactly one \n.
-    result = ensure_trailing_newline(&result);
+    if is_enabled("format/trailing-newline") {
+        result = ensure_trailing_newline(&result);
+    }
 
     // 10. Use lint+fix for remaining token-based transformations.
     result = lint_then_fix(&result, config);
 
     // 11. Break long lines by wrapping at commas inside delimiters.
-    result = break_long_lines(&result, config, spanning_strings);
+    if is_enabled("format/max-line-length") {
+        result = break_long_lines(&result, config, spanning_strings);
+    }
 
     result
 }
@@ -645,11 +669,14 @@ fn normalize_member_spacing(source: &str, config: &Config) -> String {
         prev_unit = Some(unit);
     }
 
-    // Ensure the file ends with exactly one trailing newline.
+    // Drop blank lines at the end of the file. A final newline is kept but
+    // not added: `ensure_trailing_newline` adds it, under its own rule.
     while result.last().is_some_and(|l| l.is_empty()) {
         result.pop();
     }
-    result.push(String::new());
+    if source.ends_with('\n') {
+        result.push(String::new());
+    }
 
     result.join("\n")
 }

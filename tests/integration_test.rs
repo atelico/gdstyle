@@ -3013,6 +3013,53 @@ fn fmt_keeps_variables_without_accessor_blocks_tight() {
     assert_eq!(formatter::format_source(source, &default_config()), source);
 }
 
+#[test]
+fn fmt_skips_each_formatting_pass_whose_rule_is_off() {
+    // Each source breaks one rule that `fmt` applies with a dedicated pass.
+    // The default config rewrites it; with the rule off it must stay as is.
+    // Missing float zeros are reported by two rules, so both go off.
+    let cases: [(&[&str], &str); 10] = [
+        (&["format/boolean-operators"], "var a = true && false\n"),
+        (&["format/double-quotes"], "var s = 'x'\n"),
+        (&["format/comment-spacing"], "#1 note\nvar a = 1\n"),
+        (
+            &["format/float-literal-zeros", "format/number-literals"],
+            "var f = 5.\n",
+        ),
+        (&["format/number-literals"], "var h = 0xFF\n"),
+        (&["format/trailing-whitespace"], "var a = 1   \n"),
+        (&["format/no-tabs-as-spaces"], "func f() -> void:\n    pass\n"),
+        (
+            &["format/blank-lines"],
+            "func f() -> void:\n\tvar a = 1\n\n\n\n\tpass\n",
+        ),
+        (&["format/trailing-newline"], "var a = 1"),
+        (
+            &["format/max-line-length"],
+            "var a = some_function_name(argument_number_one, argument_number_two, argument_number_three, argument_number_four)\n",
+        ),
+    ];
+    for (rule_names, source) in cases {
+        assert_ne!(
+            formatter::format_source(source, &default_config()),
+            source,
+            "the default config must rewrite the {rule_names:?} case"
+        );
+        let mut config = default_config();
+        for rule_name in rule_names {
+            config.rules.insert(
+                rule_name.to_string(),
+                gdstyle::config::RuleSeverityConfig::Off,
+            );
+        }
+        assert_eq!(
+            formatter::format_source(source, &config),
+            source,
+            "{rule_names:?} off"
+        );
+    }
+}
+
 // Enum fix: enum with value assignments should preserve them
 #[test]
 fn fmt_enum_with_value_assignments_already_multiline() {

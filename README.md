@@ -335,6 +335,10 @@ include = ["addons/my_plugin"]
 "quality/no-debug-print" = "warn"          # Enable an off-by-default rule
 ```
 
+A rule set to `"off"` is off for `fmt` and `check --fix` too: the formatter
+no longer applies it, so `"format/double-quotes" = "off"` keeps single-quoted
+strings as written. Member spacing has no rule and always applies.
+
 ### Default configuration
 
 When no config file is found, gdstyle uses these defaults:
