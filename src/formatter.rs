@@ -1931,26 +1931,22 @@ fn move_class_decl_before_doc_comments(source: &str) -> String {
         }
     }
 
-    // Check if the line after the doc block is class_name or extends.
+    // The class header follows the doc block: `class_name` and `extends`
+    // lines, possibly with annotations such as `@tool` or `@abstract` before
+    // them or on lines of their own. It ends at the last `class_name` or
+    // `extends`, so an `@export` above the first variable stays put.
     let decl_start = doc_end + 1;
-    if decl_start >= lines.len() {
-        return source.to_string();
-    }
-    let decl_trimmed = lines[decl_start].trim();
-    if !decl_trimmed.starts_with("class_name") && !decl_trimmed.starts_with("extends") {
-        return source.to_string();
-    }
-
-    // Find how many consecutive declaration lines (class_name, extends).
-    let mut decl_end = decl_start;
+    let mut decl_end = None;
     for (i, line) in lines.iter().enumerate().skip(decl_start) {
-        let t = line.trim();
-        if t.starts_with("class_name") || t.starts_with("extends") {
-            decl_end = i;
-        } else {
-            break;
+        match class_header_keyword_line(line.trim()) {
+            Some(true) => decl_end = Some(i),
+            Some(false) => {}
+            None => break,
         }
     }
+    let Some(decl_end) = decl_end else {
+        return source.to_string();
+    };
 
     // The search above reads raw lines, so it can match text inside a
     // multi-line string (a script template, say). Moving those lines would
@@ -1981,6 +1977,33 @@ fn move_class_decl_before_doc_comments(source: &str) -> String {
     }
 
     result.join("\n")
+}
+
+/// Classify a trimmed line of a class header. `Some(true)` for a
+/// `class_name` or `extends` line, with or without annotations before the
+/// keyword (`@abstract extends Node`); `Some(false)` for a line holding only
+/// annotations (`@tool`), which may belong to the header; `None` otherwise.
+fn class_header_keyword_line(trimmed: &str) -> Option<bool> {
+    let mut rest = trimmed;
+    while let Some(after_at) = rest.strip_prefix('@') {
+        let name_len = after_at
+            .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .unwrap_or(after_at.len());
+        rest = &after_at[name_len..];
+        // Skip arguments such as `@icon("res://icon.svg")`.
+        if rest.starts_with('(') {
+            let close = rest.find(')')?;
+            rest = &rest[close + 1..];
+        }
+        rest = rest.trim_start();
+    }
+    if rest.starts_with("class_name") || rest.starts_with("extends") {
+        Some(true)
+    } else if rest.is_empty() && trimmed.starts_with('@') {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 /// Find inner class blocks in the source and recursively reorder their members.

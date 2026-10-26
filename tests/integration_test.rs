@@ -2315,6 +2315,37 @@ fn fmt_doc_comments_before_extends_only() {
     );
 }
 
+#[test]
+fn fmt_moves_class_doc_below_annotated_headers() {
+    // Issue #48: annotations before or above `class_name`/`extends` hid the
+    // header, so the class doc stayed above it.
+    let cases = [
+        (
+            "## some class doc\n@abstract extends RefCounted\n",
+            "@abstract extends RefCounted\n## some class doc\n",
+        ),
+        (
+            "## doc\n@tool\nextends Node\n",
+            "@tool\nextends Node\n## doc\n",
+        ),
+        (
+            "## doc\n@icon(\"res://icon.svg\") @tool class_name Foo\nextends Node\n",
+            "@icon(\"res://icon.svg\") @tool class_name Foo\nextends Node\n## doc\n",
+        ),
+        // An annotated member is not part of the header.
+        (
+            "## doc for x\n@export\nvar x = 1\n",
+            "## doc for x\n@export\nvar x = 1\n",
+        ),
+    ];
+    let config = default_config();
+    for (source, expected) in cases {
+        let formatted = formatter::format_source(source, &config);
+        assert_eq!(formatted, expected, "source:\n{source}");
+        assert_eq!(formatter::format_source(&formatted, &config), formatted);
+    }
+}
+
 // Fix C: inner class member reordering
 
 #[test]
