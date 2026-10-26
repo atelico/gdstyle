@@ -505,12 +505,15 @@ impl<'t> Parser<'t> {
         {
             self.advance();
         }
-        if !self.is_at_end() && self.current_kind() == TokenKind::Colon {
+        // Count body lines (between Indent and Dedent). A bodyless
+        // `@abstract func` has no colon. Looking for a body there would skip
+        // the comments that follow it, which belong to the next member.
+        let body_line_count = if !self.is_at_end() && self.current_kind() == TokenKind::Colon {
             self.advance(); // skip :
-        }
-
-        // Count body lines (between Indent and Dedent).
-        let body_line_count = self.count_body_lines();
+            self.count_body_lines()
+        } else {
+            0
+        };
 
         ClassMember::Function {
             name,
@@ -956,6 +959,28 @@ mod tests {
             _ => None,
         });
         assert_eq!(annotations.map(Vec::len), Some(0), "{inner:?}");
+    }
+
+    #[test]
+    fn comment_after_bodyless_function_belongs_to_the_next_member() {
+        // A bodyless `@abstract func` has no colon. Looking for its body used
+        // to skip the next function's doc comment, dropping it from the AST.
+        let source =
+            "## doc a\n@abstract func _a() -> void\n\n\n## doc b\n@abstract func _b() -> void\n";
+        let members = parse_source(source);
+        let kinds: Vec<String> = members
+            .iter()
+            .filter_map(|member| match member {
+                ClassMember::DocComment { span, .. } => Some(format!("doc@{}", span.line)),
+                ClassMember::Function {
+                    name,
+                    body_line_count,
+                    ..
+                } => Some(format!("{name}+{body_line_count}")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kinds, vec!["doc@1", "_a+0", "doc@5", "_b+0"]);
     }
 
     #[test]

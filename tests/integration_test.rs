@@ -1614,6 +1614,13 @@ fn fmt_does_not_duplicate_class_level_abstract_annotation() {
 }
 
 #[test]
+fn fmt_keeps_doc_comments_on_consecutive_bodyless_abstract_functions() {
+    // Issue #47: the second doc comment used to be split from its function.
+    let source = "@abstract extends RefCounted\n\n\n## doc a\n@abstract func _a() -> void\n\n\n## doc b\n@abstract func _b() -> void\n";
+    assert_eq!(formatter::format_source(source, &default_config()), source);
+}
+
+#[test]
 fn fmt_class_annotation_before_signal_not_duplicated() {
     // Same family of bug as issue #4: a stray top-level annotation
     // (`@abstract` here) immediately before a `signal` declaration
