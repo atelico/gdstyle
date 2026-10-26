@@ -177,6 +177,23 @@ impl Token {
 /// The word that replaces the `&&`, `||` or `!` token at `idx`, with a space
 /// added where the token touches its neighbour, so the word cannot join an
 /// identifier: `a&&b||!c` becomes `a and b or not c`, not `aandbornot c`.
+/// Returns `None` when the token at `idx` is not one of those operators.
+///
+/// # Example
+///
+/// ```
+/// use gdstyle::lexer::Lexer;
+/// use gdstyle::token::{boolean_operator_word, TokenKind};
+///
+/// let tokens = Lexer::new("x = a&&b or (!c)").tokenize();
+/// let index_of = |kind: TokenKind| tokens.iter().position(|t| t.kind == kind).unwrap();
+/// let and_word = boolean_operator_word(&tokens, index_of(TokenKind::AmpersandAmpersand));
+/// assert_eq!(and_word.as_deref(), Some(" and "));
+/// // `not` after `(` needs no leading space.
+/// assert_eq!(boolean_operator_word(&tokens, index_of(TokenKind::Bang)).as_deref(), Some("not "));
+/// // Any other token yields `None`.
+/// assert_eq!(boolean_operator_word(&tokens, 0), None);
+/// ```
 pub fn boolean_operator_word(tokens: &[Token], idx: usize) -> Option<String> {
     let token = tokens.get(idx)?;
     let word = match token.kind {
