@@ -158,6 +158,7 @@ mod tests {
                         name: "export".to_string(),
                         span: span(5),
                     }],
+                    has_accessor_block: false,
                     span: span(5),
                 },
                 ClassMember::Variable {
@@ -165,6 +166,7 @@ mod tests {
                     name_span: span(6),
                     type_hint: None,
                     annotations: vec![],
+                    has_accessor_block: false,
                     span: span(6),
                 },
                 ClassMember::Function {
@@ -276,6 +278,7 @@ mod tests {
                     name_span: span(5),
                     type_hint: None,
                     annotations: vec![],
+                    has_accessor_block: false,
                     span: span(5),
                 },
             ],
@@ -392,6 +395,7 @@ mod tests {
                     name_span: span(1),
                     type_hint: None,
                     annotations: vec![],
+                    has_accessor_block: false,
                     span: span(1),
                 },
                 ClassMember::DocComment {

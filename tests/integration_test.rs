@@ -2994,6 +2994,25 @@ fn fmt_keeps_member_order_when_the_order_rule_is_off() {
     assert_eq!(formatter::format_source(source, &config), source);
 }
 
+#[test]
+fn fmt_sets_properties_with_accessor_blocks_apart() {
+    // Issue #49: consecutive properties with `set` / `get` blocks were packed
+    // together with no blank line between them.
+    let source = "class_name XXX\n\nvar command_id: String:\n\tset(value):\n\t\tcommand_id = value\n\tget:\n\t\treturn command_id\nvar name: StringName:\n\tset(value):\n\t\tname = value\n\tget:\n\t\treturn name\nvar plain = 1\n";
+    let expected = "class_name XXX\n\nvar command_id: String:\n\tset(value):\n\t\tcommand_id = value\n\tget:\n\t\treturn command_id\n\nvar name: StringName:\n\tset(value):\n\t\tname = value\n\tget:\n\t\treturn name\n\nvar plain = 1\n";
+    let config = default_config();
+    let formatted = formatter::format_source(source, &config);
+    assert_eq!(formatted, expected);
+    assert_eq!(formatter::format_source(&formatted, &config), expected);
+}
+
+#[test]
+fn fmt_keeps_variables_without_accessor_blocks_tight() {
+    // A multi-line initializer and an inline setter are not accessor blocks.
+    let source = "extends Node\n\nvar items = [\n\t1,\n\t2,\n]\nvar value: int = 0: set = _set_value\nvar plain = 1\n";
+    assert_eq!(formatter::format_source(source, &default_config()), source);
+}
+
 // Enum fix: enum with value assignments should preserve them
 #[test]
 fn fmt_enum_with_value_assignments_already_multiline() {

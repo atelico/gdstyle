@@ -439,29 +439,28 @@ impl<'t> Parser<'t> {
             self.advance();
         }
 
-        if ends_with_colon {
-            self.skip_indented_block();
-        }
+        let has_accessor_block = ends_with_colon && self.skip_indented_block();
 
         ClassMember::Variable {
             name,
             name_span,
             type_hint,
             annotations,
+            has_accessor_block,
             span,
         }
     }
 
     /// Skip an optional indented block following a `:`-terminated line. Walks
     /// past the leading Newline+Indent pair, then consumes tokens until the
-    /// matching Dedent. Has no effect if no Indent follows.
-    fn skip_indented_block(&mut self) {
+    /// matching Dedent. Returns whether a block was there to skip.
+    fn skip_indented_block(&mut self) -> bool {
         // Walk past any blank Newlines.
         while !self.is_at_end() && self.current_kind() == TokenKind::Newline {
             self.advance();
         }
         if self.is_at_end() || self.current_kind() != TokenKind::Indent {
-            return;
+            return false;
         }
         self.advance(); // skip Indent
         let mut depth: usize = 1;
@@ -478,6 +477,7 @@ impl<'t> Parser<'t> {
                 _ => self.advance(),
             }
         }
+        true
     }
 
     fn parse_function(&mut self, is_static: bool, annotations: Vec<AnnotationInfo>) -> ClassMember {
@@ -981,6 +981,29 @@ mod tests {
             })
             .collect();
         assert_eq!(kinds, vec!["doc@1", "_a+0", "doc@5", "_b+0"]);
+    }
+
+    #[test]
+    fn variable_records_whether_an_accessor_block_follows() {
+        let source = "var a: int:\n\tget:\n\t\treturn 1\nvar b: int = 0: set = _set_b\nvar c = [\n\t1,\n]\nvar d\n";
+        let flags: Vec<(String, bool)> = parse_source(source)
+            .into_iter()
+            .filter_map(|member| match member {
+                ClassMember::Variable {
+                    name,
+                    has_accessor_block,
+                    ..
+                } => Some((name, has_accessor_block)),
+                _ => None,
+            })
+            .collect();
+        let expected = [("a", true), ("b", false), ("c", false), ("d", false)];
+        assert_eq!(
+            flags,
+            expected
+                .map(|(name, flag)| (name.to_string(), flag))
+                .to_vec()
+        );
     }
 
     #[test]

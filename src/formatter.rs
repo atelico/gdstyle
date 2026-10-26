@@ -368,10 +368,12 @@ fn tighten_warning_ignore_region_markers(source: &str, tokens: &[Token]) -> Stri
 /// but including annotations like `@export_range`): used to tighten the doc
 /// block against the declaration when normalising. `is_private` is set for
 /// `_`-prefixed constants and variables and drives the optional
-/// public/private separator line.
+/// public/private separator line. `has_accessor_block` marks a variable with
+/// an indented `set` / `get` block, which gets a blank line on each side.
 struct MemberUnit {
     category: usize,
     is_private: bool,
+    has_accessor_block: bool,
     start: usize,      // 1-indexed
     decl_start: usize, // 1-indexed; >= start
 }
@@ -430,6 +432,7 @@ fn normalize_member_spacing(source: &str, config: &Config) -> String {
                 units.push(MemberUnit {
                     category: 3,
                     is_private: false,
+                    has_accessor_block: false,
                     start: s,
                     decl_start: s,
                 });
@@ -539,6 +542,13 @@ fn normalize_member_spacing(source: &str, config: &Config) -> String {
                 units.push(MemberUnit {
                     category: member.ordering_category(),
                     is_private: is_private_data_member(member),
+                    has_accessor_block: matches!(
+                        member,
+                        ClassMember::Variable {
+                            has_accessor_block: true,
+                            ..
+                        }
+                    ),
                     start,
                     decl_start,
                 });
@@ -577,9 +587,12 @@ fn normalize_member_spacing(source: &str, config: &Config) -> String {
             let crosses_visibility_boundary = config.blank_line_between_public_and_private
                 && prev.category == unit.category
                 && prev.is_private != unit.is_private;
+            // A property's `set` / `get` block reads like a small function
+            // body, so it is set apart from the declarations around it.
+            let touches_accessor_block = prev.has_accessor_block || unit.has_accessor_block;
             // `max` so the separator never shrinks a gap that is already
             // wider (it only ever opens up a tight same-category pair).
-            if crosses_visibility_boundary {
+            if crosses_visibility_boundary || touches_accessor_block {
                 canonical.max(1)
             } else {
                 canonical

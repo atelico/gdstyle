@@ -73,6 +73,9 @@ pub enum ClassMember {
         name_span: Span,
         type_hint: Option<String>,
         annotations: Vec<AnnotationInfo>,
+        /// Whether an indented `set` / `get` block follows the declaration,
+        /// as in `var health: int:` followed by `set(value):` lines.
+        has_accessor_block: bool,
         span: Span,
     },
     Function {

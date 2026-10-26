@@ -2042,6 +2042,7 @@ mod tests {
                     name_span: span(1),
                     type_hint: None,
                     annotations: vec![],
+                    has_accessor_block: false,
                     span: span(1),
                 },
                 ClassMember::Variable {
@@ -2049,6 +2050,7 @@ mod tests {
                     name_span: span(2),
                     type_hint: Some("int".to_string()),
                     annotations: vec![],
+                    has_accessor_block: false,
                     span: span(2),
                 },
             ],
@@ -2273,6 +2275,7 @@ mod tests {
                 name_span: span(i + 1),
                 type_hint: None,
                 annotations: vec![],
+                has_accessor_block: false,
                 span: span(i + 1),
             })
             .collect();

@@ -251,6 +251,8 @@ gdstyle fmt --diff
 
 The formatter normalizes indentation, trailing whitespace, blank lines (including the spacing between class members), boolean operators (`&&`/`||`/`!` to `and`/`or`/`not`), string quotes, comment spacing, colon and comma spacing, float and hex literals, trailing newlines, and single-line enums (expanded to multi-line). It reorders class members to match the canonical style guide order, and wraps long lines at commas inside parentheses, brackets, and braces. Running it twice produces the same output.
 
+Consecutive variables sit together with no blank line between them, except a property with an indented `set` / `get` block, which gets one blank line on each side so it reads like a small function.
+
 The contents of multi-line strings are data, so the formatter leaves them alone: indentation, trailing whitespace, blank lines and line length inside a string that spans lines (a `"""..."""` literal, or a quoted string with a raw newline or a backslash continuation) are kept. The layout rules don't report those lines either. The one exception is `format/max-line-length` on a string's closing line: when the code after the closing quote is what makes the line too long, it is still reported.
 
 Line endings are kept too, by `fmt` and `check --fix` alike. A file keeps the style most of its line breaks outside strings use, so a CRLF file stays CRLF. A string keeps its own line endings even when they differ from the rest of the file, because Godot keeps a `\r` inside a string as part of its value.
