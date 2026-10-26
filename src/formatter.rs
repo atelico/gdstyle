@@ -63,8 +63,13 @@ fn format_pass_with(source: &str, config: &Config, spanning_strings: SpanningStr
     //    (because reordering could change the runtime init order), and the
     //    output is re-parsed to verify it has the same set of class members
     //    as the input: if anything mutated, we keep the original.
-    result = safe_reorder_class_members(&result);
-    result = safe_reorder_inner_classes(&result, spanning_strings);
+    //
+    //    Reordering is how `fmt` applies `order/class-member-order`, so
+    //    turning the rule off in the config turns the reorder off too.
+    if config.is_rule_enabled("order/class-member-order") {
+        result = safe_reorder_class_members(&result);
+        result = safe_reorder_inner_classes(&result, spanning_strings);
+    }
 
     // 2. Normalize indentation, then strip trailing whitespace. Neither pass
     //    adds or removes lines, so one string-line mask serves both.

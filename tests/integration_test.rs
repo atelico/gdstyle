@@ -2935,6 +2935,27 @@ fn fmt_reorder_only_inner_classes() {
     assert_eq!(formatted, second, "must be idempotent");
 }
 
+#[test]
+fn fmt_keeps_member_order_when_the_order_rule_is_off() {
+    // Issue #53: an inner class before a function, a variable before a
+    // signal, and inner-class members out of order. Each is reordered by
+    // default and must stay put once the rule is off.
+    let source = "extends Node\n\nvar value = 1\n\nsignal changed\n\n\nclass Inner:\n\tfunc run() -> void:\n\t\tpass\n\n\tvar inner_value: int\n\n\nfunc a() -> void:\n\tpass\n";
+
+    let reordered = formatter::format_source(source, &default_config());
+    assert_ne!(
+        reordered, source,
+        "the default config must reorder this source"
+    );
+
+    let mut config = default_config();
+    config.rules.insert(
+        "order/class-member-order".to_string(),
+        gdstyle::config::RuleSeverityConfig::Off,
+    );
+    assert_eq!(formatter::format_source(source, &config), source);
+}
+
 // Enum fix: enum with value assignments should preserve them
 #[test]
 fn fmt_enum_with_value_assignments_already_multiline() {

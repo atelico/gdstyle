@@ -509,7 +509,9 @@ const SAVE_GAME_FORMAT_DISPLAY_NAMES: PackedStringArray = [
 
 The directive may sit directly above the declaration (or above its
 annotations). A `# gdstyle:ignore-file=order/class-member-order` pins
-every member, disabling reordering for the whole file.
+every member, disabling reordering for the whole file. Setting
+`"order/class-member-order" = "off"` under `[rules]` in `gdstyle.toml`
+does the same for every file in the project.
 
 #### When the formatter leaves the order alone
 
