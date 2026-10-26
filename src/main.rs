@@ -11,6 +11,7 @@ use gdstyle::parser::Parser as GdParser;
 use gdstyle::reporter::{self, OutputFormat};
 use gdstyle::rules;
 use rayon::prelude::*;
+use similar::{ChangeTag, TextDiff};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -723,28 +724,28 @@ fn print_diff(path: &Path, original: &str, formatted: &str) {
     println!("--- a/{}", path_str);
     println!("+++ b/{}", path_str);
 
-    // Split on `\n` only, so a line keeps its `\r` and a change that only
-    // touches line endings still shows up as a changed line.
-    let orig_lines: Vec<&str> = original.split_terminator('\n').collect();
-    let fmt_lines: Vec<&str> = formatted.split_terminator('\n').collect();
-
-    // Simple line-by-line diff.
-    let max_lines = orig_lines.len().max(fmt_lines.len());
-    for i in 0..max_lines {
-        let orig = orig_lines.get(i).copied().unwrap_or("");
-        let fmt = fmt_lines.get(i).copied().unwrap_or("");
-        if orig != fmt {
-            if !orig.is_empty() || i < orig_lines.len() {
-                println!("{}", format!("-{}", show_carriage_returns(orig)).red());
+    // A unified diff: changed lines grouped into hunks with three lines of
+    // context and `@@` headers, as `diff -u` prints. Each line keeps its
+    // `\r`, so a change that only touches line endings still shows up.
+    let diff = TextDiff::from_lines(original, formatted);
+    for hunk in diff.unified_diff().context_radius(3).iter_hunks() {
+        println!("{}", hunk.header());
+        for change in hunk.iter_changes() {
+            let line = change.value().strip_suffix('\n').unwrap_or(change.value());
+            match change.tag() {
+                ChangeTag::Equal => println!(" {}", line.trim_end_matches('\r')),
+                ChangeTag::Delete => {
+                    println!("{}", format!("-{}", show_carriage_returns(line)).red())
+                }
+                ChangeTag::Insert => {
+                    println!("{}", format!("+{}", show_carriage_returns(line)).green())
+                }
             }
-            if !fmt.is_empty() || i < fmt_lines.len() {
-                println!("{}", format!("+{}", show_carriage_returns(fmt)).green());
+            if change.missing_newline() {
+                println!("\\ No newline at end of file");
             }
-        } else {
-            println!(" {}", orig.trim_end_matches('\r'));
         }
     }
-    println!();
 }
 
 /// `line` with each `\r` shown as `^M`, so lines that differ only in line

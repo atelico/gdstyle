@@ -251,6 +251,30 @@ fn fmt_check_counts_only_the_files_that_would_change() {
 }
 
 #[test]
+fn fmt_diff_prints_unified_hunks() {
+    // Issue #54: the diff compared line i with line i, so a moved member
+    // printed as unrelated -/+ pairs with no `@@` headers. Moving `var a`
+    // above the functions must print two hunks with three lines of context.
+    let source = "extends Node\n\n\nfunc f() -> void:\n\tpass\n\n\nfunc g() -> void:\n\tpass\n\n\nfunc h() -> void:\n\tpass\n\nvar a = 1\n";
+    let p = project("", source);
+    let output = Command::new(env!("CARGO_BIN_EXE_gdstyle"))
+        .arg("fmt")
+        .arg("--diff")
+        .arg(&p.script)
+        .arg("--config")
+        .arg(&p.config)
+        .arg("--no-color")
+        .output()
+        .expect("run gdstyle");
+
+    let stdout = stdout_of(&output);
+    let hunks =
+        "@@ -1,5 +1,7 @@\n extends Node\n \n+var a = 1\n+\n \n func f() -> void:\n \tpass\n\
+                 @@ -11,5 +13,3 @@\n \n func h() -> void:\n \tpass\n-\n-var a = 1\n";
+    assert!(stdout.contains(hunks), "got stdout:\n{stdout}");
+}
+
+#[test]
 fn fmt_diff_shows_line_ending_changes() {
     // The file is CRLF except for one LF line, which `fmt` converts. The diff
     // must show that line as changed rather than print only context lines.

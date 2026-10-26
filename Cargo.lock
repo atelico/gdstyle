@@ -227,6 +227,7 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
+ "similar",
  "tempfile",
  "toml",
 ]
@@ -623,6 +624,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf41e0cfaf7226dca15e8197172c295a782857fcb97fad1808a166870dee75a3"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "similar"
+version = "3.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2f8bec09ae8fae0f4f265a4559a9334be3929d8504e9b536df0a41302bd1733"
+dependencies = [
+ "bstr",
 ]
 
 [[package]]
