@@ -523,6 +523,8 @@ what the code does:
 - The move would change which code sits between `@warning_ignore_start`
   and `@warning_ignore_restore`. The region would otherwise end up
   silencing warnings on different members.
+- The move would change which code sits inside a `#region` /
+  `#endregion` fold. Members would otherwise land in another region.
 
 `check` still reports `order/class-member-order` for such a file, so you
 can fix the order by hand.

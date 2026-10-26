@@ -3307,6 +3307,40 @@ fn fmt_does_not_reorder_inner_class_members_across_a_warning_ignore_region() {
 }
 
 #[test]
+fn fmt_does_not_reorder_members_across_fold_regions() {
+    // Issue #52: moving `Inner` below `test_a` carried the `#endregion` with
+    // it, so `test_a` ended up inside `#region helpers`.
+    let source = "extends Node\n\n\n#region helpers\nfunc helper() -> int:\n\treturn 1\n\n\nclass Inner:\n\tvar value: int\n\n\n#endregion\n\n\n#region tests\nfunc test_a() -> void:\n\tpass\n#endregion\n";
+    assert_eq!(formatter::format_source(source, &default_config()), source);
+
+    // Nested regions, and a region inside an inner class. Spacing may change;
+    // the lines must not move.
+    let non_blank_lines = |text: &str| -> Vec<String> {
+        text.lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    for source in [
+        "extends Node\n\n#region outer\n#region state\nvar a = 1\n#endregion\nsignal s\n#endregion\n",
+        "extends Node\n\n\nclass Inner:\n\tvar x = 1\n\t#region signals\n\tsignal a\n\t#endregion\n\tvar y = 2\n",
+    ] {
+        let formatted = formatter::format_source(source, &default_config());
+        assert_eq!(non_blank_lines(&formatted), non_blank_lines(source), "got:\n{formatted}");
+    }
+}
+
+#[test]
+fn fmt_reorders_around_a_fold_region_it_does_not_cross() {
+    let source = "extends Node\n\nvar a = 1\n\nsignal s\n\n\n#region api\nfunc f() -> void:\n\tpass\n#endregion\n";
+    let formatted = formatter::format_source(source, &default_config());
+    assert_eq!(
+        formatted,
+        "extends Node\n\nsignal s\n\nvar a = 1\n\n\n#region api\nfunc f() -> void:\n\tpass\n#endregion\n"
+    );
+}
+
+#[test]
 fn fmt_reorders_normally_when_only_single_line_warning_ignore_is_present() {
     // `@warning_ignore` (no `_start`) covers one declaration and travels
     // with it, so it must not block the reorder.
