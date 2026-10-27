@@ -400,7 +400,7 @@ is suppressed within that scope. Rule IDs are the full
 `naming/variable-name-snake-case`).
 
 `fmt` and `check --fix` honor the same directives: a suppressed line or
-file is not rewritten for that rule. In `fmt`, the exceptions are the layout rules
+file is not rewritten for that rule. The exceptions are the layout rules
 `format/no-tabs-as-spaces`, `format/trailing-whitespace`,
 `format/blank-lines`, `format/trailing-newline` and
 `format/max-line-length`, and the space `fmt` adds after `##` in doc
