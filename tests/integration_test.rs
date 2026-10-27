@@ -3090,8 +3090,8 @@ fn fmt_honors_suppressions_of_token_rules() {
             "var h = 0xFF  # gdstyle:ignore=format/number-literals\nvar i = 0xaa\n",
         ),
         (
-            "#1 note  # gdstyle:ignore=format/comment-spacing\n#2 note\n",
-            "#1 note  # gdstyle:ignore=format/comment-spacing\n# 2 note\n",
+            "# gdstyle:ignore=format/comment-spacing\n#1 note\n#2 note\n",
+            "# gdstyle:ignore=format/comment-spacing\n#1 note\n# 2 note\n",
         ),
         // A standalone directive covers the next line.
         (

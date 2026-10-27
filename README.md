@@ -397,7 +397,9 @@ Add `=rule1,rule2` to any of the above to narrow the suppression to a
 comma-separated list of rule IDs. Without the `=...` suffix, every rule
 is suppressed within that scope. Rule IDs are the full
 `category/rule-name` shown in the diagnostic output (e.g.
-`naming/variable-name-snake-case`).
+`naming/variable-name-snake-case`). A directive is a comment that starts
+with `# gdstyle:ignore`; the same text inside a string or later in another
+comment doesn't count.
 
 `fmt` and `check --fix` honor the same directives: a suppressed line or
 file is not rewritten for that rule. The exceptions are the layout rules

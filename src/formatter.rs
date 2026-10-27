@@ -1688,7 +1688,7 @@ fn reorder_class_members(source: &str) -> String {
     // rest normalise around it. We look for the directive anywhere in the
     // member's header (its attached comments/annotations through its
     // declaration line), so it can sit above the annotations too.
-    let suppressions = crate::linter::Suppressions::parse(source);
+    let suppressions = crate::linter::Suppressions::parse(source, &tokens);
     let pinned: Vec<bool> = merged
         .iter()
         .enumerate()

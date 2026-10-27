@@ -145,7 +145,7 @@ pub fn run_all_rules_with_source(
 
     // Ordering rules.
     if config.is_rule_enabled("order/class-member-order") {
-        ordering::check_class_member_order(file, &mut diagnostics);
+        ordering::check_class_member_order(file, tokens, &mut diagnostics);
     }
 
     // Quality rules.

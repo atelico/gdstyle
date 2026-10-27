@@ -1,6 +1,7 @@
 use crate::ast::{ClassMember, ScriptFile};
 use crate::diagnostic::Diagnostic;
 use crate::linter::Suppressions;
+use crate::token::Token;
 
 /// Check that class members follow the canonical ordering.
 ///
@@ -20,14 +21,18 @@ use crate::linter::Suppressions;
 /// 13. Virtual/override methods (_init, _ready, etc.)
 /// 14. Custom methods
 /// 15. Inner classes
-pub fn check_class_member_order(file: &ScriptFile, diagnostics: &mut Vec<Diagnostic>) {
+pub fn check_class_member_order(
+    file: &ScriptFile,
+    tokens: &[Token],
+    diagnostics: &mut Vec<Diagnostic>,
+) {
     // Members carrying a `# gdstyle:ignore=order/class-member-order` directive
     // opt out of the ordering check. They are skipped entirely — neither
     // flagged nor counted towards the running "highest category seen" — so a
     // pinned member (e.g. a const kept next to the enum it mirrors) does not
     // make its neighbours look out of order. This mirrors how the formatter's
     // reorder pass pins the same members in place.
-    let suppressions = Suppressions::parse(&file.lines.join("\n"));
+    let suppressions = Suppressions::parse(&file.lines.join("\n"), tokens);
     check_member_order_recursive(&file.members, &file.path, &suppressions, diagnostics);
 }
 
@@ -119,6 +124,14 @@ mod tests {
     use crate::ast::*;
     use crate::token::Span;
 
+    /// Run the rule on `file`, lexing its lines for the suppression scan.
+    fn check(file: &ScriptFile) -> Vec<Diagnostic> {
+        let tokens = crate::lexer::Lexer::new(&file.lines.join("\n")).tokenize();
+        let mut diagnostics = Vec::new();
+        check_class_member_order(file, &tokens, &mut diagnostics);
+        diagnostics
+    }
+
     fn span(line: usize) -> Span {
         Span::new(line, 1, 0, 0)
     }
@@ -192,8 +205,7 @@ mod tests {
             ],
         };
 
-        let mut diags = Vec::new();
-        check_class_member_order(&file, &mut diags);
+        let diags = check(&file);
         assert!(
             diags.is_empty(),
             "correct order should produce no diagnostics, got: {:?}",
@@ -227,8 +239,7 @@ mod tests {
             ],
         };
 
-        let mut diags = Vec::new();
-        check_class_member_order(&file, &mut diags);
+        let diags = check(&file);
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("signal declaration"));
         assert!(diags[0].message.contains("should appear before"));
@@ -252,8 +263,7 @@ mod tests {
             ],
         };
 
-        let mut diags = Vec::new();
-        check_class_member_order(&file, &mut diags);
+        let diags = check(&file);
         assert_eq!(diags.len(), 1);
     }
 
@@ -284,8 +294,7 @@ mod tests {
             ],
         };
 
-        let mut diags = Vec::new();
-        check_class_member_order(&file, &mut diags);
+        let diags = check(&file);
         assert_eq!(diags.len(), 1);
     }
 
@@ -334,8 +343,7 @@ mod tests {
             ],
         };
 
-        let mut diags = Vec::new();
-        check_class_member_order(&file, &mut diags);
+        let diags = check(&file);
         assert!(
             diags.is_empty(),
             "pinned const should exempt itself and its neighbours, got: {:?}",
@@ -376,8 +384,7 @@ mod tests {
             ],
         };
 
-        let mut diags = Vec::new();
-        check_class_member_order(&file, &mut diags);
+        let diags = check(&file);
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("enum declaration"));
     }
@@ -415,8 +422,7 @@ mod tests {
             ],
         };
 
-        let mut diags = Vec::new();
-        check_class_member_order(&file, &mut diags);
+        let diags = check(&file);
         assert!(
             diags.is_empty(),
             "doc comment attached to static func should not be flagged, got: {:?}",

@@ -4,7 +4,7 @@ use crate::diagnostic::Diagnostic;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::rules;
-use crate::token::TokenKind;
+use crate::token::{Token, TokenKind};
 
 /// Lint a single GDScript source string and return diagnostics.
 ///
@@ -25,12 +25,12 @@ pub fn lint_source(source: &str, file_path: &str, config: &Config) -> Vec<Diagno
     let normalized = normalize_line_endings(source);
     let source = normalized.as_str();
 
-    // Check for inline suppression comments.
-    let suppressed_lines = parse_suppression_comments(source);
-
     // Tokenize.
     let mut lexer = Lexer::new(source);
     let tokens = lexer.tokenize();
+
+    // Check for inline suppression comments.
+    let suppressed_lines = parse_suppression_comments(source, &tokens);
 
     // Parse.
     let mut parser = Parser::new(&tokens);
@@ -184,9 +184,9 @@ pub(crate) struct Suppressions {
 }
 
 impl Suppressions {
-    /// Parse every suppression directive out of `source`.
-    pub(crate) fn parse(source: &str) -> Self {
-        parse_suppression_comments(source)
+    /// Parse every suppression directive out of `source`, given its tokens.
+    pub(crate) fn parse(source: &str, tokens: &[Token]) -> Self {
+        parse_suppression_comments(source, tokens)
     }
 
     /// True when `rule` is suppressed for a member whose header spans lines
@@ -216,62 +216,49 @@ impl Suppressions {
 ///    the listed rules (or all rules, when no `=...` is given) for every
 ///    diagnostic in the file, regardless of line. Anywhere in the file
 ///    works; convention is at the top so it's visible to readers.
-fn parse_suppression_comments(source: &str) -> Suppressions {
+///
+/// A directive is a `#` comment that starts with it. The same text inside a
+/// string, or later in a comment (`# see # gdstyle:ignore-file`), is not one.
+/// `tokens` is the lex of `source`.
+fn parse_suppression_comments(source: &str, tokens: &[Token]) -> Suppressions {
     let mut suppressions = Suppressions::default();
     let file_prefix = "# gdstyle:ignore-file";
     let line_prefix = "# gdstyle:ignore";
 
-    for (i, line) in source.lines().enumerate() {
-        let line_num = i + 1;
-        let trimmed = line.trim();
+    for token in tokens {
+        if !matches!(token.kind, TokenKind::Comment(_)) {
+            continue;
+        }
+        let text = token.text.as_str();
 
         // File-scope check must come BEFORE the per-line check because
         // `# gdstyle:ignore` is a prefix of `# gdstyle:ignore-file` and
         // would otherwise match first and steal the directive.
-        if let Some(rest) = trimmed.strip_prefix(file_prefix) {
+        if let Some(rest) = text.strip_prefix(file_prefix) {
             if directive_terminator_ok(rest) {
-                let rules = parse_suppression_rules(rest);
-                suppressions.file_level.push(rules);
-                continue;
-            }
-        }
-        if let Some(pos) = line.find(file_prefix) {
-            let rest = &line[pos + file_prefix.len()..];
-            if directive_terminator_ok(rest) {
-                let rules = parse_suppression_rules(rest);
-                suppressions.file_level.push(rules);
-                // An inline file-level directive on a code line behaves
-                // identically to a standalone one; we don't ALSO record
-                // a per-line suppression for that line.
+                suppressions.file_level.push(parse_suppression_rules(rest));
                 continue;
             }
         }
 
-        // Standalone per-line suppression: applies to the NEXT line.
-        if let Some(rest) = trimmed.strip_prefix(line_prefix) {
+        if let Some(rest) = text.strip_prefix(line_prefix) {
             if directive_terminator_ok(rest) {
-                let rules = parse_suppression_rules(rest);
+                // Alone on its line it covers the next line; after code it
+                // covers its own.
+                let line_start = source[..token.span.offset]
+                    .rfind('\n')
+                    .map_or(0, |newline| newline + 1);
+                let is_standalone = source[line_start..token.span.offset].trim().is_empty();
+                let target_line = if is_standalone {
+                    token.span.line + 1
+                } else {
+                    token.span.line
+                };
                 suppressions
                     .per_line
-                    .entry(line_num + 1)
+                    .entry(target_line)
                     .or_default()
-                    .push(rules);
-            }
-        }
-
-        // Inline per-line suppression: applies to the SAME line.
-        if let Some(pos) = line.find(line_prefix) {
-            let before = line[..pos].trim();
-            if !before.is_empty() {
-                let rest = &line[pos + line_prefix.len()..];
-                if directive_terminator_ok(rest) {
-                    let rules = parse_suppression_rules(rest);
-                    suppressions
-                        .per_line
-                        .entry(line_num)
-                        .or_default()
-                        .push(rules);
-                }
+                    .push(parse_suppression_rules(rest));
             }
         }
     }
@@ -554,6 +541,24 @@ func take_damage(amount: int) -> void:
         // All diagnostics on line 2 should be suppressed.
         let line_2_diags: Vec<_> = diagnostics.iter().filter(|d| d.span.line == 2).collect();
         assert!(line_2_diags.is_empty());
+    }
+
+    #[test]
+    fn directive_text_that_is_not_a_comment_suppresses_nothing() {
+        // Inside a multi-line string, and later in a comment that starts with
+        // something else, the text is not a directive.
+        for source in [
+            "var s = \"\"\"\n# gdstyle:ignore-file\n\"\"\"\nvar BadName = 1\n",
+            "var BadName = 1  # see # gdstyle:ignore for details\n",
+        ] {
+            let diagnostics = lint_source(source, "test.gd", &Config::default());
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|d| d.rule == "naming/variable-name-snake-case"),
+                "source:\n{source}"
+            );
+        }
     }
 
     #[test]
