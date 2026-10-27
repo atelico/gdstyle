@@ -6797,6 +6797,24 @@ fn a_missing_float_zero_is_reported_once() {
 }
 
 #[test]
+fn an_uppercase_number_literal_is_reported_once() {
+    // `0XAB` drew one warning for the prefix and one for the digits; `0B11`
+    // drew none.
+    let source = "var a = 0XAB\nvar b = 0B11\nvar c = 0xab\n";
+    let diagnostics = linter::lint_source(source, "a.gd", &default_config());
+    let lines: Vec<usize> = diagnostics
+        .iter()
+        .filter(|d| d.rule == "format/number-literals")
+        .map(|d| d.span.line)
+        .collect();
+    assert_eq!(lines, vec![1, 2]);
+    assert_eq!(
+        fixer::apply_fixes(source, &diagnostics, true),
+        "var a = 0xab\nvar b = 0b11\nvar c = 0xab\n"
+    );
+}
+
+#[test]
 fn float_with_a_leading_dot_gets_its_zero() {
     // `.5` used to lex as `.` and `5`, so neither `check` nor `fmt` saw a
     // float.

@@ -148,7 +148,7 @@ gdstyle ships with 57 rules organized into five categories. Most rules are enabl
 | `format/double-quotes` | Prefer double quotes for strings | safe |
 | `format/comment-spacing` | Comments must have a space after `#` | safe |
 | `format/no-unnecessary-parens` | No unnecessary parentheses in `if`/`while`/`elif` conditions | safe |
-| `format/number-literals` | Hex digits must be lowercase (`0xff`, not `0xFF`) | safe |
+| `format/number-literals` | Hex and binary literals must be lowercase (`0xff`, not `0xFF`; `0b1`, not `0B1`) | safe |
 | `format/one-statement-per-line` | One statement per line (no semicolons to separate statements). Match arms and inline callable bodies are exempt, since their statements are not peers of the enclosing line | safe |
 | `format/blank-lines` | Collapse 3+ blank lines to 2 | safe |
 | `format/trailing-comma` | Trailing comma on last item of multi-line collections whose closing bracket starts its own line | safe |
