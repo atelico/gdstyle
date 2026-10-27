@@ -1087,7 +1087,8 @@ fn try_break_comment(line: &str, max_len: usize) -> Option<Vec<String>> {
     let mut current_visual = prefix_visual_len;
 
     for word in &words {
-        let word_len = word.len();
+        // Columns, not bytes: an accented word takes one column per char.
+        let word_len = word.chars().count();
         if current_visual > prefix_visual_len && current_visual + 1 + word_len > max_len {
             // Start a new line.
             lines_out.push(current_line);
@@ -2323,6 +2324,22 @@ mod tests {
         for name in pass_rule::ALL {
             assert!(registered.contains(&name), "unknown rule {name}");
         }
+    }
+
+    #[test]
+    fn comment_wrapping_counts_columns_not_bytes() {
+        // Each word is 8 columns but 16 bytes. The comment fills exactly 100
+        // columns before the last word; measuring bytes wrapped it at 50.
+        let word = "é".repeat(8);
+        let comment = format!("# {}", vec![word.as_str(); 12].join(" "));
+        let lines = try_break_comment(&comment, 100).expect("long comment wraps");
+        assert_eq!(
+            lines
+                .iter()
+                .map(|line| line.chars().count())
+                .collect::<Vec<_>>(),
+            vec![100, 10]
+        );
     }
 
     #[test]

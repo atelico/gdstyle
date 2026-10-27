@@ -109,7 +109,13 @@ pub fn check_trailing_whitespace(
                 Diagnostic::warning(
                     "format/trailing-whitespace",
                     "trailing whitespace".to_string(),
-                    Span::new(line_num, trimmed_len + 1, offset, ws_len),
+                    // Columns count chars, like the lexer's.
+                    Span::new(
+                        line_num,
+                        line.trim_end().chars().count() + 1,
+                        offset,
+                        ws_len,
+                    ),
                     &file.path,
                 )
                 .with_fix(Fix {
@@ -138,7 +144,7 @@ pub fn check_trailing_newline(file: &ScriptFile, diagnostics: &mut Vec<Diagnosti
             Diagnostic::warning(
                 "format/trailing-newline",
                 "file should end with a newline".to_string(),
-                Span::new(file.lines.len(), last_line.len() + 1, offset, 0),
+                Span::new(file.lines.len(), last_line.chars().count() + 1, offset, 0),
                 &file.path,
             )
             .with_fix(Fix {
@@ -2112,6 +2118,17 @@ mod tests {
         check_trailing_whitespace(&tokenize(&file.lines.join("\n")), &file, &mut diags);
         assert_eq!(diags.len(), 1);
         assert!(diags[0].fix.is_some());
+    }
+
+    #[test]
+    fn line_end_columns_count_chars_not_bytes() {
+        // `var s = "ééé"` is 13 chars but 16 bytes; the column after it is 14.
+        let file = make_file(&["var s = \"ééé\"   ", "var t = \"ééé\""]);
+        let mut diags = Vec::new();
+        check_trailing_whitespace(&tokenize(&file.lines.join("\n")), &file, &mut diags);
+        check_trailing_newline(&file, &mut diags);
+        let columns: Vec<usize> = diags.iter().map(|d| d.span.column).collect();
+        assert_eq!(columns, vec![14, 14]);
     }
 
     #[test]
