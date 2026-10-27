@@ -6811,6 +6811,33 @@ fn leading_zero_never_joins_the_float_to_what_precedes_it() {
 }
 
 #[test]
+fn fixes_keep_blank_line_runs_when_blank_lines_is_off_or_suppressed() {
+    // Applying any fix used to collapse every run of 3+ blank lines, even
+    // with `format/blank-lines` off or suppressed. The quote fix still lands.
+    let body = "func f():\n\tvar a = 'x'\n\n\n\n\n\tpass\n";
+    let fixed_body = body.replace("'x'", "\"x\"");
+    let fix = |source: &str, config: &Config| {
+        fixer::apply_fixes(source, &linter::lint_source(source, "a.gd", config), true)
+    };
+
+    let off = config_with_rules_off(&["format/blank-lines"]);
+    assert_eq!(fix(body, &off), fixed_body);
+    assert_eq!(formatter::format_source(body, &off), fixed_body);
+
+    let suppressed = format!("# gdstyle:ignore-file=format/blank-lines\n{body}");
+    assert_eq!(
+        fix(&suppressed, &default_config()),
+        format!("# gdstyle:ignore-file=format/blank-lines\n{fixed_body}")
+    );
+
+    // With the rule on, its own fix still cuts the run to two.
+    assert_eq!(
+        fix(body, &default_config()),
+        "func f():\n\tvar a = \"x\"\n\n\n\tpass\n"
+    );
+}
+
+#[test]
 fn issue_33_default_keeps_ten_thousand_floor_and_covers_floats() {
     // No threshold configured: the original floor of 10_000 applies, now to
     // floats as well.
