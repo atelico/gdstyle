@@ -132,7 +132,10 @@ pub fn check_trailing_newline(file: &ScriptFile, diagnostics: &mut Vec<Diagnosti
     }
 
     let last_line = &file.lines[file.lines.len() - 1];
-    if !last_line.is_empty() {
+    // A file with no text needs no newline: its whitespace is
+    // format/trailing-whitespace's, which leaves it empty.
+    let has_text = file.lines.iter().any(|line| !line.trim().is_empty());
+    if !last_line.is_empty() && has_text {
         let offset = line_byte_offset(&file.lines, file.lines.len() - 1) + last_line.len();
         diagnostics.push(
             Diagnostic::warning(
@@ -167,13 +170,17 @@ pub fn check_trailing_newline(file: &ScriptFile, diagnostics: &mut Vec<Diagnosti
     // When an unterminated string runs to the end of the file, those lines
     // are its contents. Lexing only here keeps the common case cheap.
     let source = file.lines.join("\n");
-    let ends_inside_a_string = crate::lexer::Lexer::new(&source).tokenize().iter().any(
-        |token| matches!(&token.kind, TokenKind::Error(message) if message == "unterminated string"),
-    );
+    let offset = line_byte_offset(&file.lines, first_extra_idx);
+    let ends_inside_a_string = crate::lexer::Lexer::new(&source)
+        .tokenize()
+        .iter()
+        .any(|token| {
+            matches!(&token.kind, TokenKind::Error(message) if message == "unterminated string")
+                && token.span.offset + token.span.length > offset
+        });
     if ends_inside_a_string {
         return;
     }
-    let offset = line_byte_offset(&file.lines, first_extra_idx);
     let end = line_byte_offset(&file.lines, file.lines.len() - 1);
     diagnostics.push(
         Diagnostic::warning(
@@ -2229,6 +2236,12 @@ mod tests {
         let mut diags = Vec::new();
         check_trailing_newline(&file, &mut diags);
         assert_eq!(apply(&file.lines.join("\n"), &diags), "\n");
+        // A file of only whitespace needs no newline (trailing-whitespace
+        // empties it, as fmt does).
+        let file = make_file(&["  "]);
+        let mut diags = Vec::new();
+        check_trailing_newline(&file, &mut diags);
+        assert!(diags.is_empty(), "{diags:?}");
     }
 
     #[test]
