@@ -154,12 +154,23 @@ pub fn check_trailing_newline(file: &ScriptFile, diagnostics: &mut Vec<Diagnosti
     }
 
     // Blank lines after the last line of code: the file ends with more than
-    // one newline. Delete them, keeping that line's own newline.
-    let Some(last_code_idx) = file.lines.iter().rposition(|line| !line.trim().is_empty()) else {
-        return;
-    };
-    let first_extra_idx = last_code_idx + 1;
+    // one newline. Delete them, keeping that line's own newline. A file of
+    // only blank lines keeps its first line.
+    let first_extra_idx = file
+        .lines
+        .iter()
+        .rposition(|line| !line.trim().is_empty())
+        .map_or(1, |last_code_idx| last_code_idx + 1);
     if first_extra_idx + 1 >= file.lines.len() {
+        return;
+    }
+    // When an unterminated string runs to the end of the file, those lines
+    // are its contents. Lexing only here keeps the common case cheap.
+    let source = file.lines.join("\n");
+    let ends_inside_a_string = crate::lexer::Lexer::new(&source).tokenize().iter().any(
+        |token| matches!(&token.kind, TokenKind::Error(message) if message == "unterminated string"),
+    );
+    if ends_inside_a_string {
         return;
     }
     let offset = line_byte_offset(&file.lines, first_extra_idx);
@@ -2204,6 +2215,20 @@ mod tests {
         assert_eq!(diags[0].span.line, 2);
         let source = file.lines.join("\n");
         assert_eq!(apply(&source, &diags), "var x = 5\n");
+    }
+
+    #[test]
+    fn trailing_newline_handles_unterminated_strings_and_blank_files() {
+        // The blank lines of an unterminated string are its contents.
+        let file = make_file(&["var s = \"\"\"abc", "", "", ""]);
+        let mut diags = Vec::new();
+        check_trailing_newline(&file, &mut diags);
+        assert!(diags.is_empty(), "{diags:?}");
+        // A file of only blank lines ends with one newline.
+        let file = make_file(&["", "", "", ""]);
+        let mut diags = Vec::new();
+        check_trailing_newline(&file, &mut diags);
+        assert_eq!(apply(&file.lines.join("\n"), &diags), "\n");
     }
 
     #[test]
