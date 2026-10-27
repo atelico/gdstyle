@@ -661,16 +661,30 @@ pub fn check_one_statement_per_line(
                 continue;
             }
 
-            // A `;` that ends its line separates nothing: delete it, with the
-            // spaces before it. A newline there would leave an empty,
-            // indented line behind.
-            let ends_the_line = tokens
-                .get(idx + 1)
-                .is_none_or(|next| matches!(next.kind, TokenKind::Newline | TokenKind::Eof));
+            // A `;` that ends its line (only a comment may follow) separates
+            // nothing: delete it, with the spaces before it. A newline there
+            // would leave an empty, indented line behind, or move the
+            // comment onto a line of its own.
+            let next = tokens.get(idx + 1);
+            let ends_the_line = next.is_none_or(|next| {
+                matches!(
+                    next.kind,
+                    TokenKind::Newline
+                        | TokenKind::Eof
+                        | TokenKind::Comment(_)
+                        | TokenKind::DocComment(_)
+                )
+            });
             if ends_the_line {
                 let space_before = line
                     .get(..semi_col)
                     .map_or(0, |before| before.len() - before.trim_end().len());
+                // A comment right after the `;` keeps one space from the code.
+                let comment_touches = next.is_some_and(|next| {
+                    matches!(next.kind, TokenKind::Comment(_) | TokenKind::DocComment(_))
+                        && next.span.offset == token.span.offset + token.span.length
+                });
+                let new_text = if comment_touches { " " } else { "" };
                 diagnostics.push(
                     Diagnostic::warning(
                         "format/one-statement-per-line",
@@ -682,7 +696,7 @@ pub fn check_one_statement_per_line(
                         replacements: vec![Replacement {
                             offset: token.span.offset - space_before,
                             length: space_before + token.span.length,
-                            new_text: String::new(),
+                            new_text: new_text.to_string(),
                         }],
                         is_safe: true,
                     }),

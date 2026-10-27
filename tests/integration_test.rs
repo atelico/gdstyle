@@ -3166,6 +3166,19 @@ fn trailing_semicolon_is_removed_without_leaving_a_blank_line() {
 }
 
 #[test]
+fn trailing_semicolon_before_a_comment_keeps_the_comment_inline() {
+    // The `;` used to become a newline, moving the comment onto its own line.
+    let source =
+        "func f():\n\tvar x = 1; # note\n\tvar y = 2;# touching\n\tvar z = 3 ;  ## doc\n\tpass\n";
+    let expected =
+        "func f():\n\tvar x = 1 # note\n\tvar y = 2 # touching\n\tvar z = 3  ## doc\n\tpass\n";
+    let config = default_config();
+    let fixed = fixer::apply_fixes(source, &linter::lint_source(source, "a.gd", &config), true);
+    assert_eq!(fixed, expected);
+    assert_eq!(formatter::format_source(source, &config), expected);
+}
+
+#[test]
 fn fmt_leaves_each_rule_alone_when_it_is_off() {
     // Each source breaks one rule that `fmt` applies. The default config
     // rewrites it; with the rule off it must stay as is.
