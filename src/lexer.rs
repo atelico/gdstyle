@@ -558,6 +558,32 @@ impl<'a> Lexer<'a> {
             }
         }
 
+        // A `.` and digits after a float's fraction or exponent (`1.5.5`,
+        // `.5.5`, `1e5.5`) is rejected by Godot. Read the rest of the literal
+        // into one error token instead of lexing a second float after it.
+        if is_float
+            && !self.is_at_end()
+            && self.current_char() == '.'
+            && self.peek_char().is_some_and(|c| c.is_ascii_digit())
+        {
+            while !self.is_at_end()
+                && (self.current_char().is_ascii_digit()
+                    || matches!(self.current_char(), '.' | '_'))
+            {
+                text.push(self.current_char());
+                self.advance();
+            }
+            let span = Span::new(self.line, start_col, start_offset, text.len());
+            return Token::new(
+                TokenKind::Error(format!(
+                    "invalid float: {} (unexpected '.' inside a number)",
+                    text
+                )),
+                span,
+                text,
+            );
+        }
+
         let span = Span::new(self.line, start_col, start_offset, text.len());
         let clean = text.replace('_', "");
 
@@ -1071,6 +1097,34 @@ mod tests {
     fn number_with_underscores() {
         let kinds = token_kinds("1_000_000");
         assert_eq!(kinds, vec![TokenKind::Integer(1_000_000)]);
+    }
+
+    #[test]
+    fn a_second_decimal_point_is_a_lex_error() {
+        for source in ["1.5.5", ".5.5", "1e5.5", "1.0.5.2"] {
+            let kinds = token_kinds(source);
+            assert!(
+                matches!(kinds.as_slice(), [TokenKind::Error(_)]),
+                "{source}: {kinds:?}"
+            );
+        }
+        // A method call or a range on a number is not one.
+        assert_eq!(
+            token_kinds("1.5.abs"),
+            vec![
+                TokenKind::Float(1.5),
+                TokenKind::Dot,
+                TokenKind::Identifier("abs".to_string()),
+            ]
+        );
+        assert_eq!(
+            token_kinds("1..5"),
+            vec![
+                TokenKind::Integer(1),
+                TokenKind::DotDot,
+                TokenKind::Integer(5)
+            ]
+        );
     }
 
     #[test]
