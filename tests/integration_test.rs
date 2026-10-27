@@ -3073,6 +3073,46 @@ fn fmt_reorder_keeps_a_missing_final_newline_when_the_rule_is_off() {
 }
 
 #[test]
+fn fmt_honors_suppressions_of_token_rules() {
+    // Each source suppresses one rule where it is broken, then breaks it
+    // again where it is not suppressed, which must still be fixed.
+    let cases = [
+        (
+            "var s = 'x'  # gdstyle:ignore=format/double-quotes\nvar t = 'y'\n",
+            "var s = 'x'  # gdstyle:ignore=format/double-quotes\nvar t = \"y\"\n",
+        ),
+        (
+            "var f = 5.  # gdstyle:ignore=format/float-literal-zeros,format/number-literals\nvar g = 6.\n",
+            "var f = 5.  # gdstyle:ignore=format/float-literal-zeros,format/number-literals\nvar g = 6.0\n",
+        ),
+        (
+            "var h = 0xFF  # gdstyle:ignore=format/number-literals\nvar i = 0xAA\n",
+            "var h = 0xFF  # gdstyle:ignore=format/number-literals\nvar i = 0xaa\n",
+        ),
+        (
+            "#1 note  # gdstyle:ignore=format/comment-spacing\n#2 note\n",
+            "#1 note  # gdstyle:ignore=format/comment-spacing\n# 2 note\n",
+        ),
+        // A standalone directive covers the next line.
+        (
+            "# gdstyle:ignore=format/double-quotes\nvar s = 'x'\nvar t = 'y'\n",
+            "# gdstyle:ignore=format/double-quotes\nvar s = 'x'\nvar t = \"y\"\n",
+        ),
+        // A file-level directive covers every line.
+        (
+            "# gdstyle:ignore-file=format/number-literals\nvar h = 0xFF\nvar f = 5.\n",
+            "# gdstyle:ignore-file=format/number-literals\nvar h = 0xFF\nvar f = 5.0\n",
+        ),
+    ];
+    for (source, expected) in cases {
+        assert_eq!(
+            formatter::format_source(source, &default_config()),
+            expected
+        );
+    }
+}
+
+#[test]
 fn fmt_leaves_each_rule_alone_when_it_is_off() {
     // Each source breaks one rule that `fmt` applies. The default config
     // rewrites it; with the rule off it must stay as is.

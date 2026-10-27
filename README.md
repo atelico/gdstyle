@@ -399,6 +399,14 @@ is suppressed within that scope. Rule IDs are the full
 `category/rule-name` shown in the diagnostic output (e.g.
 `naming/variable-name-snake-case`).
 
+`fmt` and `check --fix` honor the same directives: a suppressed line or
+file is not rewritten for that rule. The exceptions are the layout rules
+`format/no-tabs-as-spaces`, `format/trailing-whitespace`,
+`format/blank-lines`, `format/trailing-newline` and
+`format/max-line-length`, and the space `fmt` adds after `##` in doc
+comments. `fmt` applies those to whole lines or files, so a directive
+doesn't stop it; set the rule to `"off"` in the config instead.
+
 ### Per-line suppression
 
 Standalone (applies to the next code line):

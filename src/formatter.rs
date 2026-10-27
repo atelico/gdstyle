@@ -64,23 +64,17 @@ mod pass_rule {
     pub const NO_TABS_AS_SPACES: &str = "format/no-tabs-as-spaces";
     pub const TRAILING_WHITESPACE: &str = "format/trailing-whitespace";
     pub const BLANK_LINES: &str = "format/blank-lines";
-    pub const DOUBLE_QUOTES: &str = "format/double-quotes";
     pub const COMMENT_SPACING: &str = "format/comment-spacing";
-    pub const FLOAT_LITERAL_ZEROS: &str = "format/float-literal-zeros";
-    pub const NUMBER_LITERALS: &str = "format/number-literals";
     pub const TRAILING_NEWLINE: &str = "format/trailing-newline";
     pub const MAX_LINE_LENGTH: &str = "format/max-line-length";
 
     #[cfg(test)]
-    pub const ALL: [&str; 10] = [
+    pub const ALL: [&str; 7] = [
         CLASS_MEMBER_ORDER,
         NO_TABS_AS_SPACES,
         TRAILING_WHITESPACE,
         BLANK_LINES,
-        DOUBLE_QUOTES,
         COMMENT_SPACING,
-        FLOAT_LITERAL_ZEROS,
-        NUMBER_LITERALS,
         TRAILING_NEWLINE,
         MAX_LINE_LENGTH,
     ];
@@ -129,37 +123,22 @@ fn format_pass_with(source: &str, config: &Config, spanning_strings: SpanningStr
         result = collapse_blank_lines(&result, spanning_strings);
     }
 
-    // 4. Normalize quotes (single -> double unless contains double quotes).
-    if is_enabled(pass_rule::DOUBLE_QUOTES) {
-        result = normalize_quotes(&result);
-    }
-
-    // 5. Normalize comment spacing (add space after #, except #region/#endregion).
+    // 4. Add a space after `##` in doc comments.
     if is_enabled(pass_rule::COMMENT_SPACING) {
-        result = normalize_comment_spacing(&result);
+        result = normalize_doc_comment_spacing(&result);
     }
 
-    // 6. Normalize float literals (add leading/trailing zeros). Both rules
-    //    ask for the zeros, so either one keeps the pass on.
-    if is_enabled(pass_rule::FLOAT_LITERAL_ZEROS) || is_enabled(pass_rule::NUMBER_LITERALS) {
-        result = normalize_float_literals(&result);
-    }
-
-    // 7. Normalize hex to lowercase.
-    if is_enabled(pass_rule::NUMBER_LITERALS) {
-        result = normalize_hex_literals(&result);
-    }
-
-    // 8. Ensure file ends with exactly one \n.
+    // 5. Ensure file ends with exactly one \n.
     if is_enabled(pass_rule::TRAILING_NEWLINE) {
         result = ensure_trailing_newline(&result);
     }
 
-    // 9. Use lint+fix for the remaining rules, such as `&&` / `||` / `!` to
-    //    `and` / `or` / `not`. Fixes honor `# gdstyle:ignore` comments.
+    // 6. Use lint+fix for the remaining rules, such as quotes, number
+    //    literals, comment spacing and `&&` / `||` / `!` to `and` / `or` /
+    //    `not`. Fixes honor `# gdstyle:ignore` comments.
     result = lint_then_fix(&result, config);
 
-    // 10. Break long lines by wrapping at commas inside delimiters.
+    // 7. Break long lines by wrapping at commas inside delimiters.
     if is_enabled(pass_rule::MAX_LINE_LENGTH) {
         result = break_long_lines(&result, config, spanning_strings);
     }
@@ -741,134 +720,29 @@ fn collapse_blank_lines(source: &str, spanning_strings: SpanningStrings) -> Stri
     result.join("\n")
 }
 
-fn normalize_quotes(source: &str) -> String {
-    let mut lexer = crate::lexer::Lexer::new(source);
-    let tokens = lexer.tokenize();
-    let mut replacements: Vec<(usize, usize, String)> = Vec::new();
-
-    for token in &tokens {
-        if let crate::token::TokenKind::String(ref info) = token.kind {
-            if info.quote_style == crate::token::QuoteStyle::Single
-                && info.prefix == crate::token::StringPrefix::None
-                && !info.is_multiline
-                && !info.value.contains('"')
-            {
-                let new_text = format!("\"{}\"", info.value);
-                replacements.push((token.span.offset, token.span.length, new_text));
-            }
-        }
-    }
-
-    if replacements.is_empty() {
-        return source.to_string();
-    }
-
-    let mut result = source.to_string();
-    for (offset, length, new_text) in replacements.into_iter().rev() {
-        let end = (offset + length).min(result.len());
-        result.replace_range(offset..end, &new_text);
-    }
-    result
-}
-
-fn normalize_comment_spacing(source: &str) -> String {
-    let mut lexer = crate::lexer::Lexer::new(source);
-    let tokens = lexer.tokenize();
-    let mut insertions: Vec<(usize, &str)> = Vec::new();
-
-    for token in &tokens {
-        match &token.kind {
-            crate::token::TokenKind::Comment(content) => {
+/// Add a space after `##` in doc comments. Plain `#` comments get theirs from
+/// the `format/comment-spacing` fix in `lint_then_fix`, which leaves `##`
+/// alone.
+fn normalize_doc_comment_spacing(source: &str) -> String {
+    let tokens = Lexer::new(source).tokenize();
+    // Skip empty doc lines, ones already spaced, and `###...` separator lines.
+    let insertion_offsets: Vec<usize> = tokens
+        .iter()
+        .filter_map(|token| match &token.kind {
+            TokenKind::DocComment(content)
                 if !content.is_empty()
                     && !content.starts_with(' ')
-                    && !content.starts_with('!')
-                    && !content.starts_with("region")
-                    && !content.starts_with("endregion")
-                {
-                    let first_char = content.chars().next().unwrap();
-                    if first_char.is_ascii_alphabetic() || first_char == '_' || first_char == '\t' {
-                        continue;
-                    }
-                    insertions.push((token.span.offset + 1, " "));
-                }
-            }
-            crate::token::TokenKind::DocComment(content) => {
-                // Don't add space if content starts with '#' (separator lines like #####)
-                // or is empty, or already starts with space.
-                if !content.is_empty() && !content.starts_with(' ') && !content.starts_with('#') {
-                    insertions.push((token.span.offset + 2, " "));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    if insertions.is_empty() {
-        return source.to_string();
-    }
-
-    let mut result = source.to_string();
-    for (offset, text) in insertions.into_iter().rev() {
-        result.insert_str(offset, text);
-    }
-    result
-}
-
-fn normalize_float_literals(source: &str) -> String {
-    let mut lexer = crate::lexer::Lexer::new(source);
-    let tokens = lexer.tokenize();
-    let mut replacements: Vec<(usize, usize, String)> = Vec::new();
-
-    for token in &tokens {
-        if let crate::token::TokenKind::Float(_) = &token.kind {
-            let text = &token.text;
-            if text.starts_with('.') {
-                replacements.push((token.span.offset, token.span.length, format!("0{}", text)));
-            } else if text.ends_with('.') {
-                replacements.push((token.span.offset, token.span.length, format!("{}0", text)));
-            }
-        }
-    }
-
-    if replacements.is_empty() {
-        return source.to_string();
-    }
-
-    let mut result = source.to_string();
-    for (offset, length, new_text) in replacements.into_iter().rev() {
-        let end = (offset + length).min(result.len());
-        result.replace_range(offset..end, &new_text);
-    }
-    result
-}
-
-fn normalize_hex_literals(source: &str) -> String {
-    let mut lexer = crate::lexer::Lexer::new(source);
-    let tokens = lexer.tokenize();
-    let mut replacements: Vec<(usize, usize, String)> = Vec::new();
-
-    for token in &tokens {
-        if let crate::token::TokenKind::Integer(_) = &token.kind {
-            let text = &token.text;
-            if (text.starts_with("0x") || text.starts_with("0X"))
-                && text[2..]
-                    .chars()
-                    .any(|c| c.is_ascii_uppercase() && c != '_')
+                    && !content.starts_with('#') =>
             {
-                let fixed = format!("0x{}", text[2..].to_lowercase());
-                replacements.push((token.span.offset, token.span.length, fixed));
+                Some(token.span.offset + 2)
             }
-        }
-    }
-
-    if replacements.is_empty() {
-        return source.to_string();
-    }
+            _ => None,
+        })
+        .collect();
 
     let mut result = source.to_string();
-    for (offset, length, new_text) in replacements.into_iter().rev() {
-        let end = (offset + length).min(result.len());
-        result.replace_range(offset..end, &new_text);
+    for offset in insertion_offsets.into_iter().rev() {
+        result.insert(offset, ' ');
     }
     result
 }
@@ -2452,38 +2326,10 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_quotes() {
-        let source = "var x = 'hello'\n";
-        let result = normalize_quotes(source);
-        assert_eq!(result, "var x = \"hello\"\n");
-    }
-
-    #[test]
-    fn test_normalize_quotes_preserves_double_inside() {
-        let source = "var x = 'he said \"hi\"'\n";
-        let result = normalize_quotes(source);
-        assert_eq!(result, source); // unchanged
-    }
-
-    #[test]
     fn test_ensure_trailing_newline() {
         assert_eq!(ensure_trailing_newline("hello"), "hello\n");
         assert_eq!(ensure_trailing_newline("hello\n"), "hello\n");
         assert_eq!(ensure_trailing_newline("hello\n\n\n"), "hello\n");
-    }
-
-    #[test]
-    fn test_normalize_hex() {
-        let source = "var x = 0xFF\n";
-        let result = normalize_hex_literals(source);
-        assert_eq!(result, "var x = 0xff\n");
-    }
-
-    #[test]
-    fn test_normalize_float_trailing_zero() {
-        let source = "var x = 1.\n";
-        let result = normalize_float_literals(source);
-        assert_eq!(result, "var x = 1.0\n");
     }
 
     #[test]
