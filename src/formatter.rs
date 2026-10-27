@@ -1240,14 +1240,16 @@ fn split_at_bool_operators(condition: &str) -> Vec<String> {
                 current.push(chars[i]);
             }
             _ if depth == 0 => {
-                // Check for " and " or " or " at this position.
-                let remaining = &condition[i..];
-                if remaining.starts_with(" and ") {
+                // Check for " and " or " or " at this position. `i` counts
+                // chars, not bytes, so compare chars: slicing `condition`
+                // with it breaks after a multi-byte character.
+                let remaining = &chars[i..];
+                if remaining.starts_with(&[' ', 'a', 'n', 'd', ' ']) {
                     parts.push(current.clone());
                     current = String::from("and ");
                     i += 5; // skip " and "
                     continue;
-                } else if remaining.starts_with(" or ") {
+                } else if remaining.starts_with(&[' ', 'o', 'r', ' ']) {
                     parts.push(current.clone());
                     current = String::from("or ");
                     i += 4; // skip " or "
@@ -2323,6 +2325,15 @@ mod tests {
         for name in pass_rule::ALL {
             assert!(registered.contains(&name), "unknown rule {name}");
         }
+    }
+
+    #[test]
+    fn split_at_bool_operators_after_multi_byte_characters() {
+        // The split position used to be a char index used as a byte offset.
+        assert_eq!(
+            split_at_bool_operators("\"éé\" == a or 'he said \"hi\"' and b"),
+            vec!["\"éé\" == a", "or 'he said \"hi\"'", "and b"]
+        );
     }
 
     #[test]

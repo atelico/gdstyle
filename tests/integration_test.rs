@@ -6811,6 +6811,23 @@ fn leading_zero_never_joins_the_float_to_what_precedes_it() {
 }
 
 #[test]
+fn fmt_wraps_a_long_condition_with_non_ascii_text() {
+    // Wrapping at `or` used to panic ("byte index is not a char boundary")
+    // or drop characters when the condition held a multi-byte character.
+    let long_a = "a".repeat(48);
+    let long_b = "b".repeat(58);
+    let source =
+        format!("func f():\n\tif \"éé\" == {long_a} or 'he said \"hi\"' == {long_b}:\n\t\tpass\n");
+    let expected = format!(
+        "func f():\n\tif (\"éé\" == {long_a}\n\t\t\tor 'he said \"hi\"' == {long_b}):\n\t\tpass\n"
+    );
+    let config = default_config();
+    let formatted = formatter::format_source(&source, &config);
+    assert_eq!(formatted, expected);
+    assert_eq!(formatter::format_source(&formatted, &config), formatted);
+}
+
+#[test]
 fn issue_33_default_keeps_ten_thousand_floor_and_covers_floats() {
     // No threshold configured: the original floor of 10_000 applies, now to
     // floats as well.
