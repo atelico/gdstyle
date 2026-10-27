@@ -491,38 +491,65 @@ pub fn check_unnecessary_parens(
 }
 
 /// Attach the fix that puts a `0` before the float token at `index` (`.5` to
-/// `0.5`), unless the token directly follows the end of an operand.
-/// `return.5` is valid GDScript, and the zero would join `return` into the
-/// identifier `return0`; after `)`, `]` or a string (`f().5`) the code is
-/// already invalid and is left as written. The diagnostic still reports it;
-/// once a space separates the two, the fix is offered.
+/// `0.5`). Right after a keyword such as `return` the zero comes with a space
+/// (`return 0.5`), or it would join the keyword into the identifier
+/// `return0`. After `and` / `or`, `format/operator-spacing` adds that space,
+/// so no fix is offered until it has. After any other operand (`f().5`,
+/// `x.5`) the code is already invalid and is left as written; the diagnostic
+/// still reports it.
 fn with_leading_zero_fix(diagnostic: Diagnostic, tokens: &[Token], index: usize) -> Diagnostic {
     let token = &tokens[index];
-    if follows_operand(tokens, index) {
-        return diagnostic;
-    }
+    let new_text = match touching_previous_token(tokens, index) {
+        None => format!("0{}", token.text),
+        Some(previous) if starts_an_expression(&previous.kind) => format!(" 0{}", token.text),
+        Some(previous) if ends_like_an_operand(previous) => return diagnostic,
+        Some(_) => format!("0{}", token.text),
+    };
     diagnostic.with_fix(Fix {
         replacements: vec![Replacement {
             offset: token.span.offset,
             length: token.span.length,
-            new_text: format!("0{}", token.text),
+            new_text,
         }],
         is_safe: true,
     })
 }
 
-/// Whether the token at `index` starts right where the previous token ends,
-/// and that token ends like an operand: a word (identifier, keyword or
-/// number), a closing bracket or a string.
-pub(crate) fn follows_operand(tokens: &[Token], index: usize) -> bool {
-    let Some(token) = tokens.get(index) else {
-        return false;
-    };
+/// The token before `index` when it ends exactly where the token at `index`
+/// starts, with no space between them.
+fn touching_previous_token(tokens: &[Token], index: usize) -> Option<&Token> {
+    let token = tokens.get(index)?;
     index
         .checked_sub(1)
         .and_then(|previous_index| tokens.get(previous_index))
         .filter(|previous| previous.span.offset + previous.span.length == token.span.offset)
-        .and_then(|previous| previous.text.chars().next_back())
+}
+
+/// Whether `kind` is a keyword that an expression can follow directly and
+/// that `format/operator-spacing` doesn't space (it spaces `and` / `or`).
+fn starts_an_expression(kind: &TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::If
+            | TokenKind::Elif
+            | TokenKind::Else
+            | TokenKind::While
+            | TokenKind::In
+            | TokenKind::Return
+            | TokenKind::Not
+            | TokenKind::Match
+            | TokenKind::When
+            | TokenKind::Await
+    )
+}
+
+/// Whether `token` ends like an operand: a word (identifier, keyword or
+/// number), a closing bracket or a string.
+fn ends_like_an_operand(token: &Token) -> bool {
+    token
+        .text
+        .chars()
+        .next_back()
         .is_some_and(|c| c.is_alphanumeric() || matches!(c, '_' | ')' | ']' | '}' | '"' | '\''))
 }
 

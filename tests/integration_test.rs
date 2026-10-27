@@ -6795,19 +6795,21 @@ fn float_with_a_leading_dot_gets_its_zero() {
 
 #[test]
 fn leading_zero_never_joins_the_float_to_what_precedes_it() {
-    // `return.5` and `and.5` are valid GDScript. A bare `0` in front of `.5`
-    // would make `return0` and `and0`, and `fmt` used to pile up zeros on
-    // every pass. Code that is already invalid (`f().5`) is left as written.
-    let source = "func f(a):\n\tif a and.5:\n\t\treturn.5\n\tvar b = 1 if a else.25\n\treturn [f().5, [1][0].5, \"s\".5]\n";
+    // `return.5`, `not.5` and `and.5` are valid GDScript. A bare `0` in front
+    // of `.5` would make `return0`, so after a keyword the zero comes with a
+    // space. `and` / `or` get theirs from operator-spacing first. Code that
+    // is already invalid (`f().5`) is left as written.
+    let source = "func f(a):\n\tif a and.5:\n\t\treturn.5\n\tvar b = 1 if not.5 else.25\n\treturn [f().5, [1][0].5, \"s\".5]\n";
+    let expected = "func f(a):\n\tif a and 0.5:\n\t\treturn 0.5\n\tvar b = 1 if not 0.5 else 0.25\n\treturn [f().5, [1][0].5, \"s\".5]\n";
     let config = default_config();
     let formatted = formatter::format_source(source, &config);
-    assert_eq!(formatted, source.replace("and.5", "and 0.5"));
+    assert_eq!(formatted, expected);
     assert_eq!(formatter::format_source(&formatted, &config), formatted);
 
-    // One `check --fix` pass: operator-spacing separates `and` first; every
-    // other float stays as written.
+    // One `check --fix` pass: everything but `and.5`, which operator-spacing
+    // separates first; the next pass adds its zero.
     let fixed = fixer::apply_fixes(source, &linter::lint_source(source, "a.gd", &config), true);
-    assert_eq!(fixed, source.replace("and.5", "and .5"));
+    assert_eq!(fixed, expected.replace("and 0.5", "and .5"));
 }
 
 #[test]
