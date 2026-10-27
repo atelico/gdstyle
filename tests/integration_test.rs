@@ -3140,6 +3140,32 @@ fn fixes_keep_blank_line_runs_when_blank_lines_is_off_or_suppressed() {
 }
 
 #[test]
+fn one_fix_pass_cuts_a_blank_run_whose_lines_hold_whitespace() {
+    // Editors leave a tab on blank lines. That line's whitespace fix used to
+    // win the overlap with the blank-lines deletion and keep the run.
+    let source = "extends Node\n\n\nfunc f():\n\tvar x = 1\n\n\n\t\n  \n\tpass\n";
+    let fixed = fixer::apply_fixes(
+        source,
+        &linter::lint_source(source, "a.gd", &default_config()),
+        true,
+    );
+    assert_eq!(
+        fixed,
+        "extends Node\n\n\nfunc f():\n\tvar x = 1\n\n\n\tpass\n"
+    );
+}
+
+#[test]
+fn trailing_semicolon_is_removed_without_leaving_a_blank_line() {
+    let source = "func f():\n\tvar x = 1 ;\n\tvar y = 2; var z = 3\n\tpass\n";
+    let expected = "func f():\n\tvar x = 1\n\tvar y = 2\n\tvar z = 3\n\tpass\n";
+    let config = default_config();
+    let fixed = fixer::apply_fixes(source, &linter::lint_source(source, "a.gd", &config), true);
+    assert_eq!(fixed, expected);
+    assert_eq!(formatter::format_source(source, &config), expected);
+}
+
+#[test]
 fn fmt_leaves_each_rule_alone_when_it_is_off() {
     // Each source breaks one rule that `fmt` applies. The default config
     // rewrites it; with the rule off it must stay as is.

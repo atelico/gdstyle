@@ -661,6 +661,35 @@ pub fn check_one_statement_per_line(
                 continue;
             }
 
+            // A `;` that ends its line separates nothing: delete it, with the
+            // spaces before it. A newline there would leave an empty,
+            // indented line behind.
+            let ends_the_line = tokens
+                .get(idx + 1)
+                .is_none_or(|next| matches!(next.kind, TokenKind::Newline | TokenKind::Eof));
+            if ends_the_line {
+                let space_before = line
+                    .get(..semi_col)
+                    .map_or(0, |before| before.len() - before.trim_end().len());
+                diagnostics.push(
+                    Diagnostic::warning(
+                        "format/one-statement-per-line",
+                        "remove the trailing ';'".to_string(),
+                        token.span,
+                        &file.path,
+                    )
+                    .with_fix(Fix {
+                        replacements: vec![Replacement {
+                            offset: token.span.offset - space_before,
+                            length: space_before + token.span.length,
+                            new_text: String::new(),
+                        }],
+                        is_safe: true,
+                    }),
+                );
+                continue;
+            }
+
             // Replace semicolon and any trailing whitespace with newline + indent.
             let mut replace_len = token.span.length;
             // Consume whitespace between the semicolon and the next token.

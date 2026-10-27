@@ -496,7 +496,9 @@ pub fn apply_scene_renames(
 /// `format/blank-lines` fix, so turning that rule off or suppressing it
 /// keeps them.
 ///
-/// Two phases:
+/// Phases:
+/// 0. **Moot edits.** Drop edits that lie inside a whitespace-only
+///    deletion: deleting the lines makes them pointless.
 /// 1. **Overlap resolution.** Sort the replacements by length ascending so
 ///    narrower spans win over wider ones (a one-token rename always beats
 ///    a whole-line rewrite that happens to cover the same identifier).
@@ -516,9 +518,38 @@ fn apply_replacements(source: &str, replacements: Vec<Replacement>) -> String {
         return source.to_string();
     }
 
+    // Phase 0: a replacement that deletes only whitespace, such as the
+    // excess lines of a blank-line run, makes every edit inside it moot
+    // (stripping the tab from one of those lines). Drop such edits, or the
+    // narrower edit would win the overlap below and keep the lines.
+    let whitespace_deletions: Vec<(usize, usize)> = replacements
+        .iter()
+        .filter(|r| r.length > 0 && r.new_text.is_empty())
+        .filter(|r| {
+            source
+                .get(r.offset..r.offset + r.length)
+                .is_some_and(|deleted| deleted.trim().is_empty())
+        })
+        .map(|r| (r.offset, r.offset + r.length))
+        .collect();
+    let is_inside_a_whitespace_deletion = |r: &Replacement| {
+        let r_end = r.offset + r.length;
+        whitespace_deletions.iter().any(|&(start, end)| {
+            if r.length == 0 {
+                // An insertion at either edge lands outside the deleted text.
+                start < r.offset && r.offset < end
+            } else {
+                start <= r.offset && r_end <= end && (r.offset, r_end) != (start, end)
+            }
+        })
+    };
+
     // Phase 1: pick a maximal set of non-overlapping replacements,
     // preferring narrower spans.
-    let mut by_width: Vec<&Replacement> = replacements.iter().collect();
+    let mut by_width: Vec<&Replacement> = replacements
+        .iter()
+        .filter(|r| !is_inside_a_whitespace_deletion(r))
+        .collect();
     by_width.sort_by_key(|r| r.length);
     let mut accepted: Vec<&Replacement> = Vec::with_capacity(by_width.len());
     for r in by_width {
