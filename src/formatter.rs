@@ -2331,7 +2331,7 @@ mod tests {
         // Each word is 8 columns but 16 bytes. The comment fills exactly 100
         // columns before the last word; measuring bytes wrapped it at 50.
         let word = "é".repeat(8);
-        let comment = format!("# {}", vec![word.as_str(); 12].join(" "));
+        let comment = format!("# {}", [word.as_str(); 12].join(" "));
         let lines = try_break_comment(&comment, 100).expect("long comment wraps");
         assert_eq!(
             lines
