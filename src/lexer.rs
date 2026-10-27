@@ -140,8 +140,10 @@ impl<'a> Lexer<'a> {
             return self.read_string(StringPrefix::NodePath);
         }
 
-        // Numbers.
-        if ch.is_ascii_digit() {
+        // Numbers. Like Godot, `.` followed by a digit starts a float (`.5`).
+        if ch.is_ascii_digit()
+            || (ch == '.' && self.peek_char().is_some_and(|c| c.is_ascii_digit()))
+        {
             return self.read_number();
         }
 
@@ -522,9 +524,9 @@ impl<'a> Lexer<'a> {
             self.advance();
         }
 
-        // Check for float.
-        let mut is_float = false;
-        if !self.is_at_end() && self.current_char() == '.' {
+        // Check for float. A number that starts with `.` already is one.
+        let mut is_float = first == '.';
+        if !is_float && !self.is_at_end() && self.current_char() == '.' {
             // Make sure it's not a range operator (..) or method call.
             if self.peek_char() != Some('.') {
                 is_float = true;
@@ -1069,6 +1071,29 @@ mod tests {
     fn number_with_underscores() {
         let kinds = token_kinds("1_000_000");
         assert_eq!(kinds, vec![TokenKind::Integer(1_000_000)]);
+    }
+
+    #[test]
+    fn float_with_a_leading_dot() {
+        assert_eq!(token_kinds(".5"), vec![TokenKind::Float(0.5)]);
+        assert_eq!(token_kinds(".5e3"), vec![TokenKind::Float(500.0)]);
+        // A dot not followed by a digit is still an operator.
+        assert_eq!(
+            token_kinds("a.b"),
+            vec![
+                TokenKind::Identifier("a".to_string()),
+                TokenKind::Dot,
+                TokenKind::Identifier("b".to_string()),
+            ]
+        );
+        assert_eq!(
+            token_kinds("1..5"),
+            vec![
+                TokenKind::Integer(1),
+                TokenKind::DotDot,
+                TokenKind::Integer(5)
+            ]
+        );
     }
 
     #[test]

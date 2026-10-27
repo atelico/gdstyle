@@ -6776,6 +6776,45 @@ fn issue_33_audio_constants_are_clean_with_toml_threshold() {
 }
 
 #[test]
+fn float_with_a_leading_dot_gets_its_zero() {
+    // `.5` used to lex as `.` and `5`, so neither `check` nor `fmt` saw a
+    // float.
+    let source = "var a = .5\nvar b = Vector2(.25, x.y)\n";
+    let config = default_config();
+    assert_eq!(
+        formatter::format_source(source, &config),
+        "var a = 0.5\nvar b = Vector2(0.25, x.y)\n"
+    );
+    let float_zero_lines: Vec<usize> = linter::lint_source(source, "a.gd", &config)
+        .iter()
+        .filter(|diagnostic| diagnostic.rule == "format/float-literal-zeros")
+        .map(|diagnostic| diagnostic.span.line)
+        .collect();
+    assert_eq!(float_zero_lines, vec![1, 2]);
+}
+
+#[test]
+fn leading_zero_never_joins_the_float_to_what_precedes_it() {
+    // `return.5` and `and.5` are valid GDScript. A bare `0` in front of `.5`
+    // would make `return0` and `and0`, and `fmt` used to pile up zeros on
+    // every pass. Code that is already invalid (`f().5`) is left as written.
+    let source = "func f(a):\n\tif a and.5:\n\t\treturn.5\n\treturn f().5\n";
+    let config = default_config();
+    let formatted = formatter::format_source(source, &config);
+    assert_eq!(
+        formatted,
+        "func f(a):\n\tif a and 0.5:\n\t\treturn.5\n\treturn f().5\n"
+    );
+    assert_eq!(formatter::format_source(&formatted, &config), formatted);
+
+    let fixed = fixer::apply_fixes(source, &linter::lint_source(source, "a.gd", &config), true);
+    assert!(
+        !fixed.contains("return0") && !fixed.contains("and0"),
+        "got:\n{fixed}"
+    );
+}
+
+#[test]
 fn issue_33_default_keeps_ten_thousand_floor_and_covers_floats() {
     // No threshold configured: the original floor of 10_000 applies, now to
     // floats as well.

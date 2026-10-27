@@ -490,34 +490,60 @@ pub fn check_unnecessary_parens(
     }
 }
 
+/// Attach the fix that puts a `0` before the float token at `index` (`.5` to
+/// `0.5`), unless the token directly follows the end of an operand.
+/// `return.5` is valid GDScript, and the zero would join `return` into the
+/// identifier `return0`; after `)`, `]` or a string (`f().5`) the code is
+/// already invalid and is left as written. The diagnostic still reports it;
+/// once a space separates the two, the fix is offered.
+fn with_leading_zero_fix(diagnostic: Diagnostic, tokens: &[Token], index: usize) -> Diagnostic {
+    let token = &tokens[index];
+    if follows_operand(tokens, index) {
+        return diagnostic;
+    }
+    diagnostic.with_fix(Fix {
+        replacements: vec![Replacement {
+            offset: token.span.offset,
+            length: token.span.length,
+            new_text: format!("0{}", token.text),
+        }],
+        is_safe: true,
+    })
+}
+
+/// Whether the token at `index` starts right where the previous token ends,
+/// and that token ends like an operand: a word (identifier, keyword or
+/// number), a closing bracket or a string.
+pub(crate) fn follows_operand(tokens: &[Token], index: usize) -> bool {
+    let Some(token) = tokens.get(index) else {
+        return false;
+    };
+    index
+        .checked_sub(1)
+        .and_then(|previous_index| tokens.get(previous_index))
+        .filter(|previous| previous.span.offset + previous.span.length == token.span.offset)
+        .and_then(|previous| previous.text.chars().next_back())
+        .is_some_and(|c| c.is_alphanumeric() || matches!(c, '_' | ')' | ']' | '}' | '"' | '\''))
+}
+
 /// Check number literal formatting (leading/trailing zeros, lowercase hex).
 pub fn check_number_literals(
     tokens: &[Token],
     file: &ScriptFile,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    for token in tokens {
+    for (index, token) in tokens.iter().enumerate() {
         match &token.kind {
             TokenKind::Float(_) => {
                 let text = &token.text;
                 if text.starts_with('.') {
-                    let fixed = format!("0{}", text);
-                    diagnostics.push(
-                        Diagnostic::warning(
-                            "format/number-literals",
-                            format!("add leading zero: '0{}'", text),
-                            token.span,
-                            &file.path,
-                        )
-                        .with_fix(Fix {
-                            replacements: vec![Replacement {
-                                offset: token.span.offset,
-                                length: token.span.length,
-                                new_text: fixed,
-                            }],
-                            is_safe: true,
-                        }),
+                    let diagnostic = Diagnostic::warning(
+                        "format/number-literals",
+                        format!("add leading zero: '0{}'", text),
+                        token.span,
+                        &file.path,
                     );
+                    diagnostics.push(with_leading_zero_fix(diagnostic, tokens, index));
                 }
                 if text.ends_with('.') {
                     let fixed = format!("{}0", text);
@@ -723,27 +749,17 @@ pub fn check_float_literal_zeros(
     file: &ScriptFile,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    for token in tokens {
+    for (index, token) in tokens.iter().enumerate() {
         if let TokenKind::Float(_) = &token.kind {
             let text = &token.text;
             if text.starts_with('.') {
-                let fixed = format!("0{}", text);
-                diagnostics.push(
-                    Diagnostic::warning(
-                        "format/float-literal-zeros",
-                        format!("use '{}' instead of '{}'", fixed, text),
-                        token.span,
-                        &file.path,
-                    )
-                    .with_fix(Fix {
-                        replacements: vec![Replacement {
-                            offset: token.span.offset,
-                            length: token.span.length,
-                            new_text: fixed,
-                        }],
-                        is_safe: true,
-                    }),
+                let diagnostic = Diagnostic::warning(
+                    "format/float-literal-zeros",
+                    format!("use '0{}' instead of '{}'", text, text),
+                    token.span,
+                    &file.path,
                 );
+                diagnostics.push(with_leading_zero_fix(diagnostic, tokens, index));
             } else if text.ends_with('.') {
                 let fixed = format!("{}0", text);
                 diagnostics.push(
