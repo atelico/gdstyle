@@ -389,7 +389,7 @@ for narrowing to specific rules.
 
 | Directive | Scope | Form |
 |---|---|---|
-| `# gdstyle:ignore` | the **next** code line | standalone (own line) |
+| `# gdstyle:ignore` | the **next** line | standalone (own line) |
 | `# gdstyle:ignore` | the **same** code line | inline (end of a code line) |
 | `# gdstyle:ignore-file` | every diagnostic in the file | anywhere in the file |
 
@@ -402,16 +402,17 @@ with `# gdstyle:ignore`; the same text inside a string or later in another
 comment doesn't count.
 
 `fmt` and `check --fix` honor the same directives: a suppressed line or
-file is not rewritten for that rule. The exceptions are the layout rules
-`format/no-tabs-as-spaces`, `format/trailing-whitespace`,
-`format/blank-lines`, `format/trailing-newline` and
-`format/max-line-length`, and the space `fmt` adds after `##` in doc
-comments. `fmt` applies those to whole lines or files, so a directive
-doesn't stop it; set the rule to `"off"` in the config instead.
+file is not rewritten for that rule. A run of blank lines is suppressed
+from its first line (put the directive on the line above the run), which
+is where `format/blank-lines` reports it. A directive for
+`format/no-tabs-as-spaces` that keeps a line's indentation as it is keeps
+the whole file's indentation as written: converting only the other lines
+would mix tabs and spaces, which Godot rejects. The spacing between class members has no rule, so
+`fmt` always applies it.
 
 ### Per-line suppression
 
-Standalone (applies to the next code line):
+Standalone (applies to the next line):
 
 ```gdscript
 # gdstyle:ignore=naming/variable-name-snake-case

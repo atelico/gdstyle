@@ -3518,6 +3518,93 @@ fn fmt_does_not_reorder_inner_class_members_across_a_warning_ignore_region() {
 }
 
 #[test]
+fn fmt_honors_suppressions_of_layout_rules() {
+    // Each source suppresses one layout rule where it is broken, then breaks
+    // it again where it is not suppressed, which must still be fixed.
+    let long_call = "some_function_name(argument_number_one, argument_number_two, argument_number_three, argument_number_four)";
+    let cases = [
+        // Converting only the other lines would mix tabs and spaces, which
+        // Godot rejects, so the file's indentation stays as written.
+        (
+            "func f():\n    pass  # gdstyle:ignore=format/no-tabs-as-spaces\n    pass\n".to_string(),
+            "func f():\n    pass  # gdstyle:ignore=format/no-tabs-as-spaces\n    pass\n".to_string(),
+        ),
+        (
+            "# gdstyle:ignore=format/trailing-whitespace\nvar b = 2   \nvar c = 3   \n".to_string(),
+            "# gdstyle:ignore=format/trailing-whitespace\nvar b = 2   \nvar c = 3\n".to_string(),
+        ),
+        (
+            "func f():\n\t# gdstyle:ignore=format/blank-lines\n\n\n\n\tvar b = 2\n\n\n\n\tpass\n".to_string(),
+            "func f():\n\t# gdstyle:ignore=format/blank-lines\n\n\n\n\tvar b = 2\n\n\n\tpass\n".to_string(),
+        ),
+        (
+            format!("var a = {long_call}  # gdstyle:ignore=format/max-line-length\nvar b = {long_call}\n"),
+            format!("var a = {long_call}  # gdstyle:ignore=format/max-line-length\nvar b = some_function_name(\n\targument_number_one,\n\targument_number_two,\n\targument_number_three,\n\targument_number_four,\n)\n"),
+        ),
+        (
+            "# gdstyle:ignore=format/comment-spacing\n##keep\n##fix\nvar a = 1\n".to_string(),
+            "# gdstyle:ignore=format/comment-spacing\n##keep\n## fix\nvar a = 1\n".to_string(),
+        ),
+        (
+            "# gdstyle:ignore-file=format/trailing-newline\nvar a = 1\n\n\n".to_string(),
+            "# gdstyle:ignore-file=format/trailing-newline\nvar a = 1\n\n\n".to_string(),
+        ),
+        (
+            "# gdstyle:ignore-file=format/no-tabs-as-spaces\nfunc f():\n    pass\n".to_string(),
+            "# gdstyle:ignore-file=format/no-tabs-as-spaces\nfunc f():\n    pass\n".to_string(),
+        ),
+        // The extra lines start at the first line after the last line of
+        // text, where check reports them, whitespace or not.
+        // (The tab goes: only the ending is suppressed, not the whitespace.)
+        (
+            "var a = 1\n# gdstyle:ignore=format/trailing-newline\n\t\n\n".to_string(),
+            "var a = 1\n# gdstyle:ignore=format/trailing-newline\n\n\n".to_string(),
+        ),
+    ];
+    let config = default_config();
+    for (source, expected) in cases {
+        let formatted = formatter::format_source(&source, &config);
+        assert_eq!(formatted, expected, "source:\n{source}");
+        assert_eq!(formatter::format_source(&formatted, &config), formatted);
+    }
+}
+
+#[test]
+fn an_unrelated_directive_does_not_stop_indentation_fixes() {
+    // Only a suppressed line whose indentation would change keeps the file's
+    // indentation; a bare directive on an unindented line doesn't.
+    let source = "var BadName = 1  # gdstyle:ignore\n\n\nfunc f():\n    pass\n";
+    let expected = "var BadName = 1  # gdstyle:ignore\n\n\nfunc f():\n\tpass\n";
+    let config = default_config();
+    assert_eq!(formatter::format_source(source, &config), expected);
+    let fixed = fixer::apply_fixes(source, &linter::lint_source(source, "a.gd", &config), true);
+    assert_eq!(fixed, expected);
+}
+
+#[test]
+fn fmt_keeps_blank_lines_inside_an_unterminated_string_at_the_end() {
+    // The blank lines are the string's contents, not the file's ending.
+    let source = "var s = \"\"\"abc\n\n\n\n";
+    assert_eq!(formatter::format_source(source, &default_config()), source);
+}
+
+#[test]
+fn fmt_keeps_the_file_ending_when_trailing_newline_is_off() {
+    // Member spacing, the reorder and the blank-line collapse used to trim
+    // blank lines at the end of the file, which is this rule's job.
+    let config = config_with_rules_off(&["format/trailing-newline"]);
+    for source in ["var a = 1\n\n\n", "func f():\n\tpass\n\n\nvar a = 1\n\n\n"] {
+        let formatted = formatter::format_source(source, &config);
+        assert!(formatted.ends_with("\n\n\n"), "got:\n{formatted:?}");
+        assert!(!formatted.ends_with("\n\n\n\n"), "got:\n{formatted:?}");
+    }
+    assert_eq!(
+        formatter::format_source("var a = 1\n\n\n", &default_config()),
+        "var a = 1\n"
+    );
+}
+
+#[test]
 fn fmt_does_not_reorder_members_across_fold_regions() {
     // Issue #52: moving `Inner` below `test_a` carried the `#endregion` with
     // it, so `test_a` ended up inside `#region helpers`.

@@ -189,6 +189,12 @@ impl Suppressions {
         parse_suppression_comments(source, tokens)
     }
 
+    /// True when `rule` is suppressed on `line` (1-based), by a directive
+    /// for that line or for the whole file.
+    pub(crate) fn suppresses_line(&self, line: usize, rule: &str) -> bool {
+        self.suppresses_member(line, line, rule)
+    }
+
     /// True when `rule` is suppressed for a member whose header spans lines
     /// `first..=last` (1-based, inclusive) — that is, a `# gdstyle:ignore-file`
     /// covering the rule, or a per-line `# gdstyle:ignore` that resolves onto

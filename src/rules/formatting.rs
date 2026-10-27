@@ -1,6 +1,7 @@
 use crate::ast::ScriptFile;
 use crate::config::Config;
 use crate::diagnostic::{line_byte_offset, Diagnostic, Fix, Replacement};
+use crate::linter::Suppressions;
 use crate::token::{QuoteStyle, Span, StringLines, StringPrefix, Token, TokenKind};
 
 /// Check that no line exceeds the maximum length.
@@ -180,6 +181,18 @@ pub fn check_indentation_style(
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     let string_line_mask = StringLines::new(tokens, file.lines.len());
+    // Godot rejects a file that indents some lines with tabs and others with
+    // spaces. When a directive keeps one line as it is, converting the rest
+    // would make exactly such a file, so the fixes are withheld.
+    let is_fix_offered =
+        !keeps_an_indent_to_change(file, tokens, &string_line_mask, config.use_tabs);
+    let with_indent_fix = |diagnostic: Diagnostic, fix: Fix| {
+        if is_fix_offered {
+            diagnostic.with_fix(fix)
+        } else {
+            diagnostic
+        }
+    };
     for (i, line) in file.lines.iter().enumerate() {
         let line_num = i + 1;
         if line.is_empty() || string_line_mask.is_interior(i) {
@@ -202,63 +215,98 @@ pub fn check_indentation_style(
         // Mixed indentation is always wrong.
         if has_tabs && has_spaces {
             let new_indent = indent_in_configured_style(&indent, config.use_tabs);
-            diagnostics.push(
+            diagnostics.push(with_indent_fix(
                 Diagnostic::warning(
                     "format/no-tabs-as-spaces",
                     "mixed tabs and spaces in indentation".to_string(),
                     Span::new(line_num, 1, offset, indent_len),
                     &file.path,
-                )
-                .with_fix(Fix {
+                ),
+                Fix {
                     replacements: vec![Replacement {
                         offset,
                         length: indent_len,
                         new_text: new_indent,
                     }],
                     is_safe: true,
-                }),
-            );
+                },
+            ));
             continue;
         }
 
         if config.use_tabs && has_spaces {
             let new_indent = indent_in_configured_style(&indent, config.use_tabs);
-            diagnostics.push(
+            diagnostics.push(with_indent_fix(
                 Diagnostic::warning(
                     "format/no-tabs-as-spaces",
                     "use tabs for indentation, not spaces".to_string(),
                     Span::new(line_num, 1, offset, indent_len),
                     &file.path,
-                )
-                .with_fix(Fix {
+                ),
+                Fix {
                     replacements: vec![Replacement {
                         offset,
                         length: indent_len,
                         new_text: new_indent,
                     }],
                     is_safe: true,
-                }),
-            );
+                },
+            ));
         } else if !config.use_tabs && has_tabs {
             let new_indent = indent_in_configured_style(&indent, config.use_tabs);
-            diagnostics.push(
+            diagnostics.push(with_indent_fix(
                 Diagnostic::warning(
                     "format/no-tabs-as-spaces",
                     "use spaces for indentation, not tabs".to_string(),
                     Span::new(line_num, 1, offset, indent_len),
                     &file.path,
-                )
-                .with_fix(Fix {
+                ),
+                Fix {
                     replacements: vec![Replacement {
                         offset,
                         length: indent_len,
                         new_text: new_indent,
                     }],
                     is_safe: true,
-                }),
-            );
+                },
+            ));
         }
     }
+}
+
+/// Whether `line`'s indentation is one `format/no-tabs-as-spaces` changes:
+/// spaces when the config asks for tabs, tabs when it asks for spaces.
+pub(crate) fn indent_needs_change(line: &str, use_tabs: bool) -> bool {
+    let indent = &line[..line.len() - line.trim_start_matches([' ', '\t']).len()];
+    if use_tabs {
+        indent.contains(' ')
+    } else {
+        indent.contains('\t')
+    }
+}
+
+/// Whether a `# gdstyle:ignore` directive keeps a line of `file` whose
+/// indentation `format/no-tabs-as-spaces` would change. Converting the other
+/// lines would then mix tabs and spaces.
+fn keeps_an_indent_to_change(
+    file: &ScriptFile,
+    tokens: &[Token],
+    string_line_mask: &StringLines,
+    use_tabs: bool,
+) -> bool {
+    if !file
+        .lines
+        .iter()
+        .any(|line| line.contains("gdstyle:ignore"))
+    {
+        return false;
+    }
+    let suppressions = Suppressions::parse(&file.lines.join("\n"), tokens);
+    file.lines.iter().enumerate().any(|(idx, line)| {
+        !string_line_mask.is_interior(idx)
+            && indent_needs_change(line, use_tabs)
+            && suppressions.suppresses_line(idx + 1, "format/no-tabs-as-spaces")
+    })
 }
 
 /// Check that boolean operators use English keywords (and/or/not) instead of &&/||/!.
@@ -2171,6 +2219,17 @@ mod tests {
         let mut diags = Vec::new();
         check_trailing_newline(&file, &mut diags);
         assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn indentation_fixes_are_withheld_when_a_line_is_suppressed() {
+        // Converting only the unsuppressed lines would mix tabs and spaces.
+        let source = "func f():\n    pass  # gdstyle:ignore=format/no-tabs-as-spaces\n    pass\n";
+        let file = make_file(&source.split('\n').collect::<Vec<_>>());
+        let mut diags = Vec::new();
+        check_indentation_style(&tokenize(source), &file, &Config::default(), &mut diags);
+        assert!(!diags.is_empty());
+        assert!(diags.iter().all(|d| d.fix.is_none()), "{diags:?}");
     }
 
     #[test]

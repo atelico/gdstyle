@@ -2,7 +2,7 @@ use crate::ast::ClassMember;
 use crate::config::Config;
 use crate::fixer;
 use crate::lexer::Lexer;
-use crate::linter;
+use crate::linter::{self, Suppressions};
 use crate::parser::Parser;
 use crate::token::{StringLines, Token, TokenKind};
 
@@ -100,14 +100,22 @@ fn format_pass_with(source: &str, config: &Config, spanning_strings: SpanningStr
         result = safe_reorder_inner_classes(&result, spanning_strings);
     }
 
+    // The line passes skip what `# gdstyle:ignore` directives cover. The
+    // directives are read again after each pass that moves lines.
+    let mut suppressions = suppressions_in(&result);
+
     // 2. Normalize indentation, then strip trailing whitespace. Neither pass
     //    adds or removes lines, so one string-line mask serves both.
     let string_line_mask = string_lines(&result, spanning_strings);
     if is_enabled(pass_rule::NO_TABS_AS_SPACES) {
-        result = normalize_indentation(&result, config, &string_line_mask);
+        result = normalize_indentation(&result, config, &string_line_mask, &|line| {
+            suppressions.suppresses_line(line, pass_rule::NO_TABS_AS_SPACES)
+        });
     }
     if is_enabled(pass_rule::TRAILING_WHITESPACE) {
-        result = strip_trailing_whitespace(&result, &string_line_mask);
+        result = strip_trailing_whitespace(&result, &string_line_mask, &|line| {
+            suppressions.suppresses_line(line, pass_rule::TRAILING_WHITESPACE)
+        });
     }
 
     // 3a. Normalize blank lines BETWEEN top-level class members to their
@@ -120,17 +128,26 @@ fn format_pass_with(source: &str, config: &Config, spanning_strings: SpanningStr
     // 3b. Backstop for blank lines INSIDE function bodies and anywhere the
     //     member-aware pass didn't touch: collapse 3+ to 2.
     if is_enabled(pass_rule::BLANK_LINES) {
-        result = collapse_blank_lines(&result, spanning_strings);
+        suppressions = suppressions_in(&result);
+        result = collapse_blank_lines(&result, spanning_strings, &|line| {
+            suppressions.suppresses_line(line, pass_rule::BLANK_LINES)
+        });
     }
+    suppressions = suppressions_in(&result);
 
     // 4. Add a space after `##` in doc comments.
     if is_enabled(pass_rule::COMMENT_SPACING) {
-        result = normalize_doc_comment_spacing(&result);
+        result = normalize_doc_comment_spacing(&result, &|line| {
+            suppressions.suppresses_line(line, pass_rule::COMMENT_SPACING)
+        });
     }
 
-    // 5. Ensure file ends with exactly one \n.
+    // 5. Ensure file ends with exactly one \n. Only the end of the file
+    //    moves, so the directives above still hold.
     if is_enabled(pass_rule::TRAILING_NEWLINE) {
-        result = ensure_trailing_newline(&result);
+        result = ensure_trailing_newline(&result, &|line| {
+            suppressions.suppresses_line(line, pass_rule::TRAILING_NEWLINE)
+        });
     }
 
     // 6. Use lint+fix for the remaining rules, such as quotes, number
@@ -140,10 +157,22 @@ fn format_pass_with(source: &str, config: &Config, spanning_strings: SpanningStr
 
     // 7. Break long lines by wrapping at commas inside delimiters.
     if is_enabled(pass_rule::MAX_LINE_LENGTH) {
-        result = break_long_lines(&result, config, spanning_strings);
+        suppressions = suppressions_in(&result);
+        result = break_long_lines(&result, config, spanning_strings, &|line| {
+            suppressions.suppresses_line(line, pass_rule::MAX_LINE_LENGTH)
+        });
     }
 
     result
+}
+
+/// The `# gdstyle:ignore` directives in `source`. Most files have none, so
+/// the source is lexed for them only when the text appears.
+fn suppressions_in(source: &str) -> Suppressions {
+    if !source.contains("gdstyle:ignore") {
+        return Suppressions::default();
+    }
+    Suppressions::parse(source, &Lexer::new(source).tokenize())
 }
 
 /// Whether a source has a string literal that runs over more than one line:
@@ -184,8 +213,24 @@ fn string_lines(source: &str, spanning_strings: SpanningStrings) -> StringLines 
 }
 
 /// `string_line_mask` must describe `source` line for line.
-fn normalize_indentation(source: &str, config: &Config, string_line_mask: &StringLines) -> String {
+fn normalize_indentation(
+    source: &str,
+    config: &Config,
+    string_line_mask: &StringLines,
+    is_suppressed: &dyn Fn(usize) -> bool,
+) -> String {
     let lines: Vec<&str> = source.split('\n').collect();
+    // Godot rejects a file that indents some lines with tabs and others with
+    // spaces. When a directive keeps a line whose indentation this pass
+    // would change, the whole file keeps its indentation as written.
+    let keeps_an_indent_to_change = lines.iter().enumerate().any(|(idx, line)| {
+        !string_line_mask.is_interior(idx)
+            && crate::rules::formatting::indent_needs_change(line, config.use_tabs)
+            && is_suppressed(idx + 1)
+    });
+    if keeps_an_indent_to_change {
+        return source.to_string();
+    }
     let mut result = Vec::new();
 
     for (idx, line) in lines.iter().enumerate() {
@@ -221,12 +266,16 @@ fn normalize_indentation(source: &str, config: &Config, string_line_mask: &Strin
 }
 
 /// `string_line_mask` must describe `source` line for line.
-fn strip_trailing_whitespace(source: &str, string_line_mask: &StringLines) -> String {
+fn strip_trailing_whitespace(
+    source: &str,
+    string_line_mask: &StringLines,
+    is_suppressed: &dyn Fn(usize) -> bool,
+) -> String {
     source
         .split('\n')
         .enumerate()
         .map(|(idx, line)| {
-            if string_line_mask.ends_inside(idx) {
+            if string_line_mask.ends_inside(idx) || is_suppressed(idx + 1) {
                 line.to_string()
             } else {
                 line.trim_end().to_string()
@@ -686,29 +735,63 @@ fn normalize_member_spacing(source: &str, config: &Config) -> String {
         prev_unit = Some(unit);
     }
 
-    // Drop blank lines at the end of the file. A final newline is kept but
-    // not added: `ensure_trailing_newline` adds it, under its own rule.
-    while result.last().is_some_and(|l| l.is_empty()) {
-        result.pop();
-    }
-    if source.ends_with('\n') {
-        result.push(String::new());
-    }
-
+    keep_file_ending(&mut result, &lines);
     result.join("\n")
 }
 
-/// `spanning_strings` is the [`SpanningStrings`] answer for `source`.
-fn collapse_blank_lines(source: &str, spanning_strings: SpanningStrings) -> String {
+/// End `result` the way `lines` (the source, split on `\n`) ends: drop the
+/// blank lines `result` ends with, then append the source's own trailing
+/// blank lines. How a file ends is `format/trailing-newline`'s business (see
+/// `ensure_trailing_newline`), so a pass that moves lines must not change
+/// it, or turning that rule off or suppressing it would not hold.
+fn keep_file_ending(result: &mut Vec<String>, lines: &[&str]) {
+    while result.last().is_some_and(|line| line.trim().is_empty()) {
+        result.pop();
+    }
+    let trailing_blank_lines = lines
+        .iter()
+        .rev()
+        .take_while(|line| line.trim().is_empty())
+        .count();
+    result.extend(
+        lines[lines.len() - trailing_blank_lines..]
+            .iter()
+            .map(|line| line.to_string()),
+    );
+}
+
+/// `spanning_strings` is the [`SpanningStrings`] answer for `source`. A run
+/// whose first line `is_suppressed` (where `format/blank-lines` reports it)
+/// is kept whole. So is a run at the end of the file: like the rule, this
+/// only cuts runs that code follows; the file's ending belongs to
+/// `ensure_trailing_newline`.
+fn collapse_blank_lines(
+    source: &str,
+    spanning_strings: SpanningStrings,
+    is_suppressed: &dyn Fn(usize) -> bool,
+) -> String {
     let lines: Vec<&str> = source.split('\n').collect();
     let string_line_mask = string_lines(source, spanning_strings);
+    let is_blank =
+        |idx: usize, line: &str| line.trim().is_empty() && !string_line_mask.ends_inside(idx);
+    let ending_start = (0..lines.len())
+        .rev()
+        .take_while(|&idx| is_blank(idx, lines[idx]))
+        .last()
+        .unwrap_or(lines.len());
     let mut result = Vec::new();
     let mut blank_count = 0;
+    let mut is_run_kept = false;
 
     for (idx, line) in lines.iter().enumerate() {
-        if line.trim().is_empty() && !string_line_mask.ends_inside(idx) {
+        if idx >= ending_start {
+            result.push(line.to_string());
+        } else if is_blank(idx, line) {
             blank_count += 1;
-            if blank_count <= 2 {
+            if blank_count == 1 {
+                is_run_kept = is_suppressed(idx + 1);
+            }
+            if blank_count <= 2 || is_run_kept {
                 result.push(String::new());
             }
         } else {
@@ -723,7 +806,7 @@ fn collapse_blank_lines(source: &str, spanning_strings: SpanningStrings) -> Stri
 /// Add a space after `##` in doc comments. Plain `#` comments get theirs from
 /// the `format/comment-spacing` fix in `lint_then_fix`, which leaves `##`
 /// alone.
-fn normalize_doc_comment_spacing(source: &str) -> String {
+fn normalize_doc_comment_spacing(source: &str, is_suppressed: &dyn Fn(usize) -> bool) -> String {
     let tokens = Lexer::new(source).tokenize();
     // Skip empty doc lines, ones already spaced, and `###...` separator lines.
     let insertion_offsets: Vec<usize> = tokens
@@ -732,7 +815,8 @@ fn normalize_doc_comment_spacing(source: &str) -> String {
             TokenKind::DocComment(content)
                 if !content.is_empty()
                     && !content.starts_with(' ')
-                    && !content.starts_with('#') =>
+                    && !content.starts_with('#')
+                    && !is_suppressed(token.span.line) =>
             {
                 Some(token.span.offset + 2)
             }
@@ -747,13 +831,36 @@ fn normalize_doc_comment_spacing(source: &str) -> String {
     result
 }
 
-fn ensure_trailing_newline(source: &str) -> String {
+/// End `source` with exactly one `\n` after its last line of text, dropping
+/// the blank lines after it, the way the `format/trailing-newline` fix does.
+/// The source is left alone when the line where that rule reports the problem
+/// `is_suppressed` (the last line when the newline is missing, the first
+/// extra line otherwise), or when an unterminated string runs to the end of
+/// the file: those blank lines are its contents.
+fn ensure_trailing_newline(source: &str, is_suppressed: &dyn Fn(usize) -> bool) -> String {
     if source.is_empty() {
         return String::new();
     }
-    // Remove trailing newlines, then add exactly one.
-    let trimmed = source.trim_end_matches('\n');
-    format!("{}\n", trimmed)
+    let lines: Vec<&str> = source.split('\n').collect();
+    let last_text_line = lines.iter().rposition(|line| !line.trim().is_empty());
+    let text = last_text_line.map_or(String::new(), |idx| lines[..=idx].join("\n"));
+    let expected = format!("{text}\n");
+    if source == expected {
+        return expected;
+    }
+    let reported_line = match last_text_line {
+        Some(idx) if idx + 1 == lines.len() => lines.len(),
+        Some(idx) => idx + 2,
+        None => 2,
+    };
+    let ends_inside_a_string = Lexer::new(source).tokenize().iter().any(|token| {
+        matches!(&token.kind, TokenKind::Error(message) if message == "unterminated string")
+            && token.span.offset + token.span.length > text.len()
+    });
+    if is_suppressed(reported_line) || ends_inside_a_string {
+        return source.to_string();
+    }
+    expected
 }
 
 fn lint_then_fix(source: &str, config: &Config) -> String {
@@ -772,7 +879,12 @@ fn lint_then_fix(source: &str, config: &Config) -> String {
 /// - Lines where breaking wouldn't reduce the length below the limit
 ///
 /// `spanning_strings` is the [`SpanningStrings`] answer for `source`.
-fn break_long_lines(source: &str, config: &Config, spanning_strings: SpanningStrings) -> String {
+fn break_long_lines(
+    source: &str,
+    config: &Config,
+    spanning_strings: SpanningStrings,
+    is_suppressed: &dyn Fn(usize) -> bool,
+) -> String {
     const TAB_WIDTH: usize = 4;
     let max_len = config.max_line_length;
     let lines: Vec<&str> = source.split('\n').collect();
@@ -784,7 +896,7 @@ fn break_long_lines(source: &str, config: &Config, spanning_strings: SpanningStr
         let line = lines[i];
         let visual_len = visual_line_len(line, TAB_WIDTH);
 
-        if visual_len <= max_len || string_line_mask.is_interior(i) {
+        if visual_len <= max_len || string_line_mask.is_interior(i) || is_suppressed(i + 1) {
             result.push(line.to_string());
             i += 1;
             continue;
@@ -1852,16 +1964,7 @@ fn emit_reordered_blocks(blocks: &[Block], lines: &[&str], attached_starts: &[us
         result.extend(deferred_doc_lines);
     }
 
-    // Drop blank lines at the end of the file. A final newline is kept but
-    // not added: `ensure_trailing_newline` adds it, under its own rule. The
-    // source ended with one when its last `\n`-split piece is empty.
-    while result.last().is_some_and(|l| l.is_empty()) {
-        result.pop();
-    }
-    if lines.last().is_some_and(|line| line.is_empty()) {
-        result.push(String::new());
-    }
-
+    keep_file_ending(&mut result, lines);
     result.join("\n")
 }
 
@@ -2129,8 +2232,11 @@ mod tests {
     #[test]
     fn test_strip_trailing_whitespace() {
         let source = "var x = 5   \nvar y = 10\t\t\n";
-        let result =
-            strip_trailing_whitespace(source, &string_lines(source, SpanningStrings::Absent));
+        let result = strip_trailing_whitespace(
+            source,
+            &string_lines(source, SpanningStrings::Absent),
+            &|_| false,
+        );
         assert_eq!(result, "var x = 5\nvar y = 10\n");
     }
 
@@ -2140,18 +2246,23 @@ mod tests {
         let source = "extends Node\n\nconst T = \"\"\"a   \n\n\n\n    b\n\tc\n\"\"\"\n";
         assert_eq!(SpanningStrings::find(source), SpanningStrings::Present);
         let string_line_mask = string_lines(source, SpanningStrings::Present);
-        assert_eq!(strip_trailing_whitespace(source, &string_line_mask), source);
         assert_eq!(
-            collapse_blank_lines(source, SpanningStrings::Present),
+            strip_trailing_whitespace(source, &string_line_mask, &|_| false),
             source
         );
         assert_eq!(
-            normalize_indentation(source, &Config::default(), &string_line_mask),
+            collapse_blank_lines(source, SpanningStrings::Present, &|_| false),
+            source
+        );
+        assert_eq!(
+            normalize_indentation(source, &Config::default(), &string_line_mask, &|_| false),
             source
         );
         let long = format!("var s = \"\"\"\nf({})\n\"\"\"\n", "a, ".repeat(60));
         assert_eq!(
-            break_long_lines(&long, &Config::default(), SpanningStrings::Present),
+            break_long_lines(&long, &Config::default(), SpanningStrings::Present, &|_| {
+                false
+            }),
             long
         );
     }
@@ -2312,7 +2423,7 @@ mod tests {
     #[test]
     fn test_collapse_blank_lines() {
         let source = "a\n\n\n\n\nb\n";
-        let result = collapse_blank_lines(source, SpanningStrings::Absent);
+        let result = collapse_blank_lines(source, SpanningStrings::Absent, &|_| false);
         assert_eq!(result, "a\n\n\nb\n");
     }
 
@@ -2338,9 +2449,12 @@ mod tests {
 
     #[test]
     fn test_ensure_trailing_newline() {
-        assert_eq!(ensure_trailing_newline("hello"), "hello\n");
-        assert_eq!(ensure_trailing_newline("hello\n"), "hello\n");
-        assert_eq!(ensure_trailing_newline("hello\n\n\n"), "hello\n");
+        assert_eq!(ensure_trailing_newline("hello", &|_| false), "hello\n");
+        assert_eq!(ensure_trailing_newline("hello\n", &|_| false), "hello\n");
+        assert_eq!(
+            ensure_trailing_newline("hello\n\n\n", &|_| false),
+            "hello\n"
+        );
     }
 
     #[test]
