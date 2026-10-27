@@ -596,6 +596,9 @@ impl<'a> Lexer<'a> {
         }
 
         let span = Span::new(self.line, start_col, start_offset, text.len());
+        if let Some(error) = misplaced_underscore_error(&text, span) {
+            return error;
+        }
         let clean = text.replace('_', "");
 
         if is_float {
@@ -639,6 +642,9 @@ impl<'a> Lexer<'a> {
         }
 
         let span = Span::new(self.line, start_col, start_offset, text.len());
+        if let Some(error) = misplaced_underscore_error(&text, span) {
+            return error;
+        }
         let hex_str = text[2..].replace('_', "");
         match i64::from_str_radix(&hex_str, 16) {
             Ok(val) => Token::new(TokenKind::Integer(val), span, text),
@@ -672,6 +678,9 @@ impl<'a> Lexer<'a> {
         }
 
         let span = Span::new(self.line, start_col, start_offset, text.len());
+        if let Some(error) = misplaced_underscore_error(&text, span) {
+            return error;
+        }
         let bin_str = text[2..].replace('_', "");
         match i64::from_str_radix(&bin_str, 2) {
             Ok(val) => Token::new(TokenKind::Integer(val), span, text),
@@ -1143,6 +1152,32 @@ fn is_known_operator_start(ch: char) -> bool {
     )
 }
 
+/// A lex error for a number literal whose `_` digit separators Godot
+/// rejects: two in a row (`1__0`), one right after the decimal point
+/// (`1._5`), or one right after the exponent marker or its sign (`1e_5`).
+/// `None` when the separators are fine.
+fn misplaced_underscore_error(text: &str, span: Span) -> Option<Token> {
+    let chars: Vec<char> = text.chars().collect();
+    let is_misplaced = chars.windows(2).any(|pair| {
+        pair[1] == '_'
+            && (matches!(pair[0], '_' | '.' | '+' | '-') || is_exponent_marker(text, pair[0]))
+    });
+    if !is_misplaced {
+        return None;
+    }
+    Some(Token::new(
+        TokenKind::Error(format!("invalid number: {} (unexpected '_')", text)),
+        span,
+        text.to_string(),
+    ))
+}
+
+/// Whether `c` in the number `text` is an exponent marker: `e` / `E` in a
+/// decimal number. In a hex number they are digits.
+fn is_exponent_marker(text: &str, c: char) -> bool {
+    matches!(c, 'e' | 'E') && !text.starts_with("0x") && !text.starts_with("0X")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1231,6 +1266,13 @@ mod tests {
             ("0x_FF", "0x_FF"),
             ("0b_1", "0b_1"),
             ("1.abs", "1."),
+            // Misplaced `_` separators.
+            ("1._5", "1._5"),
+            ("1.__5", "1.__5"),
+            ("1__0", "1__0"),
+            ("1e_5", "1e_5"),
+            ("1e-_5", "1e-_5"),
+            ("0x1__F", "0x1__F"),
         ] {
             let tokens = tokenize(source);
             assert!(
@@ -1249,6 +1291,9 @@ mod tests {
             ]
         );
         assert_eq!(token_kinds("1.E+5"), vec![TokenKind::Float(1e5)]);
+        // Separators between digits are fine, and `E` is a hex digit.
+        assert_eq!(token_kinds("1_000.5_5"), vec![TokenKind::Float(1000.55)]);
+        assert_eq!(token_kinds("0xE_5"), vec![TokenKind::Integer(0xE5)]);
         assert_eq!(
             token_kinds("1..5"),
             vec![
