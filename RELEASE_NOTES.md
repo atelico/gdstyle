@@ -1,153 +1,198 @@
-## gdstyle 0.4.0
+## gdstyle 0.5.0
 
-A correctness release for the formatter and the parser. `fmt` and
-`check --fix` no longer change the contents of multi-line strings and keep a
-file's line endings. Single-line enums expand without losing code or
-comments, and nested inner classes parse properly. The version is 0.4.0
-rather than 0.3.4 because a few functions in the Rust library changed
-signature (see Upgrading). The CLI, the config file and the Godot plugin
-work as before.
+A release about trust in `fmt`: it now does what the config and the
+`# gdstyle:ignore` comments say, and it fixes every formatter problem reported
+since 0.4.0. Turning a rule off, or suppressing it on a line or a file, now
+stops `fmt` as well as `check`. Member reordering keeps `#region` folds intact,
+`fmt --diff` prints a real unified diff, and a long list of smaller fixes
+covers banners, doc comments, properties, semicolons, number literals and
+non-ASCII text.
 
-Thanks to [@calpeyser](https://github.com/calpeyser) for #42, which started
-this release.
+The version is 0.5.0 rather than 0.4.1 because a few types and functions in
+the Rust library changed (see Upgrading). The CLI, the config file and the
+Godot plugin work as before.
+
+Thanks to [@MikeSchulze](https://github.com/MikeSchulze) for the detailed
+reports behind most of this release, to
+[@calpeyser](https://github.com/calpeyser) for #57 and to
+[@niangaoxiao](https://github.com/niangaoxiao) for #58.
+
+### Highlights
+
+- **`fmt` respects the config.** A rule set to `"off"` used to silence
+  `check` while `fmt` kept applying it: `"format/double-quotes" = "off"`
+  still turned `'x'` into `"x"`, and `"order/class-member-order" = "off"`
+  still reordered members. Every rule `fmt` applies now stops when it is off.
+  ([#53](https://github.com/atelico/gdstyle/issues/53),
+  [#59](https://github.com/atelico/gdstyle/pull/59),
+  [#65](https://github.com/atelico/gdstyle/pull/65))
+
+- **`fmt` honors `# gdstyle:ignore` comments.** A suppressed line or file is
+  no longer rewritten by `fmt`, the same as with `check --fix`:
+
+  ```gdscript
+  var s = 'x'  # gdstyle:ignore=format/double-quotes
+  ```
+
+  0.4.0 turned this into `"x"`. This covers every rule, including the layout
+  rules (indentation, trailing whitespace, blank lines, the final newline and
+  line wrapping). For `format/no-tabs-as-spaces`, a directive that keeps a
+  line's indentation keeps the whole file's: converting only the other lines
+  would mix tabs and spaces, which Godot rejects. Directives are only read
+  from comments now, so the same text inside a string no longer silences
+  rules.
+  ([#68](https://github.com/atelico/gdstyle/pull/68),
+  [#72](https://github.com/atelico/gdstyle/pull/72),
+  [#78](https://github.com/atelico/gdstyle/pull/78))
+
+- **`fmt --diff` is a unified diff.** It compared the files line by line, so
+  one moved member turned the rest of the file into unrelated `-`/`+` pairs,
+  with no `@@` headers. It now prints hunks with three lines of context, and
+  `git apply` and `patch -p1` accept the output.
+  ([#54](https://github.com/atelico/gdstyle/issues/54),
+  [#63](https://github.com/atelico/gdstyle/pull/63))
 
 ### Fixed
 
-- **`fmt` and `check --fix` leave the contents of multi-line strings alone.**
-  The text inside a `"""..."""` literal is data, but the formatter treated it
-  as code. It converted leading spaces to tabs, stripped trailing whitespace,
-  collapsed blank lines and wrapped long lines at commas:
+- **Reordering keeps `#region` folds intact.** Moving an inner class below a
+  function carried the following `#endregion` with it, so members ended up in
+  the wrong region. A reorder that would change which code a `#region`
+  encloses is now skipped, as it already was for `@warning_ignore_start`
+  regions. ([#52](https://github.com/atelico/gdstyle/issues/52),
+  [#62](https://github.com/atelico/gdstyle/pull/62))
 
-  ```gdscript
-  const HELP = """
-  Usage:
-      run [options]   
-  """
-  ```
+- **`####` banners stay in one piece.** A banner line starting with `##` was
+  read as a class doc comment, moved up against `extends` and split from the
+  rest of the banner. Lines made only of `#` are now decorative, and a banner
+  next to a `## Title` stays with it.
+  ([#50](https://github.com/atelico/gdstyle/issues/50),
+  [#58](https://github.com/atelico/gdstyle/pull/58))
 
-  0.3.3 turned the third line into a tab-indented `run [options]` with the
-  trailing spaces removed, so the string's value changed and Godot gave no
-  sign of it. The file now stays as written. The layout rules
-  (`format/trailing-whitespace`, `format/blank-lines`,
-  `format/no-tabs-as-spaces`, `format/max-line-length`) don't report lines
-  inside such a string either. `format/max-line-length` still reports a
-  string's closing line when the code after the closing quote is what makes
-  it too long. This also covers quoted strings with a raw newline or a
-  backslash continuation, and a string line starting with `##`, `#` or
-  `extends`, which other passes used to mistake for code.
-  ([#42](https://github.com/atelico/gdstyle/pull/42),
-  [#43](https://github.com/atelico/gdstyle/pull/43))
+- **Doc comments on bodyless `@abstract func` stay attached.** The second of
+  two consecutive bodyless functions lost its doc comment, which `fmt` then
+  separated from it with two blank lines.
+  ([#47](https://github.com/atelico/gdstyle/issues/47),
+  [#60](https://github.com/atelico/gdstyle/pull/60))
 
-- **Line endings are kept.** `fmt` converted CRLF files to LF. Since Godot
-  keeps a `\r` inside a string as part of its value, that also changed every
-  multi-line string in the file. `fmt` and `check --fix` now keep the style
-  that most of the file's line breaks use, and a string keeps its own line
-  endings even when they differ from the rest of the file. A lone `\r` is no
-  longer treated as a line break, which used to split comments into code.
-  **CRLF files that were already formatted are no longer reported by
-  `fmt --check`.** ([#43](https://github.com/atelico/gdstyle/pull/43))
+- **The class doc moves below annotated headers.** With `@abstract extends
+  RefCounted`, `@tool class_name Foo` or a standalone `@tool` line, the class
+  doc comment stayed above the header. The header is now read from the
+  parser, so annotations of any form, including `@icon("res://a(1).svg")`,
+  are handled. ([#48](https://github.com/atelico/gdstyle/issues/48),
+  [#61](https://github.com/atelico/gdstyle/pull/61))
 
-- **Single-line enums expand safely.** `format/enum-one-per-line` worked on
-  raw text, so a brace in a trailing comment broke the code:
+- **`&&`, `||` and `!` no longer join neighbouring names.** `a&&b||!c` became
+  `aandbornot c`, which Godot rejects. It now becomes `a and b or not c`.
+  ([#57](https://github.com/atelico/gdstyle/pull/57))
 
-  ```gdscript
-  enum State {IDLE, RUN}  # see {docs}
-  ```
+- **Property accessors are parsed correctly.** The `set` / `get` block of a
+  `static var`, or of a `var` with a comment after its `:`, was read as
+  script-level code, so `fmt` inserted a blank line inside the getter.
+  ([#66](https://github.com/atelico/gdstyle/pull/66),
+  [#67](https://github.com/atelico/gdstyle/pull/67))
 
-  0.3.3 produced:
+- **No crash on non-ASCII text in long conditions.** Wrapping a long
+  `if` / `elif` / `while` condition containing text such as `"é"` panicked or
+  dropped characters. ([#70](https://github.com/atelico/gdstyle/pull/70))
 
-  ```gdscript
-  enum State {
-  	IDLE,
-  	RUN}  # see {docs,
-  }
-  ```
+- **Accented text is measured in characters.** Long comments with accented
+  words wrapped well before the line limit, and the columns reported by
+  `format/trailing-whitespace` and `format/trailing-newline` pointed past the
+  spot. ([#73](https://github.com/atelico/gdstyle/pull/73))
 
-  0.4.0 produces:
+- **Blank lines follow their own rules.** Applying any fix collapsed every run
+  of blank lines, even with `format/blank-lines` off or suppressed, and the
+  formatter trimmed blank lines at the end of a file even with
+  `format/trailing-newline` off. Both now leave them to their rule.
+  ([#71](https://github.com/atelico/gdstyle/pull/71),
+  [#78](https://github.com/atelico/gdstyle/pull/78))
 
-  ```gdscript
-  enum State {
-  	IDLE,
-  	RUN,
-  }  # see {docs}
-  ```
+- **Trailing semicolons are removed cleanly.** `x = 1;` left an empty,
+  indented line behind, and `x = 1; # note` moved the comment onto a line of
+  its own. Now they become `x = 1` and `x = 1 # note`.
+  ([#71](https://github.com/atelico/gdstyle/pull/71),
+  [#77](https://github.com/atelico/gdstyle/pull/77))
 
-  The fix now splits only at top-level commas, so a comma inside a string or
-  a call (`S = "x, y"`, `T = max(1, 2)`) no longer splits a member in two. It
-  also keeps a leading annotation and a trailing comment, and indents the
-  members in the project's indentation style. It skips an enum with an empty
-  member (`{A,, B}`) or a `# gdstyle:ignore` directive on its line. The rule
-  now covers enums in inner classes too.
-  ([#44](https://github.com/atelico/gdstyle/pull/44))
+- **Floats that start with a dot are recognised.** `.5` was read as `.`
+  followed by `5`, so the float-zero rules never saw it. It now becomes `0.5`,
+  also after a keyword (`return.5` becomes `return 0.5`) without joining the
+  two into one name. ([#69](https://github.com/atelico/gdstyle/pull/69),
+  [#75](https://github.com/atelico/gdstyle/pull/75))
 
-- **`fmt` settles on consecutive commas.** On invalid input such as
-  `["arrays",,,,]`, every `fmt` run changed the file again, because two
-  spacing rules disagreed about the space before the second comma.
-  ([#44](https://github.com/atelico/gdstyle/pull/44))
+- **Number literals Godot rejects are reported.** `1.5.5`, `1.5.abs()`,
+  `1.abs()`, `1e5.5`, `0x1F.5`, `0x_FF`, `1__0` and `1._5` are now
+  `syntax/lex-error` errors, matching Godot 4. Before, `check` was silent and
+  `fmt` could make things worse (`1.abs()` became `1.0abs()`).
+  ([#76](https://github.com/atelico/gdstyle/pull/76))
 
-- **Nested inner classes parse correctly.** A class inside an inner class was
-  misread: its members counted as the parent's, and the parent's remaining
-  members moved to the script level. That caused false
-  `order/class-member-order` warnings:
-
-  ```gdscript
-  class Outer:
-  	var speed = 1
-
-  	class Inner:
-  		const LIMIT = 3
-  ```
-
-  0.3.3 warned that `LIMIT` should come before `speed`, although they belong
-  to different classes. ([#45](https://github.com/atelico/gdstyle/pull/45))
-
-- **Inner classes with a dotted or path base parse correctly.** In
-  `class Stub extends "res://base.gd":` or `class A extends Node2D.Foo:` the
-  whole body was read as script-level code. `check` reported false ordering
-  warnings, and `fmt` added two blank lines under the class header.
-  ([#45](https://github.com/atelico/gdstyle/pull/45))
-
-- **Smaller fixes.** `fmt --diff` now shows line-ending changes (as `^M`)
-  instead of printing them as unchanged lines. `fmt --check` reported the
-  number of files checked as the number to reformat. `format/trailing-comma`
-  added a comma after a closing `"""` followed by `}` or `]`.
-  ([#43](https://github.com/atelico/gdstyle/pull/43))
+- **One warning per problem.** A missing float zero (`5.`) was reported by
+  both `format/number-literals` and `format/float-literal-zeros`, and `0XAB`
+  drew two `format/number-literals` warnings.
+  ([#79](https://github.com/atelico/gdstyle/pull/79))
 
 ### Changed
 
-- **`quality/max-inner-classes` counts nested classes.** The limit is per
-  file, as the README says, but the count used to depend on which nested
-  classes the parser pushed to the top level. Files with nested classes may
-  report a higher count, or a new warning.
-  ([#45](https://github.com/atelico/gdstyle/pull/45))
+- **Properties with `set` / `get` blocks are set apart.** A variable with an
+  indented accessor block now gets one blank line on each side, like a small
+  function, instead of being packed against its neighbours.
+  ([#49](https://github.com/atelico/gdstyle/issues/49),
+  [#64](https://github.com/atelico/gdstyle/pull/64))
+
+- **`format/trailing-newline` reports blank lines at the end of a file.** It
+  only reported a missing final newline, so `check --fix` left trailing blank
+  lines that `fmt` removed. It now reports and removes them too.
+  ([#74](https://github.com/atelico/gdstyle/pull/74))
+
+- **`format/number-literals` covers hex and binary literals only.** Missing
+  float zeros belong to `format/float-literal-zeros`, so turning that rule off
+  now silences them. Uppercase binary prefixes (`0B11`) are now reported.
+  ([#79](https://github.com/atelico/gdstyle/pull/79))
+
+- **A directive must start its comment.** `# gdstyle:ignore` placed after
+  other comment text (`#1 note  # gdstyle:ignore=...`) no longer applies; put
+  it on its own line above instead.
+  ([#72](https://github.com/atelico/gdstyle/pull/72))
+
+- **Faster.** On a 3,300-file project, `fmt --check` takes 22% less time than
+  in 0.4.0 and `check` uses 17% less CPU, from fewer lexing passes and a
+  cheaper directive scan.
+  ([#67](https://github.com/atelico/gdstyle/pull/67),
+  [#68](https://github.com/atelico/gdstyle/pull/68),
+  [#72](https://github.com/atelico/gdstyle/pull/72))
 
 ### Changelog
 
-- Fixed: `fmt` and `check --fix` no longer change the contents of multi-line
-  strings, and layout rules skip them (#42, #43).
-- Fixed: `fmt` and `check --fix` keep a file's line endings, and strings keep
-  their own (#43).
-- Fixed: `format/enum-one-per-line` keeps comments, annotations and commas
-  inside members, and covers inner classes (#44).
-- Fixed: `fmt` settles on consecutive commas (#44).
-- Fixed: nested inner classes and dotted or path `extends` parse correctly
-  (#45).
-- Changed: `quality/max-inner-classes` counts nested classes (#45).
-- Library: rule functions in `rules::formatting` take the token list (#42,
-  #43, #44).
+- Fixed: `fmt` honors rules set to `"off"` and `# gdstyle:ignore` comments,
+  for every rule (#53, #59, #65, #68, #72, #78).
+- Fixed: `fmt --diff` prints a unified diff that `git apply` accepts (#54,
+  #63).
+- Fixed: reordering keeps `#region` folds intact (#52, #62).
+- Fixed: `####` banners, doc comments on bodyless `@abstract func` and class
+  docs above annotated headers are formatted correctly (#47, #48, #50, #58,
+  #60, #61).
+- Fixed: boolean operators, property accessors, non-ASCII text, blank lines,
+  trailing semicolons and leading-dot floats (#57, #66, #67, #69, #70, #71,
+  #73, #75, #77).
+- Fixed: number literals Godot rejects are reported as errors (#76).
+- Changed: properties with `set` / `get` blocks get a blank line on each side
+  (#49, #64).
+- Changed: `format/trailing-newline` also reports trailing blank lines (#74),
+  and `format/number-literals` covers hex and binary only (#79).
+- Library: `ClassMember::Variable` / `StaticVariable` gain
+  `has_accessor_block`, and `check_class_member_order` takes the token list
+  (#64, #66, #72).
 
 ### Upgrading
 
 No configuration changes are required. Some files will be reformatted once:
-enums that now expand inside inner classes, and inner classes that were
-misparsed. Files with multi-line strings that an earlier `fmt` already
-changed are not restored, so check those strings if they matter.
+properties with accessor blocks get blank lines around them, `.5` becomes
+`0.5`, trailing semicolons are removed, and trailing blank lines are trimmed by
+`check --fix` too. If you relied on `fmt` applying a rule you had turned off or
+suppressed, it no longer does. Files with number literals Godot rejects now
+fail `check` with `syntax/lex-error`; Godot doesn't run them either.
 
-If you use gdstyle as a Rust library, these functions in
-`gdstyle::rules::formatting` now take `tokens: &[Token]` as their first
-argument: `check_trailing_whitespace`, `check_blank_lines`,
-`check_max_line_length` and `check_indentation_style`.
-`check_enum_one_per_line` also takes `tokens` first, plus `config: &Config`
-after `file`. The new `token::StringLines` marks lines inside multi-line
-strings, and the new `linter::restore_line_endings` reapplies a file's line
-endings after formatting.
+If you use gdstyle as a Rust library: `ClassMember::Variable` and
+`ClassMember::StaticVariable` have a new `has_accessor_block: bool` field, so
+code that builds them or matches them without `..` needs updating, and
+`rules::ordering::check_class_member_order` now takes `tokens: &[Token]` after
+`file`.

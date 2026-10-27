@@ -4,6 +4,28 @@ A short summary of every gdstyle release, newest first. The full notes for
 each version are on its
 [GitHub release](https://github.com/atelico/gdstyle/releases).
 
+## 0.5.0 (2026-10-26)
+
+- Fixed: `fmt` honors rules set to `"off"` and `# gdstyle:ignore` comments,
+  for every rule (#53, #59, #65, #68, #72, #78).
+- Fixed: `fmt --diff` prints a unified diff that `git apply` accepts (#54,
+  #63).
+- Fixed: reordering keeps `#region` folds intact (#52, #62).
+- Fixed: `####` banners, doc comments on bodyless `@abstract func` and class
+  docs above annotated headers are formatted correctly (#47, #48, #50, #58,
+  #60, #61).
+- Fixed: boolean operators, property accessors, non-ASCII text, blank lines,
+  trailing semicolons and leading-dot floats (#57, #66, #67, #69, #70, #71,
+  #73, #75, #77).
+- Fixed: number literals Godot rejects are reported as errors (#76).
+- Changed: properties with `set` / `get` blocks get a blank line on each side
+  (#49, #64).
+- Changed: `format/trailing-newline` also reports trailing blank lines (#74),
+  and `format/number-literals` covers hex and binary only (#79).
+- Library: `ClassMember::Variable` / `StaticVariable` gain
+  `has_accessor_block`, and `check_class_member_order` takes the token list
+  (#64, #66, #72).
+
 ## 0.4.0 (2026-10-17)
 
 - Fixed: `fmt` and `check --fix` no longer change the contents of multi-line

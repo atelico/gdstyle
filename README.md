@@ -142,14 +142,14 @@ gdstyle ships with 57 rules organized into five categories. Most rules are enabl
 |------|-------------|---------|
 | `format/max-line-length` | Lines must not exceed the configured max length (default: 100) | fmt |
 | `format/trailing-whitespace` | No trailing whitespace on any line | safe |
-| `format/trailing-newline` | Files must end with a newline character | safe |
+| `format/trailing-newline` | Files must end with exactly one newline (no blank lines after the last line of code) | safe |
 | `format/no-tabs-as-spaces` | Indentation must use tabs (configurable to spaces) | safe |
 | `format/boolean-operators` | Use `and`/`or`/`not` instead of `&&`/`\|\|`/`!` | safe |
 | `format/double-quotes` | Prefer double quotes for strings | safe |
 | `format/comment-spacing` | Comments must have a space after `#` | safe |
 | `format/no-unnecessary-parens` | No unnecessary parentheses in `if`/`while`/`elif` conditions | safe |
 | `format/number-literals` | Hex and binary literals must be lowercase (`0xff`, not `0xFF`; `0b1`, not `0B1`) | safe |
-| `format/one-statement-per-line` | One statement per line (no semicolons to separate statements). Match arms and inline callable bodies are exempt, since their statements are not peers of the enclosing line | safe |
+| `format/one-statement-per-line` | One statement per line (no semicolons to separate statements); a trailing `;` is removed. Match arms and inline callable bodies are exempt, since their statements are not peers of the enclosing line | safe |
 | `format/blank-lines` | Collapse 3+ blank lines to 2 | safe |
 | `format/trailing-comma` | Trailing comma on last item of multi-line collections whose closing bracket starts its own line | safe |
 | `format/operator-spacing` | One space around binary operators | safe |
@@ -249,7 +249,7 @@ gdstyle fmt --check
 gdstyle fmt --diff
 ```
 
-The formatter normalizes indentation, trailing whitespace, blank lines (including the spacing between class members), boolean operators (`&&`/`||`/`!` to `and`/`or`/`not`), string quotes, comment spacing, colon and comma spacing, float and hex literals, trailing newlines, and single-line enums (expanded to multi-line). It reorders class members to match the canonical style guide order, and wraps long lines at commas inside parentheses, brackets, and braces. Running it twice produces the same output.
+The formatter normalizes indentation, trailing whitespace, blank lines (including the spacing between class members), boolean operators (`&&`/`||`/`!` to `and`/`or`/`not`), string quotes, comment spacing, colon and comma spacing, float and hex literals, trailing newlines, and single-line enums (expanded to multi-line). It reorders class members to match the canonical style guide order, and wraps long lines at commas inside parentheses, brackets, and braces. Running it twice produces the same output. A rule set to `"off"` in the config, or suppressed with a `# gdstyle:ignore` comment, is not applied (see [Suppressing diagnostics](#suppressing-diagnostics)).
 
 Consecutive variables sit together with no blank line between them, except a property with an indented `set` / `get` block, which gets one blank line on each side so it reads like a small function.
 
@@ -580,7 +580,7 @@ gdstyle [COMMAND] [OPTIONS] [PATHS]...
 | Option | Description |
 |--------|-------------|
 | `--check` | Dry-run: exit 1 if any file would change |
-| `--diff` | Print a diff of what would change |
+| `--diff` | Print a unified diff of what would change (applies with `git apply`) |
 | `-c, --config <PATH>` | Path to configuration file |
 | `--no-color` | Disable colored output |
 
@@ -639,7 +639,7 @@ Add the following to your project's `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/atelico/gdstyle
-    rev: v0.4.0   # pin to a released tag; bump with `pre-commit autoupdate`
+    rev: v0.5.0   # pin to a released tag; bump with `pre-commit autoupdate`
     hooks:
       - id: gdstyle          # lint (fails the commit on diagnostics)
       - id: gdstyle-fmt      # format in place
