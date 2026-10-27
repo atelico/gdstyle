@@ -676,15 +676,32 @@ pub fn check_one_statement_per_line(
                 )
             });
             if ends_the_line {
-                let space_before = line
-                    .get(..semi_col)
-                    .map_or(0, |before| before.len() - before.trim_end().len());
-                // A comment right after the `;` keeps one space from the code.
-                let comment_touches = next.is_some_and(|next| {
+                let before = line.get(..semi_col).unwrap_or("");
+                let semi_end = token.span.offset + token.span.length;
+                let next_comment = next.filter(|next| {
                     matches!(next.kind, TokenKind::Comment(_) | TokenKind::DocComment(_))
-                        && next.span.offset == token.span.offset + token.span.length
                 });
-                let new_text = if comment_touches { " " } else { "" };
+                let gap_after = next_comment.map_or(0, |comment| comment.span.offset - semi_end);
+                let (offset, length, new_text) = if before.trim().is_empty() {
+                    // The `;` starts its line (`; # c`, left by splitting
+                    // `a; ; # c`): keep the indentation and let the comment
+                    // take the `;`'s place.
+                    (token.span.offset, token.span.length + gap_after, "")
+                } else {
+                    let space_before = before.len() - before.trim_end().len();
+                    // A comment right after the `;` keeps one space from the
+                    // code.
+                    let new_text = if next_comment.is_some() && gap_after == 0 {
+                        " "
+                    } else {
+                        ""
+                    };
+                    (
+                        token.span.offset - space_before,
+                        space_before + token.span.length,
+                        new_text,
+                    )
+                };
                 diagnostics.push(
                     Diagnostic::warning(
                         "format/one-statement-per-line",
@@ -694,8 +711,8 @@ pub fn check_one_statement_per_line(
                     )
                     .with_fix(Fix {
                         replacements: vec![Replacement {
-                            offset: token.span.offset - space_before,
-                            length: space_before + token.span.length,
+                            offset,
+                            length,
                             new_text: new_text.to_string(),
                         }],
                         is_safe: true,

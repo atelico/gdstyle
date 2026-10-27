@@ -3179,6 +3179,19 @@ fn trailing_semicolon_before_a_comment_keeps_the_comment_inline() {
 }
 
 #[test]
+fn an_empty_statement_before_a_comment_keeps_the_indentation() {
+    // `a; ; # c` splits at the first `;`, leaving `; # c` on a line of its
+    // own. Removing that `;` used to delete the indentation with it.
+    let source = "func f():\n\tvar b = 1; ; # c\n\tpass\n";
+    let expected = "func f():\n\tvar b = 1\n\t# c\n\tpass\n";
+    let config = default_config();
+    let fix =
+        |text: &str| fixer::apply_fixes(text, &linter::lint_source(text, "a.gd", &config), true);
+    assert_eq!(fix(&fix(source)), expected);
+    assert_eq!(formatter::format_source(source, &config), expected);
+}
+
+#[test]
 fn fmt_leaves_each_rule_alone_when_it_is_off() {
     // Each source breaks one rule that `fmt` applies. The default config
     // rewrites it; with the rule off it must stay as is.
