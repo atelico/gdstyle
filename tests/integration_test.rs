@@ -6798,20 +6798,16 @@ fn leading_zero_never_joins_the_float_to_what_precedes_it() {
     // `return.5` and `and.5` are valid GDScript. A bare `0` in front of `.5`
     // would make `return0` and `and0`, and `fmt` used to pile up zeros on
     // every pass. Code that is already invalid (`f().5`) is left as written.
-    let source = "func f(a):\n\tif a and.5:\n\t\treturn.5\n\treturn f().5\n";
+    let source = "func f(a):\n\tif a and.5:\n\t\treturn.5\n\tvar b = 1 if a else.25\n\treturn [f().5, [1][0].5, \"s\".5]\n";
     let config = default_config();
     let formatted = formatter::format_source(source, &config);
-    assert_eq!(
-        formatted,
-        "func f(a):\n\tif a and 0.5:\n\t\treturn.5\n\treturn f().5\n"
-    );
+    assert_eq!(formatted, source.replace("and.5", "and 0.5"));
     assert_eq!(formatter::format_source(&formatted, &config), formatted);
 
+    // One `check --fix` pass: operator-spacing separates `and` first; every
+    // other float stays as written.
     let fixed = fixer::apply_fixes(source, &linter::lint_source(source, "a.gd", &config), true);
-    assert!(
-        !fixed.contains("return0") && !fixed.contains("and0"),
-        "got:\n{fixed}"
-    );
+    assert_eq!(fixed, source.replace("and.5", "and .5"));
 }
 
 #[test]
