@@ -3113,31 +3113,6 @@ fn fmt_honors_suppressions_of_token_rules() {
 }
 
 #[test]
-fn a_missing_float_zero_is_reported_once() {
-    // format/number-literals used to report it too, so each `5.` drew two
-    // warnings and turning format/float-literal-zeros off didn't stop them.
-    let source = "var a = 5.\nvar b = .5\nvar c = 0xFF\n";
-    let rules_on = |config: &Config| -> Vec<(usize, String)> {
-        linter::lint_source(source, "a.gd", config)
-            .into_iter()
-            .map(|d| (d.span.line, d.rule))
-            .collect()
-    };
-    assert_eq!(
-        rules_on(&default_config()),
-        vec![
-            (1, "format/float-literal-zeros".to_string()),
-            (2, "format/float-literal-zeros".to_string()),
-            (3, "format/number-literals".to_string()),
-        ]
-    );
-    assert_eq!(
-        rules_on(&config_with_rules_off(&["format/float-literal-zeros"])),
-        vec![(3, "format/number-literals".to_string())]
-    );
-}
-
-#[test]
 fn fmt_leaves_each_rule_alone_when_it_is_off() {
     // Each source breaks one rule that `fmt` applies. The default config
     // rewrites it; with the rule off it must stay as is.
@@ -6793,6 +6768,31 @@ fn issue_33_audio_constants_are_clean_with_toml_threshold() {
             .all(|d| d.rule != "format/large-number-underscores"),
         "got {:?}",
         diagnostics
+    );
+}
+
+#[test]
+fn a_missing_float_zero_is_reported_once() {
+    // format/number-literals used to report it too, so each `5.` drew two
+    // warnings and turning format/float-literal-zeros off didn't stop them.
+    let source = "var a = 5.\nvar b = .5\nvar c = 0xFF\n";
+    let rules_on = |config: &Config| -> Vec<(usize, String)> {
+        linter::lint_source(source, "a.gd", config)
+            .into_iter()
+            .map(|d| (d.span.line, d.rule))
+            .collect()
+    };
+    assert_eq!(
+        rules_on(&default_config()),
+        vec![
+            (1, "format/float-literal-zeros".to_string()),
+            (2, "format/float-literal-zeros".to_string()),
+            (3, "format/number-literals".to_string()),
+        ]
+    );
+    assert_eq!(
+        rules_on(&config_with_rules_off(&["format/float-literal-zeros"])),
+        vec![(3, "format/number-literals".to_string())]
     );
 }
 
