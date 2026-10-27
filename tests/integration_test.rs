@@ -3082,8 +3082,8 @@ fn fmt_honors_suppressions_of_token_rules() {
             "var s = 'x'  # gdstyle:ignore=format/double-quotes\nvar t = \"y\"\n",
         ),
         (
-            "var f = 5.  # gdstyle:ignore=format/float-literal-zeros,format/number-literals\nvar g = 6.\n",
-            "var f = 5.  # gdstyle:ignore=format/float-literal-zeros,format/number-literals\nvar g = 6.0\n",
+            "var f = 5.  # gdstyle:ignore=format/float-literal-zeros\nvar g = 6.\n",
+            "var f = 5.  # gdstyle:ignore=format/float-literal-zeros\nvar g = 6.0\n",
         ),
         (
             "var h = 0xFF  # gdstyle:ignore=format/number-literals\nvar i = 0xAA\n",
@@ -3113,18 +3113,39 @@ fn fmt_honors_suppressions_of_token_rules() {
 }
 
 #[test]
+fn a_missing_float_zero_is_reported_once() {
+    // format/number-literals used to report it too, so each `5.` drew two
+    // warnings and turning format/float-literal-zeros off didn't stop them.
+    let source = "var a = 5.\nvar b = .5\nvar c = 0xFF\n";
+    let rules_on = |config: &Config| -> Vec<(usize, String)> {
+        linter::lint_source(source, "a.gd", config)
+            .into_iter()
+            .map(|d| (d.span.line, d.rule))
+            .collect()
+    };
+    assert_eq!(
+        rules_on(&default_config()),
+        vec![
+            (1, "format/float-literal-zeros".to_string()),
+            (2, "format/float-literal-zeros".to_string()),
+            (3, "format/number-literals".to_string()),
+        ]
+    );
+    assert_eq!(
+        rules_on(&config_with_rules_off(&["format/float-literal-zeros"])),
+        vec![(3, "format/number-literals".to_string())]
+    );
+}
+
+#[test]
 fn fmt_leaves_each_rule_alone_when_it_is_off() {
     // Each source breaks one rule that `fmt` applies. The default config
     // rewrites it; with the rule off it must stay as is.
-    // Missing float zeros are reported by two rules, so both go off.
     let cases: [(&[&str], &str); 10] = [
         (&["format/boolean-operators"], "var a = true && false\n"),
         (&["format/double-quotes"], "var s = 'x'\n"),
         (&["format/comment-spacing"], "#1 note\nvar a = 1\n"),
-        (
-            &["format/float-literal-zeros", "format/number-literals"],
-            "var f = 5.\n",
-        ),
+        (&["format/float-literal-zeros"], "var f = 5.\n"),
         (&["format/number-literals"], "var h = 0xFF\n"),
         (&["format/trailing-whitespace"], "var a = 1   \n"),
         (&["format/no-tabs-as-spaces"], "func f() -> void:\n    pass\n"),

@@ -526,31 +526,47 @@ pub(crate) fn follows_operand(tokens: &[Token], index: usize) -> bool {
         .is_some_and(|c| c.is_alphanumeric() || matches!(c, '_' | ')' | ']' | '}' | '"' | '\''))
 }
 
-/// Check number literal formatting (leading/trailing zeros, lowercase hex).
+/// Check hex literals: lowercase digits and a lowercase `0x` prefix. Missing
+/// float zeros are `format/float-literal-zeros`'s, so they are not reported
+/// twice.
 pub fn check_number_literals(
     tokens: &[Token],
     file: &ScriptFile,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    for (index, token) in tokens.iter().enumerate() {
-        match &token.kind {
-            TokenKind::Float(_) => {
-                let text = &token.text;
-                if text.starts_with('.') {
-                    let diagnostic = Diagnostic::warning(
-                        "format/number-literals",
-                        format!("add leading zero: '0{}'", text),
-                        token.span,
-                        &file.path,
-                    );
-                    diagnostics.push(with_leading_zero_fix(diagnostic, tokens, index));
-                }
-                if text.ends_with('.') {
-                    let fixed = format!("{}0", text);
+    for token in tokens {
+        if let TokenKind::Integer(_) = &token.kind {
+            let text = &token.text;
+            if text.starts_with("0x") || text.starts_with("0X") {
+                let hex_part = &text[2..];
+                if hex_part.chars().any(|c| c.is_ascii_uppercase() && c != '_') {
+                    let fixed = format!("0x{}", hex_part.to_lowercase());
                     diagnostics.push(
                         Diagnostic::warning(
                             "format/number-literals",
-                            format!("add trailing zero: '{}0'", text),
+                            format!(
+                                "use lowercase hex digits: '{}'",
+                                text[..2].to_lowercase() + &hex_part.to_lowercase()
+                            ),
+                            token.span,
+                            &file.path,
+                        )
+                        .with_fix(Fix {
+                            replacements: vec![Replacement {
+                                offset: token.span.offset,
+                                length: token.span.length,
+                                new_text: fixed,
+                            }],
+                            is_safe: true,
+                        }),
+                    );
+                }
+                if let Some(suffix) = text.strip_prefix("0X") {
+                    let fixed = format!("0x{}", suffix.to_lowercase());
+                    diagnostics.push(
+                        Diagnostic::warning(
+                            "format/number-literals",
+                            "use lowercase '0x' prefix for hex numbers".to_string(),
                             token.span,
                             &file.path,
                         )
@@ -565,54 +581,6 @@ pub fn check_number_literals(
                     );
                 }
             }
-            TokenKind::Integer(_) => {
-                let text = &token.text;
-                if text.starts_with("0x") || text.starts_with("0X") {
-                    let hex_part = &text[2..];
-                    if hex_part.chars().any(|c| c.is_ascii_uppercase() && c != '_') {
-                        let fixed = format!("0x{}", hex_part.to_lowercase());
-                        diagnostics.push(
-                            Diagnostic::warning(
-                                "format/number-literals",
-                                format!(
-                                    "use lowercase hex digits: '{}'",
-                                    text[..2].to_lowercase() + &hex_part.to_lowercase()
-                                ),
-                                token.span,
-                                &file.path,
-                            )
-                            .with_fix(Fix {
-                                replacements: vec![Replacement {
-                                    offset: token.span.offset,
-                                    length: token.span.length,
-                                    new_text: fixed,
-                                }],
-                                is_safe: true,
-                            }),
-                        );
-                    }
-                    if let Some(suffix) = text.strip_prefix("0X") {
-                        let fixed = format!("0x{}", suffix.to_lowercase());
-                        diagnostics.push(
-                            Diagnostic::warning(
-                                "format/number-literals",
-                                "use lowercase '0x' prefix for hex numbers".to_string(),
-                                token.span,
-                                &file.path,
-                            )
-                            .with_fix(Fix {
-                                replacements: vec![Replacement {
-                                    offset: token.span.offset,
-                                    length: token.span.length,
-                                    new_text: fixed,
-                                }],
-                                is_safe: true,
-                            }),
-                        );
-                    }
-                }
-            }
-            _ => {}
         }
     }
 }

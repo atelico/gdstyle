@@ -307,7 +307,7 @@ pub fn all_rules() -> &'static [(&'static str, &'static str)] {
         ),
         (
             "format/number-literals",
-            "Number literals must follow formatting rules",
+            "Hex literals must use lowercase digits and prefix",
         ),
         (
             "format/one-statement-per-line",
