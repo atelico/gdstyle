@@ -217,8 +217,9 @@ impl Suppressions {
 ///    diagnostic in the file, regardless of line. Anywhere in the file
 ///    works; convention is at the top so it's visible to readers.
 ///
-/// A directive is a `#` comment that starts with it. The same text inside a
-/// string, or later in a comment (`# see # gdstyle:ignore-file`), is not one.
+/// A directive is a comment that starts with it (`#`, or `##` for a doc
+/// comment). The same text inside a string, or later in a comment
+/// (`# see # gdstyle:ignore-file`), is not one.
 /// `tokens` is the lex of `source`.
 fn parse_suppression_comments(source: &str, tokens: &[Token]) -> Suppressions {
     let mut suppressions = Suppressions::default();
@@ -226,10 +227,13 @@ fn parse_suppression_comments(source: &str, tokens: &[Token]) -> Suppressions {
     let line_prefix = "# gdstyle:ignore";
 
     for token in tokens {
-        if !matches!(token.kind, TokenKind::Comment(_)) {
-            continue;
-        }
-        let text = token.text.as_str();
+        // `## gdstyle:ignore...` is a doc comment holding the same directive
+        // after its first `#`; it has always been honored.
+        let text = match token.kind {
+            TokenKind::Comment(_) => token.text.as_str(),
+            TokenKind::DocComment(_) => &token.text[1..],
+            _ => continue,
+        };
 
         // File-scope check must come BEFORE the per-line check because
         // `# gdstyle:ignore` is a prefix of `# gdstyle:ignore-file` and
@@ -245,10 +249,12 @@ fn parse_suppression_comments(source: &str, tokens: &[Token]) -> Suppressions {
             if directive_terminator_ok(rest) {
                 // Alone on its line it covers the next line; after code it
                 // covers its own.
-                let line_start = source[..token.span.offset]
-                    .rfind('\n')
-                    .map_or(0, |newline| newline + 1);
-                let is_standalone = source[line_start..token.span.offset].trim().is_empty();
+                // `get`, not slicing: a library caller may pass `source` and
+                // `tokens` that disagree. Treat that comment as inline.
+                let is_standalone = source.get(..token.span.offset).is_some_and(|before| {
+                    let line_start = before.rfind('\n').map_or(0, |newline| newline + 1);
+                    before[line_start..].trim().is_empty()
+                });
                 let target_line = if is_standalone {
                     token.span.line + 1
                 } else {
@@ -559,6 +565,31 @@ func take_damage(amount: int) -> void:
                 "source:\n{source}"
             );
         }
+    }
+
+    #[test]
+    fn doc_comment_directives_are_honored() {
+        for source in [
+            "## gdstyle:ignore-file\nvar BadName = 1\n",
+            "var BadName = 1  ## gdstyle:ignore\n",
+        ] {
+            let diagnostics = lint_source(source, "test.gd", &Config::default());
+            assert!(
+                !diagnostics
+                    .iter()
+                    .any(|d| d.rule == "naming/variable-name-snake-case"),
+                "source:\n{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn suppressions_tolerate_tokens_from_another_source() {
+        // A library caller can pass lines that don't match the tokens; the
+        // directive offset then lies outside the source. It must not panic.
+        let tokens = Lexer::new("var a = 1\n# gdstyle:ignore\nvar BadName = 1\n").tokenize();
+        let suppressions = Suppressions::parse("", &tokens);
+        assert!(suppressions.suppresses_member(2, 2, "naming/variable-name-snake-case"));
     }
 
     #[test]
