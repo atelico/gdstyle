@@ -425,18 +425,28 @@ struct MemberUnit {
     decl_start: usize, // 1-indexed; >= start
 }
 
-// The lexer treats every `##` prefix as documentation. An uninterrupted run
-// of at least three hashes is a decorative separator instead; a bare `##`
+// The lexer treats every `##` prefix as documentation. Pure-hash lines are
+// decorative unless they share a block with documentation. A bare `##`
 // remains an empty documentation line, and `## ###` remains documentation.
 fn is_hash_banner_content(content: &str) -> bool {
     let content = content.trim_end();
     !content.is_empty() && content.bytes().all(|b| b == b'#')
 }
 
-fn is_doc_comment_line(line: &str) -> bool {
-    line.trim()
-        .strip_prefix("##")
-        .is_some_and(|content| !is_hash_banner_content(content))
+fn doc_comment_lines(members: &[ClassMember]) -> std::collections::HashSet<usize> {
+    let comments: Vec<_> = members
+        .iter()
+        .filter_map(|member| match member {
+            ClassMember::DocComment { span, text } => Some((span.line, text)),
+            _ => None,
+        })
+        .collect();
+
+    comments
+        .chunk_by(|(previous, _), (next, _)| *next == *previous + 1)
+        .filter(|block| block.iter().any(|(_, text)| !is_hash_banner_content(text)))
+        .flat_map(|block| block.iter().map(|(line, _)| *line))
+        .collect()
 }
 
 /// Rewrite the source so the blank lines BETWEEN top-level class members match
@@ -502,9 +512,10 @@ fn normalize_member_spacing(source: &str, config: &Config) -> String {
             *last = None;
         };
 
+    let doc_lines = doc_comment_lines(&members);
     for member in &members {
         match member {
-            ClassMember::DocComment { span, text } if !is_hash_banner_content(text) => {
+            ClassMember::DocComment { span, .. } if doc_lines.contains(&span.line) => {
                 if let Some(prev_last) = pending_doc_last {
                     if span.line != prev_last + 1 {
                         // Non-consecutive: the older block is a standalone
@@ -1764,13 +1775,19 @@ fn reorder_class_members(source: &str) -> String {
         })
         .collect();
 
-    emit_reordered_blocks(&ordered, &lines, &attached_starts)
+    let doc_lines = doc_comment_lines(&members);
+    emit_reordered_blocks(&ordered, &lines, &attached_starts, &doc_lines)
 }
 
 /// Reconstruct the source with `blocks` in their new (sorted) order,
 /// normalising blank-line separators and deferring class doc comments to
 /// after the `class_name`/`extends` declarations.
-fn emit_reordered_blocks(blocks: &[Block], lines: &[&str], attached_starts: &[usize]) -> String {
+fn emit_reordered_blocks(
+    blocks: &[Block],
+    lines: &[&str],
+    attached_starts: &[usize],
+    doc_lines: &std::collections::HashSet<usize>,
+) -> String {
     let mut result: Vec<String> = Vec::new();
 
     // Lines before the first block (e.g., initial blank lines, shebang).
@@ -1799,9 +1816,9 @@ fn emit_reordered_blocks(blocks: &[Block], lines: &[&str], attached_starts: &[us
         if block.category <= 2 {
             let doc_end = block_lines
                 .iter()
-                .position(|l| {
-                    let t = l.trim();
-                    !is_doc_comment_line(t) && !t.is_empty()
+                .enumerate()
+                .position(|(offset, line)| {
+                    !doc_lines.contains(&(block.start + offset + 1)) && !line.trim().is_empty()
                 })
                 .unwrap_or(0);
             if doc_end > 0 {
@@ -1888,17 +1905,16 @@ fn move_class_decl_before_doc_comments(
     let lines: Vec<&str> = source.split('\n').collect();
 
     // Find the first ## doc comment line.
-    let doc_start = lines.iter().position(|l| is_doc_comment_line(l));
-    if doc_start.is_none() {
+    let doc_lines = doc_comment_lines(members);
+    let Some(doc_start) = doc_lines.iter().min().map(|line| line - 1) else {
         return source.to_string();
-    }
-    let doc_start = doc_start.unwrap();
+    };
 
     // Find where the doc block ends (first non-## non-blank line after doc_start).
     let mut doc_end = doc_start;
     for (i, line) in lines.iter().enumerate().skip(doc_start) {
         let t = line.trim();
-        if is_doc_comment_line(t) || t.is_empty() {
+        if doc_lines.contains(&(i + 1)) || t.is_empty() {
             doc_end = i;
         } else {
             break;
@@ -1933,10 +1949,7 @@ fn move_class_decl_before_doc_comments(
         return source.to_string();
     };
 
-    // The doc block is found by reading raw lines, so it can match text
-    // inside a multi-line string (a script template, say). Moving those
-    // lines would rewrite the string, so leave the source alone if any of
-    // them is string data.
+    // The move must not include any part of a multi-line string.
     let string_line_mask = StringLines::new(tokens, lines.len());
     if (doc_start..=decl_end).any(|idx| string_line_mask.is_interior(idx)) {
         return source.to_string();

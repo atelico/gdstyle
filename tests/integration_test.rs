@@ -786,6 +786,74 @@ fn formatter_preserves_standalone_hash_banner_blocks() {
 }
 
 #[test]
+fn formatter_keeps_doc_title_inside_hash_banner() {
+    let source = "extends Node\n\n\n################\n## Signals\n################\nsignal a\n";
+    let expected = "extends Node\n\n################\n## Signals\n################\nsignal a\n";
+    for (source, expected) in [
+        (source.to_string(), expected.to_string()),
+        (source.replace('\n', "\r\n"), expected.replace('\n', "\r\n")),
+    ] {
+        let formatted = formatter::format_source(&source, &default_config());
+        assert_eq!(formatted, expected);
+        assert_eq!(
+            formatter::format_source(&formatted, &default_config()),
+            expected
+        );
+    }
+}
+
+#[test]
+fn formatter_keeps_member_docs_with_hash_banner() {
+    let source = "extends Node\n\nvar preceding = 0\n## Doc for v.\n################\nvar v = 1\n";
+    for source in [source.to_string(), source.replace('\n', "\r\n")] {
+        let formatted = formatter::format_source(&source, &default_config());
+        assert_eq!(formatted, source);
+        assert_eq!(
+            formatter::format_source(&formatted, &default_config()),
+            source
+        );
+    }
+}
+
+#[test]
+fn formatter_keeps_member_doc_banner_after_extends() {
+    let source = "extends Node\n\n## Doc for v.\n####\nvar v = 1\n";
+    for source in [source.to_string(), source.replace('\n', "\r\n")] {
+        let formatted = formatter::format_source(&source, &default_config());
+        assert_eq!(formatted, source);
+        assert_eq!(
+            formatter::format_source(&formatted, &default_config()),
+            source
+        );
+    }
+}
+
+#[test]
+fn formatter_moves_hash_doc_blocks_below_class_headers() {
+    let docs = "########\n## Class documentation.\n########\n";
+    for (header, expected_header) in [
+        ("extends Node\n", "extends Node\n"),
+        (
+            "extends Node\nclass_name Example\n",
+            "class_name Example\nextends Node\n",
+        ),
+        (
+            "@abstract\nclass_name Example\nextends Node\n",
+            "@abstract\nclass_name Example\nextends Node\n",
+        ),
+    ] {
+        let source = format!("{docs}{header}");
+        let expected = format!("{expected_header}{docs}");
+        let formatted = formatter::format_source(&source, &default_config());
+        assert_eq!(formatted, expected);
+        assert_eq!(
+            formatter::format_source(&formatted, &default_config()),
+            expected
+        );
+    }
+}
+
+#[test]
 fn formatter_keeps_empty_and_hash_heading_doc_comments() {
     // A bare `##` is a blank documentation line; `## ###` is a doc heading.
     let source = "extends Node\n\n## Class documentation.\n##\n## ###\n## More documentation.\n\nsignal happened\n";
