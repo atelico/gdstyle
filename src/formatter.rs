@@ -2327,6 +2327,13 @@ mod tests {
     }
 
     #[test]
+    fn test_ensure_trailing_newline() {
+        assert_eq!(ensure_trailing_newline("hello"), "hello\n");
+        assert_eq!(ensure_trailing_newline("hello\n"), "hello\n");
+        assert_eq!(ensure_trailing_newline("hello\n\n\n"), "hello\n");
+    }
+
+    #[test]
     fn comment_wrapping_counts_columns_not_bytes() {
         // Each word is 8 columns but 16 bytes. The comment fills exactly 100
         // columns before the last word; measuring bytes wrapped it at 50.
@@ -2340,13 +2347,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![100, 10]
         );
-    }
-
-    #[test]
-    fn test_ensure_trailing_newline() {
-        assert_eq!(ensure_trailing_newline("hello"), "hello\n");
-        assert_eq!(ensure_trailing_newline("hello\n"), "hello\n");
-        assert_eq!(ensure_trailing_newline("hello\n\n\n"), "hello\n");
     }
 
     #[test]
