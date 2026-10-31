@@ -345,3 +345,24 @@ fn paragraph_stops_at_subscripts_and_tab_tables_but_not_at_prose_for() {
         assert_eq!(joined, is_merged, "next line {next:?}: {lines:?}");
     }
 }
+
+#[test]
+fn line_mode_still_wraps_prose_that_only_looks_a_little_like_code() {
+    // Only unambiguous code is left unwrapped: these are prose, so they wrap
+    // as they always did.
+    for source in [
+        "# x = y means that the left side takes the value\n",
+        "# Speed (in pixels per second, scaled by the zoom)\n",
+        "# if you need this, then the block starts:\n",
+        "# this one\thas a tab in the middle of it and goes on\n",
+        "# a typo  double space in the middle of it\n",
+        "# ends with a semicolon like old C comments;\n",
+    ] {
+        let formatted = format(source, CommentWrap::Line);
+        assert_ne!(formatted, source, "{source:?} was not wrapped");
+        assert!(
+            formatted.lines().all(|line| line.len() <= 40),
+            "{formatted}"
+        );
+    }
+}

@@ -1,10 +1,10 @@
 //! Wrapping long comment lines for `fmt`, as set by `comment_wrap`.
 //!
 //! Both wrapping modes share [`wrap_long_comment`]. `"line"` rewraps the long
-//! line alone. `"paragraph"` also pulls in the comment lines after it. Either
-//! way, lines that must keep their breaks are left as they are: commented-out
-//! code, tables, URLs, `gdstyle:` directives and doc-comment `[codeblock]`
-//! contents.
+//! line alone. `"paragraph"` also pulls in the comment lines after it, up to
+//! the first line [`ends_prose`] says can't continue it. Either way, a long
+//! line [`must_keep_whole`] says is code, a table, a URL or a `gdstyle:`
+//! directive is left as it is, and so are doc-comment `[codeblock]` contents.
 
 use super::{visual_line_len, TAB_WIDTH};
 
@@ -43,7 +43,7 @@ pub(super) fn wrap_long_comment(
     is_editable: &dyn Fn(usize) -> bool,
 ) -> Option<(Vec<String>, usize)> {
     let first = split_comment_line(lines[start])?;
-    if first.text.trim().is_empty() || is_verbatim_comment_text(first.text) {
+    if first.text.trim().is_empty() || must_keep_whole(first.text) {
         return None;
     }
     let continuation_prefix = match list_marker_len(first.text) {
@@ -80,7 +80,7 @@ fn continues_paragraph(text: &str) -> bool {
     !text.is_empty()
         && !text.starts_with([' ', '\t', '#'])
         && !starts_own_paragraph(text)
-        && !is_verbatim_comment_text(text)
+        && !ends_prose(text)
         && !text.contains("[codeblock")
         && !text.contains("[/codeblock")
 }
@@ -134,15 +134,15 @@ fn starts_own_paragraph(text: &str) -> bool {
         })
 }
 
-/// True when comment text must keep its line breaks: commented-out code, a
-/// table, a URL (which can't be split), or a `gdstyle:` directive.
+/// True when a long comment line must not be wrapped: commented-out code, a
+/// table row, a URL (which can't be split), or a `gdstyle:` directive.
 ///
-/// The code test is a heuristic tuned to miss rather than misfire on prose.
-/// It looks for declarations, block headers ending in `:`, `return` or
-/// `await` with an expression, assignments, and lines that are one call. A
-/// miss treats the line as prose. A false hit only leaves a line unwrapped
-/// or ends a paragraph early, so prose like "if you need this:" is safe.
-fn is_verbatim_comment_text(text: &str) -> bool {
+/// A false hit leaves prose long, where `line` mode used to wrap it, so only
+/// unambiguous signs count. The main one is that code has no two plain
+/// words in a row: `x = y means that` and `if you need this:` are prose,
+/// `speed += 1` and `if is_ready:` are not. [`ends_prose`] adds the looser
+/// signs that only end a paragraph.
+fn must_keep_whole(text: &str) -> bool {
     const DECLARATIONS: [&str; 8] = [
         "var ",
         "const ",
@@ -153,50 +153,90 @@ fn is_verbatim_comment_text(text: &str) -> bool {
         "extends ",
         "class_name ",
     ];
-    const BLOCK_KEYWORDS: [&str; 6] = ["if ", "elif ", "else", "while ", "match ", "static func "];
+    const BLOCK_KEYWORDS: [&str; 4] = ["if ", "elif ", "while ", "match "];
     let text = text.trim();
-    if text.contains("://") || text.starts_with("gdstyle:") || has_column_gap(text) {
+    if text.contains("://") || text.starts_with("gdstyle:") || column_gap_count(text) >= 2 {
         return true;
     }
     if text.starts_with('@') || DECLARATIONS.iter().any(|keyword| text.starts_with(keyword)) {
         return true;
     }
-    if text.ends_with(':')
-        && (BLOCK_KEYWORDS
+    if matches!(text, "pass" | "break" | "continue" | "return" | "else:") || is_for_header(text) {
+        return true;
+    }
+    if let Some(header) = text.strip_suffix(':') {
+        let condition = BLOCK_KEYWORDS
             .iter()
-            .any(|keyword| text.starts_with(keyword))
-            || is_for_header(text))
-    {
-        return true;
+            .find_map(|keyword| header.strip_prefix(keyword));
+        if condition.is_some_and(|condition| !has_prose_words(condition)) {
+            return true;
+        }
     }
-    if matches!(text, "pass" | "break" | "continue" | "return") || text.ends_with(';') {
-        return true;
-    }
-    // `return x`, `await get_tree().process_frame`. Prose like "return the
-    // value" has more than one word and doesn't end in a bracket.
+    // `return x`, `await get_tree().process_frame`.
     for keyword in ["return ", "await "] {
         if let Some(expression) = text.strip_prefix(keyword) {
-            if !expression.contains(' ') || expression.ends_with([')', ']']) {
-                return true;
-            }
+            return !has_prose_words(expression);
         }
     }
     let target_len = statement_target_len(text);
     if target_len == 0 {
         return false;
     }
-    let after_target = text[target_len..].trim_start();
+    let after_target = &text[target_len..];
+    // `queue_free()`, `print("hi", x)`: no space before the call's `(`.
+    let is_call = after_target.starts_with('(') && text.ends_with(')');
     let is_assignment = ["= ", "+= ", "-= ", "*= ", "/= ", ":= "]
         .iter()
-        .any(|operator| after_target.starts_with(operator));
-    let is_call = after_target.starts_with('(') && text.ends_with(')');
-    is_assignment || is_call
+        .find_map(|operator| after_target.trim_start().strip_prefix(operator))
+        .is_some_and(|value| !has_prose_words(value));
+    is_call || is_assignment
+}
+
+/// True when comment text can't continue a prose paragraph: anything
+/// [`must_keep_whole`] keeps, plus looser signs of code or a table that are
+/// wrong to merge into prose but too weak to leave a long line unwrapped: a
+/// single column gap, a trailing `;`, a block header, or `return` / `await`
+/// with a one-word or bracketed expression.
+fn ends_prose(text: &str) -> bool {
+    const BLOCK_KEYWORDS: [&str; 6] = ["if ", "elif ", "else", "while ", "match ", "static func "];
+    let text = text.trim();
+    if must_keep_whole(text) || column_gap_count(text) > 0 || text.ends_with(';') {
+        return true;
+    }
+    if text.ends_with(':')
+        && BLOCK_KEYWORDS
+            .iter()
+            .any(|keyword| text.starts_with(keyword))
+    {
+        return true;
+    }
+    ["return ", "await "].iter().any(|keyword| {
+        text.strip_prefix(keyword)
+            .is_some_and(|expression| !expression.contains(' ') || expression.ends_with([')', ']']))
+    })
+}
+
+/// True when `text` has two plain words in a row (`means that`, `you
+/// need`), which prose nearly always has and code nearly never does.
+fn has_prose_words(text: &str) -> bool {
+    // A word may end a clause or sentence: `value.`, `this,`.
+    let is_word = |token: &str| {
+        let word = token.trim_end_matches(['.', ',', ';', ':', '!', '?']);
+        !word.is_empty() && word.chars().all(|c| c.is_alphabetic() || c == '\'')
+    };
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    tokens
+        .windows(2)
+        .any(|pair| is_word(pair[0]) && is_word(pair[1]))
 }
 
 /// True for a `for` loop header: `for item in items:` or, with a typed loop
 /// variable, `for i: int in range(3):`. Prose like "for the given filter in
 /// this order:" has more than a name before ` in `.
 fn is_for_header(text: &str) -> bool {
+    if !text.ends_with(':') {
+        return false;
+    }
     let Some((variable, _)) = text
         .strip_prefix("for ")
         .and_then(|rest| rest.split_once(" in "))
@@ -230,14 +270,19 @@ fn statement_target_len(text: &str) -> usize {
     }
 }
 
-/// True when `text` has a gap inside it that isn't the double space some
-/// writers put after a sentence: a tab, or a run of spaces between columns
-/// of a table (`speed   float   1.0`).
-fn has_column_gap(text: &str) -> bool {
-    text.contains('\t')
-        || text
-            .match_indices("  ")
-            .any(|(index, _)| !text[..index].ends_with(['.', '!', '?', ':']))
+/// How many gaps `text` has that aren't the double space some writers put
+/// after a sentence: tabs, and runs of spaces between the columns of a table
+/// (`speed   float   1.0`).
+fn column_gap_count(text: &str) -> usize {
+    let tabs = text.matches('\t').count();
+    let space_runs = text
+        .match_indices("  ")
+        .filter(|&(index, _)| {
+            // Count each run once, at its first two spaces.
+            !text[..index].ends_with([' ', '.', '!', '?', ':'])
+        })
+        .count();
+    tabs + space_runs
 }
 
 /// Lay `words` out as comment lines of at most `max_len` columns. The first

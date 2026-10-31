@@ -20,6 +20,10 @@
 #   scripts/perf-compare.sh base/target/release/gdstyle \
 #       target/release/gdstyle ../godot-demo-projects
 set -euo pipefail
+# Without this, `set -e` is off inside `$(...)`, so a failed run inside a
+# command substitution would hand an empty count to the comparison. Bash
+# before 4.4 lacks it; the explicit `|| exit 2` checks below cover those.
+shopt -s inherit_errexit 2>/dev/null || true
 
 if [[ $# -ne 3 ]]; then
     echo "usage: $0 BASE_BINARY CANDIDATE_BINARY CORPUS_DIR" >&2
@@ -31,6 +35,10 @@ candidate_binary=$(realpath "$2")
 corpus_dir=$(realpath "$3")
 threshold_percent=${PERF_THRESHOLD_PERCENT:-3}
 runs=${PERF_RUNS:-3}
+if ! [[ "$runs" =~ ^[1-9][0-9]*$ ]]; then
+    echo "error: PERF_RUNS must be a positive integer, got '$runs'" >&2
+    exit 2
+fi
 
 for binary in "$base_binary" "$candidate_binary"; do
     if [[ ! -x "$binary" ]]; then
@@ -86,7 +94,8 @@ count_instructions() {
 median_instructions() {
     local binary=$1 arguments=$2 counts=() run
     for ((run = 0; run < runs; run++)); do
-        counts+=("$(count_instructions "$binary" "$arguments")")
+        # `|| exit 2` too: a failed run must stop the script, not count.
+        counts+=("$(count_instructions "$binary" "$arguments")") || exit 2
     done
     printf '%s\n' "${counts[@]}" | sort -n | sed -n "$(((runs + 1) / 2))p"
 }
@@ -101,8 +110,8 @@ has_regression=0
 } >>"$report"
 
 for arguments in "${benchmarks[@]}"; do
-    base_count=$(median_instructions "$base_binary" "$arguments")
-    candidate_count=$(median_instructions "$candidate_binary" "$arguments")
+    base_count=$(median_instructions "$base_binary" "$arguments") || exit 2
+    candidate_count=$(median_instructions "$candidate_binary" "$arguments") || exit 2
     change_percent=$(awk -v base="$base_count" -v candidate="$candidate_count" \
         'BEGIN { printf "%+.2f", (candidate - base) * 100 / base }')
     marker=""

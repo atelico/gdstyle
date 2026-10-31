@@ -1043,11 +1043,10 @@ pub fn check_max_inner_classes(
 /// Warn when an `else` or `elif` follows an `if` block that ends with `return`.
 /// The else/elif is unnecessary because the `return` already exits.
 pub fn check_no_else_return(
-    tokens: &[Token],
+    string_line_mask: &StringLines,
     file: &ScriptFile,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let string_line_mask = StringLines::new(tokens, file.lines.len());
     for (i, line) in file.lines.iter().enumerate() {
         let trimmed = line.trim();
         // Look for `elif` or `else` lines
@@ -1072,7 +1071,7 @@ pub fn check_no_else_return(
             // Check if this line is at a deeper indent (inside the if block)
             if indent_level(&file.lines[j]) > current_indent {
                 if is_return_statement(prev)
-                    && return_ends_branch(file, &string_line_mask, j, current_indent)
+                    && return_ends_branch(file, string_line_mask, j, current_indent)
                 {
                     let kind = if trimmed.starts_with("elif") {
                         "elif"
@@ -1100,7 +1099,7 @@ pub fn check_no_else_return(
 fn is_return_statement(trimmed: &str) -> bool {
     trimmed
         .strip_prefix("return")
-        .is_some_and(|rest| !rest.starts_with(|c: char| c.is_alphanumeric() || c == '_'))
+        .is_some_and(|rest| !rest.starts_with(is_identifier_char))
 }
 
 /// True when the `return` on line `return_line` is a statement of the branch
@@ -1199,14 +1198,21 @@ fn strip_trailing_comment(line: &str) -> &str {
 
 /// Warn about code that appears after `return`, `break`, or `continue` at the
 /// same indentation level within a block.
-pub fn check_unreachable_code(file: &ScriptFile, diagnostics: &mut Vec<Diagnostic>) {
+pub fn check_unreachable_code(
+    string_line_mask: &StringLines,
+    file: &ScriptFile,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
     let mut reported: HashSet<usize> = HashSet::new();
 
     let mut i = 0;
     while i < file.lines.len() {
         let line = &file.lines[i];
         let trimmed = line.trim();
-        if !(is_return_statement(trimmed) || trimmed == "break" || trimmed == "continue") {
+        let is_terminator =
+            is_return_statement(trimmed) || trimmed == "break" || trimmed == "continue";
+        // A `return` line inside a string that spans lines is data.
+        if !is_terminator || string_line_mask.is_interior(i) {
             i += 1;
             continue;
         }
@@ -1376,12 +1382,11 @@ pub fn check_allocation_in_loop(file: &ScriptFile, diagnostics: &mut Vec<Diagnos
 /// Warn about node lookups (`get_node()`, `$`, `%`) in `_process` and
 /// `_physics_process` methods. These should be cached in `_ready` or `@onready`.
 pub fn check_process_get_node(
-    tokens: &[Token],
+    string_line_mask: &StringLines,
     file: &ScriptFile,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let string_line_mask = StringLines::new(tokens, file.lines.len());
-    check_process_get_node_recursive(&file.members, file, &string_line_mask, diagnostics);
+    check_process_get_node_recursive(&file.members, file, string_line_mask, diagnostics);
 }
 
 fn check_process_get_node_recursive(
@@ -1588,13 +1593,19 @@ fn check_nesting_recursive(
 // ---------------------------------------------------------------------------
 
 /// Warn when a function has too many return statements.
-pub fn check_max_returns(file: &ScriptFile, config: &Config, diagnostics: &mut Vec<Diagnostic>) {
-    check_returns_recursive(&file.members, file, config, diagnostics);
+pub fn check_max_returns(
+    string_line_mask: &StringLines,
+    file: &ScriptFile,
+    config: &Config,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    check_returns_recursive(&file.members, file, string_line_mask, config, diagnostics);
 }
 
 fn check_returns_recursive(
     members: &[ClassMember],
     file: &ScriptFile,
+    string_line_mask: &StringLines,
     config: &Config,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
@@ -1609,9 +1620,10 @@ fn check_returns_recursive(
             return;
         };
         let range = function_body_range(span, *body_line_count, file.lines.len());
-        let count = file.lines[range]
-            .iter()
-            .filter(|line| is_return_statement(line.trim()))
+        // Lines inside a string that spans lines are data, not returns.
+        let count = range
+            .filter(|&index| !string_line_mask.is_interior(index))
+            .filter(|&index| is_return_statement(file.lines[index].trim()))
             .count();
 
         if count > config.max_returns {
@@ -1736,6 +1748,11 @@ fn check_local_vars_recursive(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The string-line map of a hand-built file that holds no strings.
+    fn no_strings(file: &ScriptFile) -> StringLines {
+        StringLines::new(&[], file.lines.len())
+    }
     use crate::ast::*;
 
     fn span(line: usize) -> Span {
@@ -2164,7 +2181,7 @@ mod tests {
             members: vec![],
         };
         let mut diags = Vec::new();
-        check_unreachable_code(&file, &mut diags);
+        check_unreachable_code(&no_strings(&file), &file, &mut diags);
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].span.line, 3);
     }
@@ -2189,7 +2206,7 @@ mod tests {
             members: vec![],
         };
         let mut diags = Vec::new();
-        check_unreachable_code(&file, &mut diags);
+        check_unreachable_code(&no_strings(&file), &file, &mut diags);
         assert!(
             diags.is_empty(),
             "closing paren of multi-line return must not be flagged, got: {:?}",
@@ -2221,7 +2238,7 @@ mod tests {
             members: vec![],
         };
         let mut diags = Vec::new();
-        check_unreachable_code(&file, &mut diags);
+        check_unreachable_code(&no_strings(&file), &file, &mut diags);
         assert!(
             diags.is_empty(),
             "no unreachable-code expected on issue #3 example, got: {:?}",
@@ -2244,7 +2261,7 @@ mod tests {
             members: vec![],
         };
         let mut diags = Vec::new();
-        check_unreachable_code(&file, &mut diags);
+        check_unreachable_code(&no_strings(&file), &file, &mut diags);
         assert!(diags.is_empty(), "got: {:?}", diags);
     }
 
@@ -2264,7 +2281,7 @@ mod tests {
             members: vec![],
         };
         let mut diags = Vec::new();
-        check_unreachable_code(&file, &mut diags);
+        check_unreachable_code(&no_strings(&file), &file, &mut diags);
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].span.line, 5);
     }
@@ -2283,7 +2300,7 @@ mod tests {
             members: vec![],
         };
         let mut diags = Vec::new();
-        check_unreachable_code(&file, &mut diags);
+        check_unreachable_code(&no_strings(&file), &file, &mut diags);
         assert!(diags.is_empty());
     }
 
@@ -2353,7 +2370,7 @@ mod tests {
             members: vec![],
         };
         let mut diags = Vec::new();
-        check_no_else_return(&[], &file, &mut diags);
+        check_no_else_return(&no_strings(&file), &file, &mut diags);
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("else"));
     }

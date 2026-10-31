@@ -3916,6 +3916,44 @@ fn match_and_when_are_names_in_enums_and_class_name() {
 }
 
 #[test]
+fn keyword_names_are_reported_without_a_rename_fix() {
+    // `State.match` lexes as a keyword, so renaming the member to `MATCH`
+    // would miss it and break the script.
+    let source = "enum State { IDLE, match }\nclass_name when\n";
+    let diagnostics = linter::lint_source(source, "test.gd", &default_config());
+    let keyword_diagnostics: Vec<&Diagnostic> = diagnostics
+        .iter()
+        .filter(|d| d.message.contains("'match'") || d.message.contains("'when'"))
+        .collect();
+    assert_eq!(keyword_diagnostics.len(), 2, "{diagnostics:?}");
+    assert!(keyword_diagnostics.iter().all(|d| d.fix.is_none()));
+}
+
+#[test]
+fn return_rules_skip_strings_that_span_lines() {
+    // A `return` line inside a `"""` string is data: nothing after it is
+    // unreachable and it is not one of the function's returns.
+    let config = Config {
+        max_returns: 1,
+        ..Config::default()
+    };
+    let source = "\
+func f() -> String:
+\tvar text: String = \"\"\"
+return
+\"\"\"
+\tprint(text)
+\treturn text
+";
+    let rules: Vec<String> = linter::lint_source(source, "test.gd", &config)
+        .into_iter()
+        .map(|d| d.rule)
+        .filter(|rule| rule == "quality/unreachable-code" || rule == "quality/max-returns")
+        .collect();
+    assert!(rules.is_empty(), "{rules:?}");
+}
+
+#[test]
 fn naming_private_underscore_prefix_allows_export_storage() {
     // `@export_storage` saves a variable without showing it in the
     // inspector, which is how private state is persisted.

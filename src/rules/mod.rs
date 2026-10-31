@@ -7,7 +7,7 @@ pub mod syntax;
 use crate::ast::ScriptFile;
 use crate::config::Config;
 use crate::diagnostic::Diagnostic;
-use crate::token::Token;
+use crate::token::{StringLines, Token};
 
 /// Run all enabled lint rules on a parsed script file.
 ///
@@ -29,6 +29,9 @@ pub fn run_all_rules_with_source(
     source: Option<&str>,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
+    // Which lines sit inside strings that span lines, built once for the
+    // line-based rules that skip them.
+    let string_line_mask = StringLines::new(tokens, file.lines.len());
 
     // Syntax rules. `syntax/lex-error` is surfaced by `lint_source`, which
     // owns the lexer output.
@@ -192,10 +195,10 @@ pub fn run_all_rules_with_source(
         quality::check_max_inner_classes(file, config, &mut diagnostics);
     }
     if config.is_rule_enabled("quality/no-else-return") {
-        quality::check_no_else_return(tokens, file, &mut diagnostics);
+        quality::check_no_else_return(&string_line_mask, file, &mut diagnostics);
     }
     if config.is_rule_enabled("quality/unreachable-code") {
-        quality::check_unreachable_code(file, &mut diagnostics);
+        quality::check_unreachable_code(&string_line_mask, file, &mut diagnostics);
     }
     if config.is_rule_enabled("quality/await-in-loop") {
         quality::check_await_in_loop(file, &mut diagnostics);
@@ -204,13 +207,13 @@ pub fn run_all_rules_with_source(
         quality::check_allocation_in_loop(file, &mut diagnostics);
     }
     if config.is_rule_enabled("quality/process-get-node") {
-        quality::check_process_get_node(tokens, file, &mut diagnostics);
+        quality::check_process_get_node(&string_line_mask, file, &mut diagnostics);
     }
     if config.is_rule_enabled("quality/max-nesting-depth") {
         quality::check_max_nesting_depth(file, config, &mut diagnostics);
     }
     if config.is_rule_enabled("quality/max-returns") {
-        quality::check_max_returns(file, config, &mut diagnostics);
+        quality::check_max_returns(&string_line_mask, file, config, &mut diagnostics);
     }
     if config.is_rule_enabled("quality/max-branches") {
         quality::check_max_branches(file, config, &mut diagnostics);
