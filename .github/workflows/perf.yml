@@ -5,8 +5,20 @@ name: Performance
 # cancels out. See scripts/perf-compare.sh for what is measured.
 on:
   pull_request:
-    # labeled/unlabeled so adding perf-regression-ok re-runs the check.
+    # labeled/unlabeled so adding perf-regression-ok re-runs the check. Any
+    # other label re-runs it too: skipping those runs would report a pass
+    # over an earlier failure on the same commit.
     types: [opened, synchronize, reopened, labeled, unlabeled]
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/perf-compare.sh"
+      - ".github/workflows/perf.yml"
+  # Builds on main fill the cargo cache. PR runs can only read caches that
+  # main wrote, so without this every PR builds both binaries from scratch.
+  push:
+    branches: [main]
     paths:
       - "src/**"
       - "Cargo.toml"
@@ -32,14 +44,28 @@ jobs:
         uses: actions/checkout@v5
         with:
           path: candidate
+          # The PR's merge commit and its first parent, the base it merges into.
+          fetch-depth: 2
 
-      - name: Check out the base branch
+      - name: Find the base commit
+        id: base
+        run: |
+          # The first parent of the merge commit is exactly the code the PR is
+          # merged into. On main, both sides are the pushed commit.
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            echo "sha=$(git -C candidate rev-parse HEAD^1)" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out the base
         uses: actions/checkout@v5
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ steps.base.outputs.sha }}
           path: base
 
       - name: Check out the corpus
+        if: github.event_name == 'pull_request'
         uses: actions/checkout@v5
         with:
           repository: ${{ env.CORPUS_REPOSITORY }}
@@ -58,14 +84,21 @@ jobs:
             base -> target
 
       - name: Install valgrind and hyperfine
+        if: github.event_name == 'pull_request'
         run: sudo apt-get update && sudo apt-get install -y valgrind hyperfine
 
-      - name: Build both binaries
+      - name: Build the base
         run: |
-          cargo build --release --bin gdstyle --manifest-path base/Cargo.toml
-          cargo build --release --bin gdstyle --manifest-path candidate/Cargo.toml
+          cargo build --release --bin gdstyle --manifest-path base/Cargo.toml || {
+            echo "::error::The base commit ${{ steps.base.outputs.sha }} did not build, so there is nothing to compare against."
+            exit 1
+          }
+
+      - name: Build the PR
+        run: cargo build --release --bin gdstyle --manifest-path candidate/Cargo.toml
 
       - name: Compare
+        if: github.event_name == 'pull_request'
         env:
           PERF_ALLOW_REGRESSION: ${{ contains(github.event.pull_request.labels.*.name, 'perf-regression-ok') && '1' || '0' }}
         run: |

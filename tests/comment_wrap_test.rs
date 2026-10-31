@@ -285,3 +285,84 @@ fn wrapping_never_starts_a_line_with_a_suppression_directive() {
         );
     }
 }
+
+#[test]
+fn line_mode_keeps_directives_code_blocks_and_commented_code_whole() {
+    // Splitting a directive moved its target, wrapping a code block changed
+    // the documented code, and a commented-out call was split at its commas
+    // like real code.
+    for source in [
+        "# gdstyle:ignore=naming/variable-name-snake-case legacy save name\nvar BadName: int = 5\n",
+        "## Example:\n## [codeblock]\n## var aaa = bbb + ccc + ddd + eee + fff\n## [/codeblock]\nvar a: int = 1\n",
+        "# print(aaaaaaaa, bbbbbbbb, cccccccc, dddddddd)\n",
+    ] {
+        assert_eq!(format(source, CommentWrap::Line), source);
+    }
+}
+
+#[test]
+fn line_mode_wraps_a_nested_list_item_under_its_text() {
+    let source = "# - item\n#   - nested sub item aaa bbb ccc ddd eee\n";
+    assert_eq!(
+        format(source, CommentWrap::Line),
+        "# - item\n#   - nested sub item aaa bbb ccc ddd\n#     eee\n"
+    );
+}
+
+#[test]
+fn paragraph_wraps_after_a_one_line_code_block() {
+    let source = "\
+## [codeblock]print(1)[/codeblock]
+func f() -> void:
+\t# aaa bbb ccc ddd eee fff ggg hhh iii jjj kkk
+\tpass
+";
+    let formatted = format(source, CommentWrap::Paragraph);
+    assert!(
+        formatted.contains("\t# aaa bbb ccc ddd eee fff ggg hhh\n\t# iii jjj kkk\n"),
+        "{formatted}"
+    );
+}
+
+#[test]
+fn paragraph_stops_at_subscripts_and_tab_tables_but_not_at_prose_for() {
+    for (next, is_merged) in [
+        ("# cache[key] = compute(key)", false),
+        ("# items[i].visible = false", false),
+        ("# name\ttype\tdefault", false),
+        ("# for the given filter in this order:", true),
+    ] {
+        // Merged when the next line's first word joins the overflow `kkk`.
+        let first_word = next
+            .trim_start_matches("# ")
+            .split_whitespace()
+            .next()
+            .unwrap();
+        let lines = paragraph_lines(LONG, next);
+        let joined = lines
+            .iter()
+            .any(|line| line.contains(&format!("kkk {first_word}")));
+        assert_eq!(joined, is_merged, "next line {next:?}: {lines:?}");
+    }
+}
+
+#[test]
+fn line_mode_still_wraps_prose_that_only_looks_a_little_like_code() {
+    // Only unambiguous code is left unwrapped: these are prose, so they wrap
+    // as they always did.
+    for source in [
+        "# x = y means that the left side takes the value\n",
+        "# Speed (in pixels per second, scaled by the zoom)\n",
+        "# if you need this, then the block starts:\n",
+        "# this one\thas a tab in the middle of it and goes on\n",
+        "# a typo  double space in the middle of it\n",
+        "# ends with a semicolon like old C comments;\n",
+    ] {
+        let formatted = format(source, CommentWrap::Line);
+        assert_ne!(formatted, source, "{source:?} was not wrapped");
+        assert!(
+            formatted.lines().all(|line| line.len() <= 40),
+            "{formatted}"
+        );
+    }
+}

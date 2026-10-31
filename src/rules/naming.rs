@@ -1,6 +1,35 @@
-use crate::ast::{for_each_member, ClassMember, ScriptFile};
+use crate::ast::{for_each_member, is_export_annotation, ClassMember, ScriptFile};
 use crate::diagnostic::{Diagnostic, Fix, Replacement};
 use std::path::Path;
+
+/// True for the keywords Godot also accepts as names (`match`, `when`). Their
+/// uses elsewhere in a script lex as keywords, so a rename would change the
+/// declaration but miss references like `State.match`. They are reported
+/// without a fix.
+fn is_keyword_name(name: &str) -> bool {
+    matches!(name, "match" | "when")
+}
+
+/// The diagnostic `diagnostic` with a rename fix to `new_text` over `span`,
+/// unless `name` is a keyword name (see [`is_keyword_name`]).
+fn with_rename_fix(
+    diagnostic: Diagnostic,
+    name: &str,
+    span: crate::token::Span,
+    new_text: String,
+) -> Diagnostic {
+    if is_keyword_name(name) {
+        return diagnostic;
+    }
+    diagnostic.with_fix(Fix {
+        replacements: vec![Replacement {
+            offset: span.offset,
+            length: span.length,
+            new_text,
+        }],
+        is_safe: false, // renaming identifiers is never safe for auto-fix
+    })
+}
 
 /// Check that class_name uses PascalCase.
 pub fn check_class_name_pascal_case(file: &ScriptFile, diagnostics: &mut Vec<Diagnostic>) {
@@ -13,25 +42,16 @@ pub fn check_class_name_pascal_case(file: &ScriptFile, diagnostics: &mut Vec<Dia
         {
             if !name.is_empty() && !is_pascal_case(name) {
                 let fixed = to_pascal_case(name);
-                diagnostics.push(
-                    Diagnostic::warning(
-                        "naming/class-name-pascal-case",
-                        format!(
-                            "class name '{}' should use PascalCase (e.g., '{}')",
-                            name, fixed
-                        ),
-                        *span,
-                        &file.path,
-                    )
-                    .with_fix(Fix {
-                        replacements: vec![Replacement {
-                            offset: name_span.offset,
-                            length: name_span.length,
-                            new_text: fixed,
-                        }],
-                        is_safe: false, // renaming identifiers is never safe for auto-fix
-                    }),
+                let diagnostic = Diagnostic::warning(
+                    "naming/class-name-pascal-case",
+                    format!(
+                        "class name '{}' should use PascalCase (e.g., '{}')",
+                        name, fixed
+                    ),
+                    *span,
+                    &file.path,
                 );
+                diagnostics.push(with_rename_fix(diagnostic, name, *name_span, fixed));
             }
         }
     }
@@ -243,7 +263,7 @@ fn check_enums_recursive(
             if let (Some(name), Some(ns)) = (name, name_span) {
                 if !is_pascal_case(name) {
                     let fixed = to_pascal_case(name);
-                    diagnostics.push(Diagnostic::warning_with_fix(
+                    let diagnostic = Diagnostic::warning(
                         "naming/enum-name-pascal-case",
                         format!(
                             "enum name '{}' should use PascalCase (e.g., '{}')",
@@ -251,11 +271,8 @@ fn check_enums_recursive(
                         ),
                         *span,
                         file_path,
-                        ns.offset,
-                        ns.length,
-                        fixed,
-                        false,
-                    ));
+                    );
+                    diagnostics.push(with_rename_fix(diagnostic, name, *ns, fixed));
                 }
             }
         } else {
@@ -264,7 +281,7 @@ fn check_enums_recursive(
                     continue;
                 }
                 let fixed = to_screaming_snake_case(&em.name);
-                diagnostics.push(Diagnostic::warning_with_fix(
+                let diagnostic = Diagnostic::warning(
                     "naming/enum-member-screaming-case",
                     format!(
                         "enum member '{}' should use SCREAMING_SNAKE_CASE (e.g., '{}')",
@@ -272,11 +289,8 @@ fn check_enums_recursive(
                     ),
                     em.span,
                     file_path,
-                    em.span.offset,
-                    em.span.length,
-                    fixed,
-                    false,
-                ));
+                );
+                diagnostics.push(with_rename_fix(diagnostic, &em.name, em.span, fixed));
             }
         }
     });
@@ -524,10 +538,12 @@ fn is_state_adjective(word: &str) -> bool {
     state_adjectives().contains(word)
 }
 
-/// Check that private members (funcs/vars starting with _) are actually private pattern.
+/// Warn when a `_`-prefixed (private) variable is shown in the inspector by
+/// an `@export` annotation, which makes it part of the node's public face.
+///
+/// `@export_storage` saves a variable without showing it, which is how
+/// private state is meant to be persisted, so it is not reported.
 pub fn check_private_underscore_prefix(file: &ScriptFile, diagnostics: &mut Vec<Diagnostic>) {
-    // This rule checks that functions/vars starting with _ don't have @export.
-    // It's more of a convention check.
     for member in &file.members {
         if let ClassMember::Variable {
             name,
@@ -539,7 +555,7 @@ pub fn check_private_underscore_prefix(file: &ScriptFile, diagnostics: &mut Vec<
             if name.starts_with('_')
                 && annotations
                     .iter()
-                    .any(|a| crate::ast::is_export_annotation(&a.name))
+                    .any(|a| is_export_annotation(&a.name) && a.name != "export_storage")
             {
                 diagnostics.push(Diagnostic::warning(
                     "naming/private-underscore-prefix",

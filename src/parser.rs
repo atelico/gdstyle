@@ -217,14 +217,7 @@ impl<'t> Parser<'t> {
         let span = self.current_token().span;
         self.advance(); // skip class_name
 
-        let (name, name_span) = if let TokenKind::Identifier(ref name) = self.current_kind() {
-            let n = name.clone();
-            let s = self.current_token().span;
-            self.advance();
-            (n, s)
-        } else {
-            (String::new(), Span::new(0, 0, 0, 0))
-        };
+        let (name, name_span) = self.expect_identifier();
 
         ClassMember::ClassNameDecl {
             name,
@@ -296,18 +289,7 @@ impl<'t> Parser<'t> {
         let span = self.current_token().span;
         self.advance(); // skip enum
 
-        let (name, name_span) = if !self.is_at_end() {
-            if let TokenKind::Identifier(ref name) = self.current_kind() {
-                let n = name.clone();
-                let s = self.current_token().span;
-                self.advance();
-                (Some(n), Some(s))
-            } else {
-                (None, None)
-            }
-        } else {
-            (None, None)
-        };
+        let (name, name_span) = self.take_name().unzip();
 
         let mut enum_members = Vec::new();
 
@@ -328,11 +310,7 @@ impl<'t> Parser<'t> {
                     continue;
                 }
 
-                if let TokenKind::Identifier(ref name) = self.current_kind() {
-                    let member_span = self.current_token().span;
-                    let member_name = name.clone();
-                    self.advance();
-
+                if let Some((member_name, member_span)) = self.take_name() {
                     // Skip optional value assignment.
                     if !self.is_at_end() && self.current_kind() == TokenKind::Assign {
                         self.advance(); // skip =
@@ -729,20 +707,29 @@ impl<'t> Parser<'t> {
         name
     }
 
-    fn expect_identifier(&mut self) -> (String, Span) {
+    /// Consume the current token and return it when it is a name. Besides
+    /// identifiers, that is `match` and `when`: Godot's
+    /// `Token::is_identifier()` takes them as names everywhere, so a
+    /// parameter, enum member or `class_name` can be called `when`.
+    fn take_name(&mut self) -> Option<(String, Span)> {
         if self.is_at_end() {
-            return (String::new(), Span::new(0, 0, 0, 0));
+            return None;
         }
         let name = match self.current_kind() {
             TokenKind::Identifier(name) => name,
-            // Keywords Godot's `Token::is_identifier()` also takes as names,
-            // like a parameter called `when`.
             TokenKind::Match | TokenKind::When => self.current_token().text.clone(),
-            _ => return (String::new(), Span::new(0, 0, 0, 0)),
+            _ => return None,
         };
         let span = self.current_token().span;
         self.advance();
-        (name, span)
+        Some((name, span))
+    }
+
+    /// Like [`Self::take_name`], with an empty name and span when the current
+    /// token is not a name, which callers treat as a missing name.
+    fn expect_identifier(&mut self) -> (String, Span) {
+        self.take_name()
+            .unwrap_or_else(|| (String::new(), Span::new(0, 0, 0, 0)))
     }
 
     fn count_body_lines(&mut self) -> usize {
@@ -1271,6 +1258,26 @@ mod tests {
             })
             .collect();
         assert_eq!(members, vec!["of(when, o)", "match(unix)"]);
+    }
+
+    #[test]
+    fn match_and_when_are_names_in_enums_and_class_name() {
+        let members = parse_source("class_name when\nenum match { match, when, idle }\n");
+        let ClassMember::ClassNameDecl { ref name, .. } = members[0] else {
+            panic!("expected ClassNameDecl, got {:?}", members[0]);
+        };
+        assert_eq!(name, "when");
+        let ClassMember::Enum {
+            ref name,
+            ref members,
+            ..
+        } = members[1]
+        else {
+            panic!("expected Enum, got {:?}", members[1]);
+        };
+        assert_eq!(name.as_deref(), Some("match"));
+        let member_names: Vec<&str> = members.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(member_names, vec!["match", "when", "idle"]);
     }
 
     #[test]
