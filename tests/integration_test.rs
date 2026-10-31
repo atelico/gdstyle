@@ -3866,6 +3866,103 @@ func c(x: bool) -> void:
 }
 
 #[test]
+fn quality_no_else_return_sees_multi_line_and_one_line_returns() {
+    // A `return` that spans lines ends its branch on the closing bracket or
+    // after a backslash, and `if x: return y` returns on its header line.
+    let source = "\
+func a(x: bool) -> int:
+\tif x:
+\t\treturn max(
+\t\t\t1,
+\t\t\t2
+\t\t)
+\telse:
+\t\treturn 0
+
+
+func b(x: bool) -> int:
+\tif x:
+\t\treturn 1 + \\
+\t\t\t2
+\telse:
+\t\treturn 0
+
+
+func c(x: bool, s: String) -> int:
+\tif s == \":\": return 1
+\telif x: return {\"a\": 2}.size()
+\telse:
+\t\treturn 0
+";
+    assert_eq!(
+        flagged_lines(source, "quality/no-else-return"),
+        vec![7, 15, 21, 22]
+    );
+}
+
+#[test]
+fn quality_no_else_return_needs_every_earlier_branch_to_return() {
+    // `if a:` falls through after `foo()`, so the `else` is needed even
+    // though the `elif` right above it returns. A one-line header whose body
+    // is not a `return` falls through too.
+    let source = "\
+func f(a: bool, b: bool) -> void:
+\tif a:
+\t\tprint(a)
+\telif b:
+\t\treturn
+\telse:
+\t\tprint(b)
+
+
+func g(a: bool) -> void:
+\tif a: print(a)
+\telse:
+\t\tprint(1)
+";
+    assert_eq!(
+        flagged_lines(source, "quality/no-else-return"),
+        Vec::<usize>::new()
+    );
+}
+
+#[test]
+fn quality_no_else_return_reads_a_header_continued_at_its_own_indent() {
+    let source = "\
+func f(a: bool, b: bool) -> int:
+\tif (a
+\tand b):
+\t\treturn 1
+\telse:
+\t\treturn 0
+";
+    assert_eq!(flagged_lines(source, "quality/no-else-return"), vec![5]);
+}
+
+#[test]
+fn fmt_keeps_a_warning_ignore_restore_below_its_region() {
+    // The restore closes the region above it. Taken as the head of `const C`,
+    // it moved with the constant to above the region's start.
+    let source = "\
+extends Node
+
+var x := 1
+@warning_ignore_start(\"unused\")
+var a := 1
+@warning_ignore_restore(\"unused\")
+const C = 1
+";
+    let formatted = formatter::format_source(source, &default_config());
+    let start = formatted
+        .find("@warning_ignore_start")
+        .expect("start marker kept");
+    let restore = formatted
+        .find("@warning_ignore_restore")
+        .expect("restore marker kept");
+    assert!(start < restore, "{formatted}");
+}
+
+#[test]
 fn quality_return_rules_share_one_reading_of_return() {
     // `max-returns` used to skip `return(x)` and `return;`, and
     // `unreachable-code` skipped `return;`.
@@ -3989,6 +4086,91 @@ var b: int
         formatter::format_source(source, &default_config()),
         expected
     );
+}
+
+// --- multi-line annotations move with their member ----------------------------
+
+#[test]
+fn fmt_moves_a_multi_line_annotation_with_its_member() {
+    // The annotation's argument lines used to stay with the member above,
+    // and the stranded `@export_range(` was then sorted above `extends` as a
+    // script annotation, unexporting the variable.
+    let source = "\
+extends Node
+
+var b: int = 0
+@export_range(
+\t0, 10
+)
+var a: int = 1
+";
+    let expected = "\
+extends Node
+
+@export_range(
+\t0, 10
+)
+var a: int = 1
+
+var b: int = 0
+";
+    assert_eq!(
+        formatter::format_source(source, &default_config()),
+        expected
+    );
+}
+
+#[test]
+fn fmt_keeps_a_multi_line_warning_ignore_on_the_member_it_silences() {
+    // The parser drops `@warning_ignore`, so only the line-based walk sees
+    // it. Left behind, it would silence `b` instead of `_a`.
+    let source = "\
+extends Node
+
+var b: int = 0
+@warning_ignore(
+\t\"unused_private_class_variable\"
+)
+@export var _a: int = 1
+";
+    let expected = "\
+extends Node
+
+@warning_ignore(
+\t\"unused_private_class_variable\"
+)
+@export var _a: int = 1
+
+var b: int = 0
+";
+    assert_eq!(
+        formatter::format_source(source, &default_config()),
+        expected
+    );
+}
+
+#[test]
+fn fmt_keeps_an_annotation_that_closes_on_the_declaration_line_whole() {
+    // The `var` sits on an indented continuation line, so the reorder reads
+    // it as part of the function above and leaves it in place. What matters
+    // is that the annotation and its variable stay together.
+    let source = "\
+extends Node
+
+
+func helper() -> void:
+\tpass
+
+
+@export_range(
+\t0, 10) var a: int = 1
+";
+    let formatted = formatter::format_source(source, &default_config());
+    assert!(
+        formatted.contains("\n@export_range(\n\t0, 10) var a: int = 1\n"),
+        "{formatted}"
+    );
+    assert!(formatted.starts_with("extends Node\n"), "{formatted}");
 }
 
 // --- @warning_ignore_start regions survive reordering ------------------------
