@@ -1470,6 +1470,7 @@ fn export_sections<'s>(source: &'s str, members: &[ClassMember]) -> Vec<(String,
     for member in members {
         let markers: Vec<(&str, usize)> = match member {
             ClassMember::Variable { annotations, .. }
+            | ClassMember::StaticVariable { annotations, .. }
             | ClassMember::Function { annotations, .. } => annotations
                 .iter()
                 .map(|a| (a.name.as_str(), a.span.offset))
@@ -1501,16 +1502,41 @@ fn export_sections<'s>(source: &'s str, members: &[ClassMember]) -> Vec<(String,
 
 /// The text between the parentheses of the annotation starting at byte
 /// `offset`, like `"Stats", "stat_"` for `@export_group("Stats", "stat_")`.
-/// Empty when the annotation has no arguments on its line.
+/// Brackets inside strings don't count (`"Size (px)"`), and the arguments may
+/// span lines. Empty when the annotation has no argument list.
 fn annotation_arguments(source: &str, offset: usize) -> &str {
-    let line = source
-        .get(offset..)
-        .and_then(|rest| rest.split('\n').next())
-        .unwrap_or("");
-    match (line.find('('), line.find(')')) {
-        (Some(open), Some(close)) if open < close => line[open + 1..close].trim(),
-        _ => "",
+    let Some(rest) = source.get(offset..) else {
+        return "";
+    };
+    // Skip `@` and the annotation name, then expect the opening paren.
+    let name_end = rest
+        .char_indices()
+        .skip(1)
+        .find(|(_, c)| !(c.is_alphanumeric() || *c == '_'))
+        .map_or(rest.len(), |(index, _)| index);
+    let after_name = &rest[name_end..];
+    let Some(arguments) = after_name.trim_start_matches([' ', '\t']).strip_prefix('(') else {
+        return "";
+    };
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut is_escaped = false;
+    for (index, c) in arguments.char_indices() {
+        match quote {
+            Some(_) if is_escaped => is_escaped = false,
+            Some(_) if c == '\\' => is_escaped = true,
+            Some(open) if c == open => quote = None,
+            Some(_) => {}
+            None => match c {
+                '"' | '\'' => quote = Some(c),
+                '(' | '[' | '{' => depth += 1,
+                ')' if depth == 0 => return arguments[..index].trim(),
+                ')' | ']' | '}' => depth = depth.saturating_sub(1),
+                _ => {}
+            },
+        }
     }
+    ""
 }
 
 /// Reorder the members of each inner class, unless doing so would change
@@ -2571,6 +2597,16 @@ mod tests {
             ("tint".into(), ["\"Looks\"", "", ""]),
         ];
         assert_eq!(sections, expected);
+    }
+
+    #[test]
+    fn annotation_arguments_skip_brackets_in_strings_and_span_lines() {
+        let source = "@export_group(\"Size (px)\", \"size_\")\n@export_group(\n\t\"Long\"\n)\n@export_group\n";
+        let second = source.find("@export_group(\n").unwrap();
+        let third = source.rfind("@export_group").unwrap();
+        assert_eq!(annotation_arguments(source, 0), "\"Size (px)\", \"size_\"");
+        assert_eq!(annotation_arguments(source, second), "\"Long\"");
+        assert_eq!(annotation_arguments(source, third), "");
     }
 
     #[test]

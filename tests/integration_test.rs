@@ -3751,6 +3751,29 @@ var plain: int
     assert_eq!(formatter::format_source(source, &config), expected);
 }
 
+#[test]
+fn fmt_keeps_export_sections_with_brackets_multi_line_markers_and_static_vars() {
+    // Each reorder would move an export into another section: two group
+    // names that differ only after a `)`, a marker whose arguments span
+    // lines, and a marker on a static var, which sorts above the exports.
+    let config = default_config();
+    let sources = [
+        "extends Node\n\n@export_group(\"Size (px)\")\n@export var a: int = 1\n@export_group(\"Size (px) fine\")\nvar _p: int = 0\n@export var b: int = 2\n",
+        "extends Node\n\nvar _p: int = 0\n@export_group(\n\t\"G\")\nvar _q: int = 0\n@export var a: int = 1\n",
+        "extends Node\n\n@export var a: int = 1\n@export_group(\"G\")\nstatic var s: int = 0\n@export var b: int = 2\n",
+    ];
+    for source in sources {
+        let formatted = formatter::format_source(source, &config);
+        let order = |text: &str| -> Vec<String> {
+            text.lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(str::to_string)
+                .collect()
+        };
+        assert_eq!(order(&formatted), order(source), "reordered:\n{formatted}");
+    }
+}
+
 // --- @warning_ignore_start regions survive reordering ------------------------
 
 /// Top-level declaration lines of `source`, in order, with the region marker
