@@ -1780,6 +1780,18 @@ fn fmt_keeps_doc_comments_on_consecutive_bodyless_abstract_functions() {
 }
 
 #[test]
+fn fmt_and_check_keep_the_body_of_a_function_with_a_when_parameter() {
+    // `when` is a keyword Godot also takes as a name. With a call in its
+    // default, the signature used to end early: `fmt` put two blank lines
+    // after it and `check` read the body's `var` as a class member.
+    let source = "extends RefCounted\n\n\nstatic func when(unix: int) -> String:\n\tvar text: String = str(unix)\n\treturn text\n\n\nfunc of(when: Callable = Callable(), o: Dictionary = {}) -> int:\n\tvar made: int = 1\n\treturn made\n";
+    let config = default_config();
+    assert_eq!(formatter::format_source(source, &config), source);
+    let diagnostics = linter::lint_source(source, "test.gd", &config);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
 fn fmt_class_annotation_before_signal_not_duplicated() {
     // Same family of bug as issue #4: a stray top-level annotation
     // (`@abstract` here) immediately before a `signal` declaration

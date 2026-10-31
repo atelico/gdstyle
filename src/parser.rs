@@ -733,14 +733,16 @@ impl<'t> Parser<'t> {
         if self.is_at_end() {
             return (String::new(), Span::new(0, 0, 0, 0));
         }
-        if let TokenKind::Identifier(ref name) = self.current_kind() {
-            let n = name.clone();
-            let s = self.current_token().span;
-            self.advance();
-            (n, s)
-        } else {
-            (String::new(), Span::new(0, 0, 0, 0))
-        }
+        let name = match self.current_kind() {
+            TokenKind::Identifier(name) => name,
+            // Keywords Godot's `Token::is_identifier()` also takes as names,
+            // like a parameter called `when`.
+            TokenKind::Match | TokenKind::When => self.current_token().text.clone(),
+            _ => return (String::new(), Span::new(0, 0, 0, 0)),
+        };
+        let span = self.current_token().span;
+        self.advance();
+        (name, span)
     }
 
     fn count_body_lines(&mut self) -> usize {
@@ -1247,6 +1249,28 @@ mod tests {
         } else {
             panic!("expected Function");
         }
+    }
+
+    #[test]
+    fn match_and_when_are_names_in_a_signature() {
+        // A keyword name used to end the parameter list at the first `)` of a
+        // default value, so the body was read from the next parameter's colon
+        // and its `var` became a class member.
+        let source = "func of(when: Callable = Callable(), o: Dictionary = {}) -> int:\n\tvar made: int = 1\n\treturn made\n\n\nstatic func match(unix: int) -> String:\n\treturn str(unix)\n";
+        let members: Vec<String> = parse_source(source)
+            .iter()
+            .filter_map(|member| match member {
+                ClassMember::Function {
+                    name, parameters, ..
+                } => {
+                    let names: Vec<&str> = parameters.iter().map(|p| p.name.as_str()).collect();
+                    Some(format!("{name}({})", names.join(", ")))
+                }
+                ClassMember::Variable { name, .. } => Some(format!("var {name}")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(members, vec!["of(when, o)", "match(unix)"]);
     }
 
     #[test]
