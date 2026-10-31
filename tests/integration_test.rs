@@ -2917,6 +2917,31 @@ fn quality_max_parameters_suppressible() {
     );
 }
 
+#[test]
+fn quality_max_parameters_counts_past_comments_in_the_list() {
+    // A comment between parameters used to be read as one: the parameter
+    // after it was lost, or the names in the rows of a nested default were
+    // counted as parameters.
+    let config = Config {
+        max_parameters: 2,
+        ..Config::default()
+    };
+    let messages = |source: &str| -> Vec<String> {
+        linter::lint_source(source, "test.gd", &config)
+            .into_iter()
+            .filter(|d| d.rule == "quality/max-parameters")
+            .map(|d| d.message)
+            .collect()
+    };
+    let trailing = "func f(\n\ta: int,\n\tb: int,  # note\n\tc: int\n) -> void:\n\tprint(a)\n";
+    let nested = "func f(\n\ta: int,\n\t# note\n\trows: Array = [\n\t\t[A, B],\n\t\t[B, A],\n\t],\n\tc: int\n) -> void:\n\tprint(a)\n";
+    let expected = vec!["function 'f' has 3 parameters (max 2)".to_string()];
+    assert_eq!(
+        (messages(trailing), messages(nested)),
+        (expected.clone(), expected)
+    );
+}
+
 // === Corner case tests ===
 
 // Line breaker: escaped backslash before closing quote

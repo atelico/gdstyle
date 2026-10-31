@@ -613,7 +613,9 @@ impl<'t> Parser<'t> {
         self.advance(); // skip (
 
         while !self.is_at_end() && self.current_kind() != TokenKind::RightParen {
-            self.skip_newlines();
+            // A comment between parameters is not one. Read as a name, it sent
+            // the recovery below to the next comma at any depth.
+            self.skip_newlines_and_comments();
             if self.is_at_end() || self.current_kind() == TokenKind::RightParen {
                 break;
             }
@@ -1130,6 +1132,18 @@ mod tests {
             assert_eq!(parameters[1].name, "new_value");
         } else {
             panic!("expected Signal");
+        }
+    }
+
+    #[test]
+    fn comments_in_a_parameter_list_are_not_parameters() {
+        let source = "func f(\n\ta: int,\n\tb: int,  # trailing\n\t# own line\n\tc: Array = [\n\t\t[1, 2],\n\t\t[3, 4],\n\t],\n\td: int  # last\n) -> void:\n\tpass\n";
+        let members = parse_source(source);
+        if let ClassMember::Function { ref parameters, .. } = members[0] {
+            let names: Vec<&str> = parameters.iter().map(|p| p.name.as_str()).collect();
+            assert_eq!(names, vec!["a", "b", "c", "d"]);
+        } else {
+            panic!("expected Function");
         }
     }
 
