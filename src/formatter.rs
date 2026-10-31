@@ -1565,9 +1565,22 @@ fn annotation_call(text: &str) -> Option<AnnotationCall<'_>> {
 /// neither `#` nor `@` after the first, so the member walk-back needs this
 /// to keep them together.
 fn multi_line_annotation_start(lines: &[&str], end: usize, lower_bound: usize) -> Option<usize> {
+    const DECLARATIONS: [&str; 9] = [
+        "var ",
+        "const ",
+        "func ",
+        "static ",
+        "signal ",
+        "enum ",
+        "class ",
+        "class_name ",
+        "extends ",
+    ];
     for start in (lower_bound..end).rev() {
         let line = lines[start];
-        if line.trim().is_empty() {
+        // Annotation arguments hold no blank line and no declaration, so the
+        // scan never runs past the member above.
+        if line.trim().is_empty() || DECLARATIONS.iter().any(|keyword| line.starts_with(keyword)) {
             return None;
         }
         if !line.starts_with('@') {
@@ -1608,10 +1621,32 @@ fn changes_region_coverage(original: &str, reordered: &str) -> bool {
         return false;
     }
     let changes_warning_ignore_regions = original.contains("@warning_ignore_start")
-        && warning_ignore_region_coverage(original) != warning_ignore_region_coverage(reordered);
+        && (warning_ignore_region_coverage(original) != warning_ignore_region_coverage(reordered)
+            || region_markers(
+                original,
+                &["@warning_ignore_start", "@warning_ignore_restore"],
+            ) != region_markers(
+                reordered,
+                &["@warning_ignore_start", "@warning_ignore_restore"],
+            ));
     let changes_fold_regions = original.contains("#region")
-        && fold_region_coverage(original) != fold_region_coverage(reordered);
+        && (fold_region_coverage(original) != fold_region_coverage(reordered)
+            || region_markers(original, &["#region", "#endregion"])
+                != region_markers(reordered, &["#region", "#endregion"]));
     changes_warning_ignore_regions || changes_fold_regions
+}
+
+/// The marker lines of `source` that start with one of `prefixes`, in
+/// order. Equal coverage is not enough: a region left open to the end of
+/// the file covers the same lines whether its closing marker sits after it
+/// or was carried above its start, so the markers must also keep their
+/// order.
+fn region_markers<'s>(source: &'s str, prefixes: &[&str]) -> Vec<&'s str> {
+    source
+        .split('\n')
+        .map(str::trim)
+        .filter(|line| prefixes.iter().any(|prefix| line.starts_with(prefix)))
+        .collect()
 }
 
 /// Every code line paired with the `#region` names enclosing it, outermost

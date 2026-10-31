@@ -3927,6 +3927,42 @@ func g(a: bool) -> void:
 }
 
 #[test]
+fn quality_no_else_return_reads_a_header_continued_at_its_own_indent() {
+    let source = "\
+func f(a: bool, b: bool) -> int:
+\tif (a
+\tand b):
+\t\treturn 1
+\telse:
+\t\treturn 0
+";
+    assert_eq!(flagged_lines(source, "quality/no-else-return"), vec![5]);
+}
+
+#[test]
+fn fmt_keeps_a_warning_ignore_restore_below_its_region() {
+    // The restore closes the region above it. Taken as the head of `const C`,
+    // it moved with the constant to above the region's start.
+    let source = "\
+extends Node
+
+var x := 1
+@warning_ignore_start(\"unused\")
+var a := 1
+@warning_ignore_restore(\"unused\")
+const C = 1
+";
+    let formatted = formatter::format_source(source, &default_config());
+    let start = formatted
+        .find("@warning_ignore_start")
+        .expect("start marker kept");
+    let restore = formatted
+        .find("@warning_ignore_restore")
+        .expect("restore marker kept");
+    assert!(start < restore, "{formatted}");
+}
+
+#[test]
 fn quality_return_rules_share_one_reading_of_return() {
     // `max-returns` used to skip `return(x)` and `return;`, and
     // `unreachable-code` skipped `return;`.

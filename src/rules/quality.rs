@@ -1098,13 +1098,15 @@ fn every_earlier_branch_returns(
     loop {
         // The branch header is the nearest code line above at the chain's
         // indent; everything between it and `branch_end` is its body.
-        let Some(header) = (0..branch_end)
+        let Some(header_end) = (0..branch_end)
             .rev()
             .filter(|&index| is_code(index))
             .find(|&index| indent_level(&file.lines[index]) <= header_indent)
         else {
             return false;
         };
+        // A header may continue on lines at its own indent (`if (a` / `and b):`).
+        let header = statement_start(file, string_line_mask, header_end);
         let header_text = file.lines[header].trim();
         let is_if = is_branch_header(header_text, "if");
         if indent_level(&file.lines[header]) != header_indent
@@ -1114,12 +1116,12 @@ fn every_earlier_branch_returns(
         }
         let returns = match inline_branch_body(header_text) {
             Some(body) => is_return_statement(body),
-            None => (header + 1..branch_end)
+            None => (header_end + 1..branch_end)
                 .rev()
                 .find(|&index| is_code(index) || string_line_mask.is_interior(index))
                 .is_some_and(|last| {
                     let start = statement_start(file, string_line_mask, last);
-                    start > header
+                    start > header_end
                         && is_return_statement(file.lines[start].trim())
                         && return_ends_branch(file, string_line_mask, start, header_indent)
                 }),
