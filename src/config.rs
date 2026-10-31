@@ -96,14 +96,16 @@ pub enum CommentWrap {
     /// Wrap the long line on its own at word boundaries. The lines after it
     /// are left as they are, so the words moved off it can end up on a short
     /// line in the middle of a paragraph.
+    ///
+    /// In both wrapping modes, lines that look like code or a table, hold a
+    /// URL or a `gdstyle:` directive, and `[codeblock]` contents in doc
+    /// comments are never wrapped, and a long list item wraps under its text.
     #[default]
     Line,
     /// Wrap the long line and refill the rest of its paragraph: the comment
     /// lines below it with the same indent and marker, up to an empty
     /// comment line, a list item, a `TODO:`-style tag, or a line that looks
-    /// like code. Lines above it are never touched. Lines that look like
-    /// code, hold a URL or a `gdstyle:` directive, and `[codeblock]`
-    /// contents in doc comments are never wrapped.
+    /// like code or a table. Lines above it are never touched.
     Paragraph,
     /// Leave comments alone.
     Off,

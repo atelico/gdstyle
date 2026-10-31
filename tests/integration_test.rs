@@ -3774,6 +3774,185 @@ fn fmt_keeps_export_sections_with_brackets_multi_line_markers_and_static_vars() 
     }
 }
 
+// --- review fixes since 0.5.0 -------------------------------------------------
+
+/// Lines reported for `rule` in `source` with the default config.
+fn flagged_lines(source: &str, rule: &str) -> Vec<usize> {
+    linter::lint_source(source, "test.gd", &default_config())
+        .iter()
+        .filter(|d| d.rule == rule)
+        .map(|d| d.span.line)
+        .collect()
+}
+
+#[test]
+fn quality_process_get_node_survives_non_ascii_before_a_percent() {
+    // The word before `%` started one byte after the previous character,
+    // which is inside `×` or a combining accent, and slicing there panicked.
+    let source = "\
+func _process(_delta: float) -> void:
+\tvar x: int = 5×n %limit
+\tvar y: int = cafe\u{301} %limit
+";
+    assert_eq!(
+        flagged_lines(source, "quality/process-get-node"),
+        Vec::<usize>::new()
+    );
+}
+
+#[test]
+fn quality_process_get_node_ignores_strings_that_span_lines_and_other_functions() {
+    // Inner lines of a `"""` string are data. `my_get_node(` is another
+    // function, while `owner.get_node(` is a lookup.
+    let source = "\
+func _process(_delta: float) -> void:
+\tvar text: String = \"\"\"
+%d objects, $5 each
+\"\"\" % [count]
+\tvar node: Node = my_get_node(\"x\")
+\tvar other: Node = owner.get_node(\"y\")
+";
+    assert_eq!(flagged_lines(source, "quality/process-get-node"), vec![6]);
+}
+
+#[test]
+fn quality_no_else_return_reads_past_strings_that_span_lines() {
+    // The unindented inner line of the string used to end the branch scan
+    // early, so the needed `else` was reported.
+    let source = "\
+func f(a: bool, b: bool) -> int:
+\tif a:
+\t\tif b:
+\t\t\tprint(\"\"\"
+x\"\"\")
+\t\t\treturn 1
+\telse:
+\t\treturn 2
+\treturn 3
+";
+    assert_eq!(
+        flagged_lines(source, "quality/no-else-return"),
+        Vec::<usize>::new()
+    );
+}
+
+#[test]
+fn quality_no_else_return_knows_every_return_spelling_and_skips_lambdas() {
+    // `return;` and `return-1` end the branch. A `return` inside a lambda
+    // ends only the lambda, so the `else` after it is needed.
+    let source = "\
+func a(x: bool) -> void:
+\tif x:
+\t\treturn;
+\telse:
+\t\tprint(x)
+
+
+func b(x: bool) -> int:
+\tif x:
+\t\treturn-1
+\telse:
+\t\treturn 1
+
+
+func c(x: bool) -> void:
+\tif x:
+\t\tvar f: Callable = func():
+\t\t\treturn 1
+\telse:
+\t\tprint(x)
+";
+    assert_eq!(flagged_lines(source, "quality/no-else-return"), vec![4, 11]);
+}
+
+#[test]
+fn quality_return_rules_share_one_reading_of_return() {
+    // `max-returns` used to skip `return(x)` and `return;`, and
+    // `unreachable-code` skipped `return;`.
+    let config = Config {
+        max_returns: 2,
+        ..Config::default()
+    };
+    let source = "\
+func f(x: int) -> int:
+\tif x == 0:
+\t\treturn(0)
+\tif x == 1:
+\t\treturn;
+\treturn x
+
+
+func g() -> void:
+\treturn;
+\tprint(1)
+";
+    let rules: Vec<(String, usize)> = linter::lint_source(source, "test.gd", &config)
+        .into_iter()
+        .filter(|d| d.rule == "quality/max-returns" || d.rule == "quality/unreachable-code")
+        .map(|d| (d.rule, d.span.line))
+        .collect();
+    assert_eq!(
+        rules,
+        vec![
+            ("quality/max-returns".to_string(), 1),
+            ("quality/unreachable-code".to_string(), 11),
+        ]
+    );
+}
+
+#[test]
+fn match_and_when_are_names_in_enums_and_class_name() {
+    // Godot takes them as names everywhere, so they are checked like any
+    // other enum member or class name.
+    let members = flagged_lines(
+        "enum Mode { match, when, idle }\n",
+        "naming/enum-member-screaming-case",
+    );
+    assert_eq!(members.len(), 3, "{members:?}");
+    assert_eq!(
+        flagged_lines("class_name match\n", "naming/class-name-pascal-case"),
+        vec![1]
+    );
+}
+
+#[test]
+fn naming_private_underscore_prefix_allows_export_storage() {
+    // `@export_storage` saves a variable without showing it in the
+    // inspector, which is how private state is persisted.
+    let source = "@export_storage var _state: int\n@export var _shown: int\n";
+    assert_eq!(
+        flagged_lines(source, "naming/private-underscore-prefix"),
+        vec![2]
+    );
+}
+
+#[test]
+fn fmt_reorders_past_an_empty_group_that_keeps_every_export_ungrouped() {
+    // `@export_group("")` and no group are the same section, so moving `c`
+    // above the empty group keeps it ungrouped and the reorder happens.
+    let source = "\
+extends Node
+
+@export var a: int
+@export_group(\"\")
+var b: int
+@export var c: int
+";
+    let expected = "\
+extends Node
+
+@export var a: int
+@export var c: int
+
+@export_group(\"\")
+var b: int
+";
+    assert_eq!(
+        formatter::format_source(source, &default_config()),
+        expected
+    );
+}
+
 // --- @warning_ignore_start regions survive reordering ------------------------
 
 /// Top-level declaration lines of `source`, in order, with the region marker

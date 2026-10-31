@@ -192,7 +192,7 @@ pub fn run_all_rules_with_source(
         quality::check_max_inner_classes(file, config, &mut diagnostics);
     }
     if config.is_rule_enabled("quality/no-else-return") {
-        quality::check_no_else_return(file, &mut diagnostics);
+        quality::check_no_else_return(tokens, file, &mut diagnostics);
     }
     if config.is_rule_enabled("quality/unreachable-code") {
         quality::check_unreachable_code(file, &mut diagnostics);
@@ -204,7 +204,7 @@ pub fn run_all_rules_with_source(
         quality::check_allocation_in_loop(file, &mut diagnostics);
     }
     if config.is_rule_enabled("quality/process-get-node") {
-        quality::check_process_get_node(file, &mut diagnostics);
+        quality::check_process_get_node(tokens, file, &mut diagnostics);
     }
     if config.is_rule_enabled("quality/max-nesting-depth") {
         quality::check_max_nesting_depth(file, config, &mut diagnostics);

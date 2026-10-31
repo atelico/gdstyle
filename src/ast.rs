@@ -295,8 +295,10 @@ pub struct EnumMember {
 /// on: `export` and its typed forms like `export_range` or `export_file`.
 ///
 /// `export_group`, `export_subgroup` and `export_category` only start or end
-/// an inspector section. The parser attaches them to the next variable, which
-/// is often a plain one (`@export_group("")` then `var _cache`).
+/// an inspector section. The parser attaches them to the next variable or
+/// function, which is often a plain one (`@export_group("")` then
+/// `var _cache`), or keeps them as a standalone `ClassAnnotation` before
+/// anything else.
 ///
 /// # Examples
 ///

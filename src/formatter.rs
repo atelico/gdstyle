@@ -6,6 +6,8 @@ use crate::linter::{self, Suppressions};
 use crate::parser::Parser;
 use crate::token::{StringLines, Token, TokenKind};
 
+mod comments;
+
 /// Format a GDScript source string according to style rules.
 ///
 /// This applies every formatting rule the config leaves on, including the
@@ -894,14 +896,18 @@ fn lint_then_fix(source: &str, config: &Config) -> String {
     fixer::apply_fixes(source, &diagnostics, true)
 }
 
-/// Break lines that exceed max_line_length by wrapping at commas inside
-/// parentheses, brackets, or braces. Only breaks "obvious" cases where
-/// implicit line continuation inside delimiters is safe in GDScript.
+/// Width a tab counts for when measuring a line against `max_line_length`.
+const TAB_WIDTH: usize = 4;
+
+/// Break lines longer than `max_line_length`.
 ///
-/// Does NOT attempt to break:
-/// - Lines without delimiters (operator expressions, long strings)
-/// - Lines where the content inside delimiters has only one item
-/// - Lines where breaking wouldn't reduce the length below the limit
+/// Code is wrapped at the commas inside its first delimiter pair, or at the
+/// `and` / `or` of a long condition. Only those "obvious" breaks are made,
+/// where GDScript's implicit continuation inside brackets keeps the meaning.
+/// A line with no such break point (a long string, an operator chain) is
+/// left long. Comments are wrapped at word boundaries as `comment_wrap`
+/// says (see the `comments` module). Lines inside strings that span lines
+/// and suppressed lines are never touched.
 ///
 /// `spanning_strings` is the [`SpanningStrings`] answer for `source`.
 fn break_long_lines(
@@ -910,7 +916,6 @@ fn break_long_lines(
     spanning_strings: SpanningStrings,
     is_suppressed: &dyn Fn(usize) -> bool,
 ) -> String {
-    const TAB_WIDTH: usize = 4;
     let max_len = config.max_line_length;
     let lines: Vec<&str> = source.split('\n').collect();
     let string_line_mask = string_lines(source, spanning_strings);
@@ -925,50 +930,47 @@ fn break_long_lines(
     let mut i = 0;
     while i < lines.len() {
         let line = lines[i];
-        let visual_len = visual_line_len(line, TAB_WIDTH);
-        let is_comment = line.trim_start().starts_with('#');
-        // `[codeblock]` contents in a doc comment are code: their line breaks
-        // and spacing are part of the documentation.
+        // A `[codeblock]` tag line and the lines between the tags are code:
+        // their breaks and spacing are part of the documentation.
         let was_in_code_block = is_in_code_block;
-        if is_comment
-            && config.comment_wrap == CommentWrap::Paragraph
-            && !string_line_mask.is_interior(i)
-        {
-            is_in_code_block = code_block_state_after(line, is_in_code_block);
+        if !string_line_mask.is_interior(i) {
+            is_in_code_block = comments::code_block_state_after(line, is_in_code_block);
         }
+        let is_code_block_line = was_in_code_block || is_in_code_block;
 
-        if visual_len <= max_len || !is_editable(i) {
+        if visual_line_len(line, TAB_WIDTH) <= max_len || !is_editable(i) {
             result.push(line.to_string());
             i += 1;
             continue;
         }
 
-        if is_comment && config.comment_wrap != CommentWrap::Line {
-            let paragraph = match config.comment_wrap {
-                CommentWrap::Paragraph if !was_in_code_block && !is_in_code_block => {
-                    reflow_comment_paragraph(&lines, i, max_len, &is_editable)
-                }
-                _ => None,
+        if line.trim_start().starts_with('#') {
+            let refill_paragraph = match config.comment_wrap {
+                _ if is_code_block_line => None,
+                CommentWrap::Off => None,
+                CommentWrap::Line => Some(false),
+                CommentWrap::Paragraph => Some(true),
             };
-            match paragraph {
-                // The paragraph stops before any `[codeblock]` tag, so the
-                // consumed lines can't change `is_in_code_block`.
-                Some((reflowed, consumed)) => {
-                    result.extend(reflowed);
-                    i += consumed;
+            let wrapped = refill_paragraph.and_then(|refill| {
+                comments::wrap_long_comment(&lines, i, max_len, refill, &is_editable)
+            });
+            // A paragraph stops before any `[codeblock]` tag, so the lines it
+            // consumes can't change `is_in_code_block`.
+            let consumed = match wrapped {
+                Some((wrapped_lines, consumed)) => {
+                    result.extend(wrapped_lines);
+                    consumed
                 }
                 None => {
                     result.push(line.to_string());
-                    i += 1;
+                    1
                 }
-            }
+            };
+            i += consumed;
             continue;
         }
 
-        // Try multiple strategies to break this line.
         if let Some(broken) = try_break_line(line, config) {
-            result.extend(broken);
-        } else if let Some(broken) = try_break_comment(line, max_len) {
             result.extend(broken);
         } else if let Some(broken) = try_break_at_bool_operators(line, config) {
             result.extend(broken);
@@ -979,196 +981,6 @@ fn break_long_lines(
     }
 
     result.join("\n")
-}
-
-/// Whether a doc comment `[codeblock]` is open after comment `line`, given
-/// whether one was open before it. The tags count only on a line of their
-/// own, as Godot's docs write them, so prose that mentions `[codeblock]`
-/// opens nothing. The variants `[codeblocks]` and `[codeblock lang=...]`
-/// count too.
-fn code_block_state_after(line: &str, is_open: bool) -> bool {
-    let text = line.trim_start().trim_start_matches('#').trim();
-    if text.starts_with("[/codeblock") {
-        false
-    } else {
-        is_open || (text.starts_with("[codeblock") && text.ends_with(']'))
-    }
-}
-
-/// A `#` or `##` comment line split into its parts: the prefix (indent,
-/// marker and every space after it) and the text.
-struct CommentLine<'a> {
-    prefix: &'a str,
-    text: &'a str,
-}
-
-/// Split `line` into a [`CommentLine`]. `None` for anything but a plain
-/// comment: code, `#!`, `#region`, or a comment with no space after the
-/// marker, none of which are wrapped. The spaces after the marker belong to
-/// the prefix, so a nested list item (`#   - item`) keeps its indent.
-fn split_comment_line(line: &str) -> Option<CommentLine<'_>> {
-    let indent_len = line.len() - line.trim_start_matches([' ', '\t']).len();
-    let content = &line[indent_len..];
-    let marker_len = if content.starts_with("##") { 2 } else { 1 };
-    if !content.starts_with('#') || content.as_bytes().get(marker_len) != Some(&b' ') {
-        return None;
-    }
-    let after_marker = &content[marker_len..];
-    let spaces_len = after_marker.len() - after_marker.trim_start_matches(' ').len();
-    let prefix_len = indent_len + marker_len + spaces_len;
-    Some(CommentLine {
-        prefix: &line[..prefix_len],
-        text: &line[prefix_len..],
-    })
-}
-
-/// Byte length of the list marker and its space at the start of comment
-/// text: `- `, `* `, `+ `, `1. ` or `1) `.
-fn list_marker_len(text: &str) -> Option<usize> {
-    if text.starts_with("- ") || text.starts_with("* ") || text.starts_with("+ ") {
-        return Some(2);
-    }
-    let digits = text.bytes().take_while(u8::is_ascii_digit).count();
-    let after_digits = text.as_bytes().get(digits..digits + 2)?;
-    (digits > 0 && matches!(after_digits, [b'.' | b')', b' '])).then_some(digits + 2)
-}
-
-/// True when comment text starts a paragraph of its own: a list item or a
-/// tag like `TODO:`.
-fn starts_own_paragraph(text: &str) -> bool {
-    const TAGS: [&str; 6] = ["TODO", "FIXME", "NOTE", "HACK", "XXX", "BUG"];
-    list_marker_len(text).is_some()
-        || TAGS.iter().any(|tag| {
-            text.strip_prefix(tag)
-                .is_some_and(|rest| rest.starts_with([':', '(', ' ']))
-        })
-}
-
-/// True when comment text must keep its line breaks: commented-out code, a
-/// table, a URL (which can't be split), or a `gdstyle:` directive.
-///
-/// The code test is a heuristic tuned to miss rather than misfire on prose.
-/// It looks for declarations, block headers ending in `:`, `return` or
-/// `await` with an expression, assignments, and lines that are one call. A
-/// miss treats the line as prose, as `line` mode treats every comment.
-fn is_verbatim_comment_text(text: &str) -> bool {
-    const DECLARATIONS: [&str; 8] = [
-        "var ",
-        "const ",
-        "func ",
-        "signal ",
-        "enum ",
-        "class ",
-        "extends ",
-        "class_name ",
-    ];
-    const BLOCK_KEYWORDS: [&str; 7] = [
-        "if ",
-        "elif ",
-        "else",
-        "for ",
-        "while ",
-        "match ",
-        "static func ",
-    ];
-    let text = text.trim();
-    if text.contains("://") || text.starts_with("gdstyle:") || has_column_gap(text) {
-        return true;
-    }
-    if text.starts_with('@') || DECLARATIONS.iter().any(|keyword| text.starts_with(keyword)) {
-        return true;
-    }
-    if text.ends_with(':')
-        && BLOCK_KEYWORDS
-            .iter()
-            .any(|keyword| text.starts_with(keyword))
-    {
-        return true;
-    }
-    if matches!(text, "pass" | "break" | "continue" | "return") || text.ends_with(';') {
-        return true;
-    }
-    // `return x`, `await get_tree().process_frame`. Prose like "return the
-    // value" has more than one word and doesn't end in a bracket.
-    for keyword in ["return ", "await "] {
-        if let Some(expression) = text.strip_prefix(keyword) {
-            if !expression.contains(' ') || expression.ends_with([')', ']']) {
-                return true;
-            }
-        }
-    }
-    // A statement that starts with a name: `speed += 1`, `print("hi", x)`,
-    // `$Timer.start(0.5)`. Names may be dotted, node paths included.
-    let name_len = text
-        .find(|c: char| !(c.is_alphanumeric() || matches!(c, '_' | '.' | '$' | '%' | '/')))
-        .unwrap_or(text.len());
-    if name_len == 0 {
-        return false;
-    }
-    let after_name = text[name_len..].trim_start();
-    let is_assignment = ["= ", "+= ", "-= ", "*= ", "/= ", ":= "]
-        .iter()
-        .any(|operator| after_name.starts_with(operator));
-    let is_call = after_name.starts_with('(') && text.ends_with(')');
-    is_assignment || is_call
-}
-
-/// True when `text` has a run of spaces inside it that isn't the double
-/// space some writers put after a sentence: the column gap of a table
-/// (`speed   float   1.0`).
-fn has_column_gap(text: &str) -> bool {
-    text.match_indices("  ")
-        .any(|(index, _)| !text[..index].ends_with(['.', '!', '?', ':']))
-}
-
-/// Wrap the long comment line `lines[start]` and refill the rest of its
-/// paragraph (see [`CommentWrap::Paragraph`]). Returns the new lines and how
-/// many source lines they replace, or `None` to leave the line as it is.
-///
-/// A list item's continuation lines are indented under its text, so a
-/// following line belongs to the item when it has that indent.
-fn reflow_comment_paragraph(
-    lines: &[&str],
-    start: usize,
-    max_len: usize,
-    is_editable: &dyn Fn(usize) -> bool,
-) -> Option<(Vec<String>, usize)> {
-    let first = split_comment_line(lines[start])?;
-    if first.text.trim().is_empty() || is_verbatim_comment_text(first.text) {
-        return None;
-    }
-    let continuation_prefix = match list_marker_len(first.text) {
-        Some(marker_len) => format!("{}{}", first.prefix, " ".repeat(marker_len)),
-        None => first.prefix.to_string(),
-    };
-
-    let mut words: Vec<&str> = first.text.split_whitespace().collect();
-    let mut end = start + 1;
-    while end < lines.len() && is_editable(end) {
-        let Some(text) = lines[end].strip_prefix(continuation_prefix.as_str()) else {
-            break;
-        };
-        let text = text.trim_end();
-        let is_paragraph_line = !text.is_empty()
-            && !text.starts_with([' ', '\t'])
-            && !text.starts_with('#')
-            && !starts_own_paragraph(text)
-            && !is_verbatim_comment_text(text)
-            && !text.contains("[codeblock")
-            && !text.contains("[/codeblock");
-        if !is_paragraph_line {
-            break;
-        }
-        words.extend(text.split_whitespace());
-        end += 1;
-    }
-
-    let reflowed = wrap_comment_words(&words, first.prefix, &continuation_prefix, max_len);
-    let consumed = end - start;
-    if consumed == 1 && reflowed.len() < 2 {
-        return None;
-    }
-    Some((reflowed, consumed))
 }
 
 fn visual_line_len(line: &str, tab_width: usize) -> usize {
@@ -1416,82 +1228,6 @@ fn split_top_level_commas(content: &str) -> Vec<String> {
     items
 }
 
-/// Break a long comment at word boundaries.
-fn try_break_comment(line: &str, max_len: usize) -> Option<Vec<String>> {
-    let indent: String = line
-        .chars()
-        .take_while(|c| *c == '\t' || *c == ' ')
-        .collect();
-    let content = &line[indent.len()..];
-
-    // Must be a comment line (# or ##).
-    if !content.starts_with('#') {
-        return None;
-    }
-
-    // Extract the comment prefix (# or ##) and the text. A bare `#`, a `#!`
-    // shebang, or any non-comment line yields None (the `?` on the `# `
-    // branch), so we never try to wrap those.
-    let (prefix, text) = if let Some(rest) = content.strip_prefix("## ") {
-        ("## ", rest)
-    } else {
-        ("# ", content.strip_prefix("# ")?)
-    };
-
-    // Split text into words and wrap.
-    let words: Vec<&str> = text.split_whitespace().collect();
-    if words.is_empty() {
-        return None;
-    }
-    let full_prefix = format!("{}{}", indent, prefix);
-    let lines_out = wrap_comment_words(&words, &full_prefix, &full_prefix, max_len);
-
-    // Only return if we actually split into multiple lines.
-    if lines_out.len() < 2 {
-        return None;
-    }
-    Some(lines_out)
-}
-
-/// Lay `words` out as comment lines of at most `max_len` columns. The first
-/// line starts with `first_prefix` (indent and `# `), the others with
-/// `continuation_prefix`. A word wider than a line gets a line of its own.
-///
-/// A wrapped line never starts with a `gdstyle:` word: `# gdstyle:ignore`
-/// at the start of a comment is a suppression directive, so the word before
-/// it moves down too, or it stays on the line it was on.
-fn wrap_comment_words(
-    words: &[&str],
-    first_prefix: &str,
-    continuation_prefix: &str,
-    max_len: usize,
-) -> Vec<String> {
-    const TAB_WIDTH: usize = 4;
-    // Columns, not bytes: an accented word takes one column per char.
-    let line_width = |prefix: &str, line_words: &[&str]| {
-        let words_width: usize = line_words.iter().map(|word| word.chars().count()).sum();
-        visual_line_len(prefix, TAB_WIDTH) + words_width + line_words.len().saturating_sub(1)
-    };
-    let mut lines_out: Vec<String> = Vec::new();
-    let mut prefix = first_prefix;
-    let mut line_words: Vec<&str> = Vec::new();
-
-    for &word in words {
-        let fits = line_width(prefix, &line_words) + 1 + word.chars().count() <= max_len;
-        let is_directive = word.starts_with("gdstyle:");
-        if line_words.is_empty() || fits || (is_directive && line_words.len() == 1) {
-            line_words.push(word);
-            continue;
-        }
-        let carried = if is_directive { line_words.pop() } else { None };
-        lines_out.push(format!("{}{}", prefix, line_words.join(" ")));
-        prefix = continuation_prefix;
-        line_words = carried.into_iter().chain([word]).collect();
-    }
-    lines_out.push(format!("{}{}", prefix, line_words.join(" ")));
-    lines_out
-}
-
 /// Break long `if`/`elif`/`while` conditions at `and`/`or` operators.
 fn try_break_at_bool_operators(line: &str, config: &Config) -> Option<Vec<String>> {
     let indent: String = line
@@ -1722,7 +1458,12 @@ fn export_sections<'s>(source: &'s str, members: &[ClassMember]) -> Vec<(String,
             _ => Vec::new(),
         };
         for (name, offset) in markers {
-            let arguments = annotation_arguments(source, offset);
+            // An empty name (`@export_group("")`) ends the section, which is
+            // the same as being in none.
+            let arguments = match annotation_arguments(source, offset) {
+                "\"\"" | "''" => "",
+                arguments => arguments,
+            };
             match name {
                 "export_category" => section = [arguments, "", ""],
                 "export_group" => section = [section[0], arguments, ""],
@@ -2827,7 +2568,7 @@ mod tests {
     #[test]
     fn export_sections_follow_category_group_and_subgroup() {
         // A category ends the group and subgroup above it, a group ends the
-        // subgroup, and an empty group ends the group.
+        // subgroup, and an empty group ends the group, leaving none.
         let source = "@export_category(\"Stats\")\n@export_group(\"Combat\", \"combat_\")\n@export_subgroup(\"Melee\")\n@export var combat_reach: float\n@export_group(\"Movement\")\n@export var speed: float\n@export_group(\"\")\nvar _cache: int\n@export var loose: int\n@export_category(\"Looks\")\n@export var tint: Color\n";
         let sections = export_sections(source, &parse_members(source));
         let expected: Vec<(String, [&str; 3])> = vec![
@@ -2835,7 +2576,7 @@ mod tests {
                 "combat_reach".into(),
                 ["\"Stats\"", "\"Combat\", \"combat_\"", "\"Melee\""],
             ),
-            ("loose".into(), ["\"Stats\"", "\"\"", ""]),
+            ("loose".into(), ["\"Stats\"", "", ""]),
             ("speed".into(), ["\"Stats\"", "\"Movement\"", ""]),
             ("tint".into(), ["\"Looks\"", "", ""]),
         ];
@@ -2850,22 +2591,6 @@ mod tests {
         assert_eq!(annotation_arguments(source, 0), "\"Size (px)\", \"size_\"");
         assert_eq!(annotation_arguments(source, second), "\"Long\"");
         assert_eq!(annotation_arguments(source, third), "");
-    }
-
-    #[test]
-    fn comment_wrapping_counts_columns_not_bytes() {
-        // Each word is 8 columns but 16 bytes. The comment fills exactly 100
-        // columns before the last word; measuring bytes wrapped it at 50.
-        let word = "é".repeat(8);
-        let comment = format!("# {}", [word.as_str(); 12].join(" "));
-        let lines = try_break_comment(&comment, 100).expect("long comment wraps");
-        assert_eq!(
-            lines
-                .iter()
-                .map(|line| line.chars().count())
-                .collect::<Vec<_>>(),
-            vec![100, 10]
-        );
     }
 
     #[test]

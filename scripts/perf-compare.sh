@@ -3,13 +3,16 @@
 #
 # Usage: scripts/perf-compare.sh BASE_BINARY CANDIDATE_BINARY CORPUS_DIR
 #
-# The gate is the instruction count under valgrind's cachegrind, which barely
-# moves between runs, unlike wall-clock time on a shared CI runner. Rayon runs
-# on a single thread so idle workers spinning don't add to the count.
+# The gate is the instruction count under valgrind's cachegrind, which moves
+# far less between runs than wall-clock time on a shared CI runner. Rayon runs
+# on a single thread so idle workers spinning don't add to the count. Hash
+# maps are seeded randomly, so counts still vary by a percent or two: each
+# binary runs several times and the median is compared.
 # Wall-clock times from hyperfine (when installed) are reported, not gated.
 #
 # Environment:
 #   PERF_THRESHOLD_PERCENT  largest allowed instruction increase (default 3)
+#   PERF_RUNS               cachegrind runs per binary and command (default 3)
 #   PERF_ALLOW_REGRESSION   when "1", report a regression but exit 0
 #   GITHUB_STEP_SUMMARY     when set, the report is appended to it as well
 #
@@ -27,6 +30,7 @@ base_binary=$(realpath "$1")
 candidate_binary=$(realpath "$2")
 corpus_dir=$(realpath "$3")
 threshold_percent=${PERF_THRESHOLD_PERCENT:-3}
+runs=${PERF_RUNS:-3}
 
 for binary in "$base_binary" "$candidate_binary"; do
     if [[ ! -x "$binary" ]]; then
@@ -39,14 +43,21 @@ if ! command -v valgrind >/dev/null; then
     exit 2
 fi
 
-# Each entry is the argument list passed to gdstyle, run from the corpus
-# directory so config lookup never reaches a gdstyle.toml above it.
-benchmarks=("check ." "fmt --check .")
+work_dir=$(mktemp -d)
+trap 'rm -rf "$work_dir"' EXIT
+report="$work_dir/report.md"
+
+# An empty config, so both binaries run with defaults whatever gdstyle.toml
+# sits in or above the corpus (config lookup walks up to the root).
+empty_config="$work_dir/gdstyle.toml"
+: >"$empty_config"
+
+# Each entry is the argument list passed to gdstyle, run from the corpus.
+benchmarks=("check --config $empty_config ." "fmt --check --config $empty_config .")
 
 # Print the instruction count of one gdstyle run.
 count_instructions() {
-    local binary=$1 arguments=$2 log status
-    log=$(mktemp)
+    local binary=$1 arguments=$2 log="$work_dir/valgrind.log" status
     set +e
     # shellcheck disable=SC2086 # the arguments are meant to split into words
     (cd "$corpus_dir" && RAYON_NUM_THREADS=1 valgrind --tool=cachegrind \
@@ -59,13 +70,11 @@ count_instructions() {
     if [[ $status -ne 0 && $status -ne 1 ]]; then
         echo "error: '$binary $arguments' exited with $status" >&2
         cat "$log" >&2
-        rm -f "$log"
         exit 2
     fi
     # cachegrind's summary line looks like `==123== I refs:   1,234,567`.
     local instructions
     instructions=$(sed -n 's/.*I *refs: *\([0-9,]*\).*/\1/p' "$log" | tr -d ,)
-    rm -f "$log"
     if [[ -z "$instructions" ]]; then
         echo "error: no instruction count in valgrind output for '$binary $arguments'" >&2
         exit 2
@@ -73,20 +82,27 @@ count_instructions() {
     echo "$instructions"
 }
 
-report=$(mktemp)
-trap 'rm -f "$report"' EXIT
+# Print the median instruction count of $runs runs.
+median_instructions() {
+    local binary=$1 arguments=$2 counts=() run
+    for ((run = 0; run < runs; run++)); do
+        counts+=("$(count_instructions "$binary" "$arguments")")
+    done
+    printf '%s\n' "${counts[@]}" | sort -n | sed -n "$(((runs + 1) / 2))p"
+}
+
 has_regression=0
 
 {
-    echo "### Instruction count (gate: +${threshold_percent}%)"
+    echo "### Instruction count (median of $runs runs, gate: +${threshold_percent}%)"
     echo
     echo "| Command | Base | Candidate | Change |"
     echo "|---|---:|---:|---:|"
 } >>"$report"
 
 for arguments in "${benchmarks[@]}"; do
-    base_count=$(count_instructions "$base_binary" "$arguments")
-    candidate_count=$(count_instructions "$candidate_binary" "$arguments")
+    base_count=$(median_instructions "$base_binary" "$arguments")
+    candidate_count=$(median_instructions "$candidate_binary" "$arguments")
     change_percent=$(awk -v base="$base_count" -v candidate="$candidate_count" \
         'BEGIN { printf "%+.2f", (candidate - base) * 100 / base }')
     marker=""
@@ -95,7 +111,7 @@ for arguments in "${benchmarks[@]}"; do
         marker=" :x:"
         has_regression=1
     fi
-    echo "| \`gdstyle $arguments\` | $base_count | $candidate_count | ${change_percent}%${marker} |" >>"$report"
+    echo "| \`gdstyle ${arguments//--config $empty_config /}\` | $base_count | $candidate_count | ${change_percent}%${marker} |" >>"$report"
 done
 
 if command -v hyperfine >/dev/null; then
@@ -105,15 +121,20 @@ if command -v hyperfine >/dev/null; then
         echo
     } >>"$report"
     for arguments in "${benchmarks[@]}"; do
-        markdown=$(mktemp)
-        (cd "$corpus_dir" && hyperfine --style none --warmup 3 --runs 20 \
+        markdown="$work_dir/hyperfine.md"
+        label="gdstyle ${arguments//--config $empty_config /}"
+        # Timing is informational: if hyperfine fails, say so and go on to
+        # the gate rather than abort with the same status as a regression.
+        if (cd "$corpus_dir" && hyperfine --style none --warmup 3 --runs 20 \
             --ignore-failure --export-markdown "$markdown" \
-            --command-name "base: gdstyle $arguments" "$base_binary $arguments" \
-            --command-name "candidate: gdstyle $arguments" "$candidate_binary $arguments" \
-            >/dev/null 2>&1)
-        cat "$markdown" >>"$report"
+            --command-name "base: $label" "$base_binary $arguments" \
+            --command-name "candidate: $label" "$candidate_binary $arguments" \
+            >/dev/null 2>&1); then
+            cat "$markdown" >>"$report"
+        else
+            echo "hyperfine failed for \`$label\`; no timing." >>"$report"
+        fi
         echo >>"$report"
-        rm -f "$markdown"
     done
 fi
 

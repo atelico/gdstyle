@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::ast::{for_each_member, ClassMember, ScriptFile};
 use crate::config::Config;
 use crate::diagnostic::Diagnostic;
-use crate::token::{Span, Token, TokenKind};
+use crate::token::{Span, StringLines, Token, TokenKind};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1042,7 +1042,12 @@ pub fn check_max_inner_classes(
 
 /// Warn when an `else` or `elif` follows an `if` block that ends with `return`.
 /// The else/elif is unnecessary because the `return` already exits.
-pub fn check_no_else_return(file: &ScriptFile, diagnostics: &mut Vec<Diagnostic>) {
+pub fn check_no_else_return(
+    tokens: &[Token],
+    file: &ScriptFile,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let string_line_mask = StringLines::new(tokens, file.lines.len());
     for (i, line) in file.lines.iter().enumerate() {
         let trimmed = line.trim();
         // Look for `elif` or `else` lines
@@ -1066,7 +1071,9 @@ pub fn check_no_else_return(file: &ScriptFile, diagnostics: &mut Vec<Diagnostic>
             }
             // Check if this line is at a deeper indent (inside the if block)
             if indent_level(&file.lines[j]) > current_indent {
-                if is_return_statement(prev) && return_ends_branch(file, j, current_indent) {
+                if is_return_statement(prev)
+                    && return_ends_branch(file, &string_line_mask, j, current_indent)
+                {
                     let kind = if trimmed.starts_with("elif") {
                         "elif"
                     } else {
@@ -1087,23 +1094,31 @@ pub fn check_no_else_return(file: &ScriptFile, diagnostics: &mut Vec<Diagnostic>
     }
 }
 
-/// True when the trimmed line is a `return` statement, not an identifier that
-/// starts with `return` (`returned = true`, `return_value.clear()`).
+/// True when the trimmed line is a `return` statement (`return`, `return x`,
+/// `return(x)`, `return;`, `return-1`), not an identifier that starts with
+/// `return` (`returned = true`, `return_value.clear()`).
 fn is_return_statement(trimmed: &str) -> bool {
     trimmed
         .strip_prefix("return")
-        .is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', '\t', '(']))
+        .is_some_and(|rest| !rest.starts_with(|c: char| c.is_alphanumeric() || c == '_'))
 }
 
 /// True when the `return` on line `return_line` is a statement of the branch
 /// body itself, not of a block nested in it. A nested `return`
 /// (`if b: return 1`) can fall through to the `elif` or `else`, so that one
-/// is needed.
-fn return_ends_branch(file: &ScriptFile, return_line: usize, header_indent: usize) -> bool {
+/// is needed. Lines inside a string that spans lines are data, not code, so
+/// their indent says nothing about the branch.
+fn return_ends_branch(
+    file: &ScriptFile,
+    string_line_mask: &StringLines,
+    return_line: usize,
+    header_indent: usize,
+) -> bool {
     let return_indent = indent_level(&file.lines[return_line]);
-    file.lines[..return_line]
-        .iter()
+    (0..return_line)
         .rev()
+        .filter(|&index| !string_line_mask.is_interior(index))
+        .map(|index| &file.lines[index])
         .filter(|line| !is_comment_or_blank(line.trim()))
         .take_while(|line| indent_level(line) > header_indent)
         .all(|line| indent_level(line) >= return_indent)
@@ -1191,22 +1206,9 @@ pub fn check_unreachable_code(file: &ScriptFile, diagnostics: &mut Vec<Diagnosti
     while i < file.lines.len() {
         let line = &file.lines[i];
         let trimmed = line.trim();
-        if !(trimmed.starts_with("return") || trimmed == "break" || trimmed == "continue") {
+        if !(is_return_statement(trimmed) || trimmed == "break" || trimmed == "continue") {
             i += 1;
             continue;
-        }
-
-        // `return` can be `return`, `return <expr>`, or `return(expr)`
-        // (the latter is rare but legal). Anything else with a `return`
-        // prefix (e.g. `return_value`, `returns`, `returnable`) is an
-        // identifier and not a return statement.
-        if trimmed.starts_with("return") && trimmed.len() > 6 {
-            let rest = &trimmed[6..];
-            let next = rest.chars().next().unwrap_or('\0');
-            if !matches!(next, ' ' | '\t' | '(') {
-                i += 1;
-                continue;
-            }
         }
 
         let stmt_indent = indent_level(line);
@@ -1373,13 +1375,19 @@ pub fn check_allocation_in_loop(file: &ScriptFile, diagnostics: &mut Vec<Diagnos
 
 /// Warn about node lookups (`get_node()`, `$`, `%`) in `_process` and
 /// `_physics_process` methods. These should be cached in `_ready` or `@onready`.
-pub fn check_process_get_node(file: &ScriptFile, diagnostics: &mut Vec<Diagnostic>) {
-    check_process_get_node_recursive(&file.members, file, diagnostics);
+pub fn check_process_get_node(
+    tokens: &[Token],
+    file: &ScriptFile,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let string_line_mask = StringLines::new(tokens, file.lines.len());
+    check_process_get_node_recursive(&file.members, file, &string_line_mask, diagnostics);
 }
 
 fn check_process_get_node_recursive(
     members: &[ClassMember],
     file: &ScriptFile,
+    string_line_mask: &StringLines,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     for_each_member(members, |member| {
@@ -1397,12 +1405,16 @@ fn check_process_get_node_recursive(
         }
         let range = function_body_range(span, *body_line_count, file.lines.len());
         for idx in range {
+            // Lines inside a string that spans lines are all data.
+            if string_line_mask.is_interior(idx) {
+                continue;
+            }
             // Match against a string-blanked copy so a `%d` placeholder or a
             // `$` inside a string literal isn't read as a node lookup. The
             // quotes stay, so `%"Health Bar"` is still one.
             let code = blank_strings_and_comments(&file.lines[idx]);
-            let has_node_ref = code.contains("get_node(")
-                || code.contains("get_node_or_null(")
+            let has_node_ref = calls_function(&code, "get_node")
+                || calls_function(&code, "get_node_or_null")
                 || code.contains('$')
                 || has_unique_node_ref(&code);
             if has_node_ref {
@@ -1420,6 +1432,23 @@ fn check_process_get_node_recursive(
     });
 }
 
+/// True when `c` can be part of a GDScript name. Godot names take Unicode
+/// letters and combining marks (`cafe\u{301}`), and GDScript has no non-ASCII
+/// operators, so any non-ASCII character that isn't a space counts.
+fn is_identifier_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || (!c.is_ascii() && !c.is_whitespace())
+}
+
+/// True when `code` calls the function `name`: `name(` with no identifier
+/// character right before it, so `my_get_node(` is not `get_node(`. A method
+/// call like `owner.get_node(` counts.
+fn calls_function(code: &str, name: &str) -> bool {
+    code.match_indices(name).any(|(index, _)| {
+        let is_word_start = !code[..index].ends_with(is_identifier_char);
+        is_word_start && code[index + name.len()..].starts_with('(')
+    })
+}
+
 /// Check if a line contains a `%UniqueNode` reference, distinguishing it from
 /// the modulo and format operator.
 ///
@@ -1428,7 +1457,9 @@ fn check_process_get_node_recursive(
 /// alone still reads `"%s"%name` and `a %b` as lookups, so the `%` must also
 /// not follow an operand: like Godot's parser, a `%` after a value is the
 /// binary operator. Expects a line from `blank_strings_and_comments`, so the
-/// quotes before an operator `%` are still there.
+/// quotes before an operator `%` are still there. Only the line itself is
+/// seen, so a `%name` that continues the previous line (`"%d" \` then
+/// `%count`) still reads as a lookup.
 fn has_unique_node_ref(line: &str) -> bool {
     let bytes = line.as_bytes();
     for (i, _) in line.match_indices('%') {
@@ -1455,12 +1486,14 @@ fn follows_operand(before: &str) -> bool {
     if matches!(last, ')' | ']' | '}' | '"' | '\'') {
         return true;
     }
-    if !(last.is_alphanumeric() || last == '_') {
+    if !is_identifier_char(last) {
         return false;
     }
     let word_start = before
-        .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
-        .map_or(0, |index| index + 1);
+        .char_indices()
+        .rev()
+        .find(|&(_, c)| !is_identifier_char(c))
+        .map_or(0, |(index, c)| index + c.len_utf8());
     let word = &before[word_start..];
     !matches!(
         word,
@@ -1578,10 +1611,7 @@ fn check_returns_recursive(
         let range = function_body_range(span, *body_line_count, file.lines.len());
         let count = file.lines[range]
             .iter()
-            .filter(|l| {
-                let t = l.trim();
-                t == "return" || t.starts_with("return ")
-            })
+            .filter(|line| is_return_statement(line.trim()))
             .count();
 
         if count > config.max_returns {
@@ -2323,7 +2353,7 @@ mod tests {
             members: vec![],
         };
         let mut diags = Vec::new();
-        check_no_else_return(&file, &mut diags);
+        check_no_else_return(&[], &file, &mut diags);
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("else"));
     }

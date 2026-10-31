@@ -1,4 +1,4 @@
-use crate::ast::{for_each_member, ClassMember, ScriptFile};
+use crate::ast::{for_each_member, is_export_annotation, ClassMember, ScriptFile};
 use crate::diagnostic::{Diagnostic, Fix, Replacement};
 use std::path::Path;
 
@@ -524,10 +524,12 @@ fn is_state_adjective(word: &str) -> bool {
     state_adjectives().contains(word)
 }
 
-/// Check that private members (funcs/vars starting with _) are actually private pattern.
+/// Warn when a `_`-prefixed (private) variable is shown in the inspector by
+/// an `@export` annotation, which makes it part of the node's public face.
+///
+/// `@export_storage` saves a variable without showing it, which is how
+/// private state is meant to be persisted, so it is not reported.
 pub fn check_private_underscore_prefix(file: &ScriptFile, diagnostics: &mut Vec<Diagnostic>) {
-    // This rule checks that functions/vars starting with _ don't have @export.
-    // It's more of a convention check.
     for member in &file.members {
         if let ClassMember::Variable {
             name,
@@ -539,7 +541,7 @@ pub fn check_private_underscore_prefix(file: &ScriptFile, diagnostics: &mut Vec<
             if name.starts_with('_')
                 && annotations
                     .iter()
-                    .any(|a| crate::ast::is_export_annotation(&a.name))
+                    .any(|a| is_export_annotation(&a.name) && a.name != "export_storage")
             {
                 diagnostics.push(Diagnostic::warning(
                     "naming/private-underscore-prefix",
