@@ -1,4 +1,4 @@
-use crate::ast::ClassMember;
+use crate::ast::{is_export_annotation, ClassMember};
 use crate::config::Config;
 use crate::fixer;
 use crate::lexer::Lexer;
@@ -1440,7 +1440,77 @@ fn safe_reorder_class_members(source: &str) -> String {
     if changes_region_coverage(source, &reordered) {
         return source.to_string();
     }
+
+    // Guard 4: keep every export in the same inspector section. A section
+    // marker moves with the member below it, so sorting can carry an export
+    // past an `@export_group("")` and into the group above.
+    if export_sections(source, &original_members) != export_sections(&reordered, &reordered_members)
+    {
+        return source.to_string();
+    }
     reordered
+}
+
+/// Every exported script variable's name paired with the inspector section it
+/// shows under: the arguments of the `@export_category`, `@export_group` and
+/// `@export_subgroup` in force above it. Sorted, so two orderings compare
+/// equal when no export changed section. Empty when the source has no
+/// section markers, which skips the walk for most files.
+fn export_sections<'s>(source: &'s str, members: &[ClassMember]) -> Vec<(String, [&'s str; 3])> {
+    if !(source.contains("@export_group")
+        || source.contains("@export_subgroup")
+        || source.contains("@export_category"))
+    {
+        return Vec::new();
+    }
+    // Category, group, subgroup. A category ends the group and subgroup
+    // inside it, and a group ends the subgroup.
+    let mut section: [&str; 3] = [""; 3];
+    let mut sections = Vec::new();
+    for member in members {
+        let markers: Vec<(&str, usize)> = match member {
+            ClassMember::Variable { annotations, .. }
+            | ClassMember::Function { annotations, .. } => annotations
+                .iter()
+                .map(|a| (a.name.as_str(), a.span.offset))
+                .collect(),
+            ClassMember::ClassAnnotation { name, span } => vec![(name.as_str(), span.offset)],
+            _ => Vec::new(),
+        };
+        for (name, offset) in markers {
+            let arguments = annotation_arguments(source, offset);
+            match name {
+                "export_category" => section = [arguments, "", ""],
+                "export_group" => section = [section[0], arguments, ""],
+                "export_subgroup" => section[2] = arguments,
+                _ => {}
+            }
+        }
+        if let ClassMember::Variable {
+            name, annotations, ..
+        } = member
+        {
+            if annotations.iter().any(|a| is_export_annotation(&a.name)) {
+                sections.push((name.clone(), section));
+            }
+        }
+    }
+    sections.sort_unstable();
+    sections
+}
+
+/// The text between the parentheses of the annotation starting at byte
+/// `offset`, like `"Stats", "stat_"` for `@export_group("Stats", "stat_")`.
+/// Empty when the annotation has no arguments on its line.
+fn annotation_arguments(source: &str, offset: usize) -> &str {
+    let line = source
+        .get(offset..)
+        .and_then(|rest| rest.split('\n').next())
+        .unwrap_or("");
+    match (line.find('('), line.find(')')) {
+        (Some(open), Some(close)) if open < close => line[open + 1..close].trim(),
+        _ => "",
+    }
 }
 
 /// Reorder the members of each inner class, unless doing so would change
@@ -2483,6 +2553,24 @@ mod tests {
             ensure_trailing_newline("hello\n\n\n", &|_| false),
             "hello\n"
         );
+    }
+
+    #[test]
+    fn export_sections_follow_category_group_and_subgroup() {
+        // A category ends the group and subgroup above it, a group ends the
+        // subgroup, and an empty group ends the group.
+        let source = "@export_category(\"Stats\")\n@export_group(\"Combat\", \"combat_\")\n@export_subgroup(\"Melee\")\n@export var combat_reach: float\n@export_group(\"Movement\")\n@export var speed: float\n@export_group(\"\")\nvar _cache: int\n@export var loose: int\n@export_category(\"Looks\")\n@export var tint: Color\n";
+        let sections = export_sections(source, &parse_members(source));
+        let expected: Vec<(String, [&str; 3])> = vec![
+            (
+                "combat_reach".into(),
+                ["\"Stats\"", "\"Combat\", \"combat_\"", "\"Melee\""],
+            ),
+            ("loose".into(), ["\"Stats\"", "\"\"", ""]),
+            ("speed".into(), ["\"Stats\"", "\"Movement\"", ""]),
+            ("tint".into(), ["\"Looks\"", "", ""]),
+        ];
+        assert_eq!(sections, expected);
     }
 
     #[test]

@@ -539,7 +539,7 @@ pub fn check_private_underscore_prefix(file: &ScriptFile, diagnostics: &mut Vec<
             if name.starts_with('_')
                 && annotations
                     .iter()
-                    .any(|a| a.name == "export" || a.name.starts_with("export_"))
+                    .any(|a| crate::ast::is_export_annotation(&a.name))
             {
                 diagnostics.push(Diagnostic::warning(
                     "naming/private-underscore-prefix",
