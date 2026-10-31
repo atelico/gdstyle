@@ -1040,8 +1040,14 @@ pub fn check_max_inner_classes(
 // New rule 12: no-else-return
 // ---------------------------------------------------------------------------
 
-/// Warn when an `else` or `elif` follows an `if` block that ends with `return`.
-/// The else/elif is unnecessary because the `return` already exits.
+/// Warn when an `else` or `elif` follows branches that all end with
+/// `return`: the `return` already exits, so the code can be dedented.
+///
+/// Every earlier branch of the chain must return, not just the one right
+/// above. After `if a: foo()` / `elif b: return 1`, dropping the `else`
+/// would run its body after `foo()` too. A branch returns when its last
+/// statement is a `return` at the branch's own indent (a nested `return`
+/// can fall through), or when it is a one-line `if x: return y`.
 pub fn check_no_else_return(
     string_line_mask: &StringLines,
     file: &ScriptFile,
@@ -1049,48 +1055,134 @@ pub fn check_no_else_return(
 ) {
     for (i, line) in file.lines.iter().enumerate() {
         let trimmed = line.trim();
-        // Look for `elif` or `else` lines
-        if !(trimmed.starts_with("elif ")
-            || trimmed.starts_with("elif(")
-            || trimmed == "else:"
-            || trimmed.starts_with("else:"))
-        {
+        let kind = if is_branch_header(trimmed, "elif") {
+            "elif"
+        } else if trimmed.starts_with("else:") {
+            "else"
+        } else {
+            continue;
+        };
+        if string_line_mask.is_interior(i) {
             continue;
         }
-
-        let current_indent = indent_level(line);
-
-        // Walk backwards to find if the previous block ended with return
-        let mut j = i;
-        while j > 0 {
-            j -= 1;
-            let prev = file.lines[j].trim();
-            if prev.is_empty() || prev.starts_with('#') {
-                continue;
-            }
-            // Check if this line is at a deeper indent (inside the if block)
-            if indent_level(&file.lines[j]) > current_indent {
-                if is_return_statement(prev)
-                    && return_ends_branch(file, string_line_mask, j, current_indent)
-                {
-                    let kind = if trimmed.starts_with("elif") {
-                        "elif"
-                    } else {
-                        "else"
-                    };
-                    diagnostics.push(Diagnostic::warning(
-                        "quality/no-else-return",
-                        format!("unnecessary '{}' after 'return'", kind),
-                        Span::new(i + 1, 1, 0, 0),
-                        &file.path,
-                    ));
-                }
-                break;
-            } else {
-                break;
-            }
+        if every_earlier_branch_returns(file, string_line_mask, i) {
+            diagnostics.push(Diagnostic::warning(
+                "quality/no-else-return",
+                format!("unnecessary '{}' after 'return'", kind),
+                Span::new(i + 1, 1, 0, 0),
+                &file.path,
+            ));
         }
     }
+}
+
+/// True when trimmed `line` is a branch header starting with `keyword`
+/// (`if` or `elif`), as in `if x:` or `elif(x):`.
+fn is_branch_header(line: &str, keyword: &str) -> bool {
+    line.strip_prefix(keyword)
+        .is_some_and(|rest| rest.starts_with([' ', '\t', '(']))
+}
+
+/// True when every branch of the `if` chain before the `elif` / `else` on
+/// line `chain_line` ends with a `return` (see [`check_no_else_return`]).
+fn every_earlier_branch_returns(
+    file: &ScriptFile,
+    string_line_mask: &StringLines,
+    chain_line: usize,
+) -> bool {
+    let header_indent = indent_level(&file.lines[chain_line]);
+    let is_code = |index: usize| {
+        !string_line_mask.is_interior(index) && !is_comment_or_blank(file.lines[index].trim())
+    };
+    let mut branch_end = chain_line;
+    loop {
+        // The branch header is the nearest code line above at the chain's
+        // indent; everything between it and `branch_end` is its body.
+        let Some(header) = (0..branch_end)
+            .rev()
+            .filter(|&index| is_code(index))
+            .find(|&index| indent_level(&file.lines[index]) <= header_indent)
+        else {
+            return false;
+        };
+        let header_text = file.lines[header].trim();
+        let is_if = is_branch_header(header_text, "if");
+        if indent_level(&file.lines[header]) != header_indent
+            || !(is_if || is_branch_header(header_text, "elif"))
+        {
+            return false;
+        }
+        let returns = match inline_branch_body(header_text) {
+            Some(body) => is_return_statement(body),
+            None => (header + 1..branch_end)
+                .rev()
+                .find(|&index| is_code(index) || string_line_mask.is_interior(index))
+                .is_some_and(|last| {
+                    let start = statement_start(file, string_line_mask, last);
+                    start > header
+                        && is_return_statement(file.lines[start].trim())
+                        && return_ends_branch(file, string_line_mask, start, header_indent)
+                }),
+        };
+        if !returns {
+            return false;
+        }
+        if is_if {
+            return true;
+        }
+        branch_end = header;
+    }
+}
+
+/// The statement after the colon of a one-line `if` / `elif` header:
+/// `return 1` for `if x: return 1`. `None` for a header whose body is on the
+/// lines below.
+fn inline_branch_body(header: &str) -> Option<&str> {
+    // Blanking keeps one character per character before any comment, so a
+    // character position in `code` is the same position in `header`.
+    let code = blank_strings_and_comments(header);
+    let mut depth = 0i32;
+    let colon = code.chars().position(|c| {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            _ => {}
+        }
+        c == ':' && depth == 0
+    })?;
+    let (body_start, _) = header.char_indices().nth(colon + 1)?;
+    let body = header[body_start..].trim();
+    (!body.is_empty() && !body.starts_with('#')).then_some(body)
+}
+
+/// First line of the statement that ends on line `last`. Earlier lines are
+/// part of it when a bracket is still open, a line ends with a backslash,
+/// or a string spans lines: `return max(` / `1,` / `2` / `)` starts at the
+/// `return`.
+fn statement_start(file: &ScriptFile, string_line_mask: &StringLines, last: usize) -> usize {
+    // Bracket balance of a line's code, leaving out string data.
+    let code_delta = |index: usize| {
+        let line = &file.lines[index];
+        if string_line_mask.is_interior(index) {
+            string_line_mask
+                .literal_end(index)
+                .and_then(|end| line.get(end..))
+                .map_or(0, line_bracket_delta)
+        } else {
+            line_bracket_delta(line)
+        }
+    };
+    let mut start = last;
+    let mut depth = code_delta(last);
+    while start > 0
+        && (depth < 0
+            || string_line_mask.is_interior(start)
+            || ends_with_backslash_continuation(&file.lines[start - 1]))
+    {
+        start -= 1;
+        depth += code_delta(start);
+    }
+    start
 }
 
 /// True when the trimmed line is a `return` statement (`return`, `return x`,
