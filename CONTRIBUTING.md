@@ -51,6 +51,18 @@ We can discuss in the issue before any code lands.
 7. Push and open a PR. Describe what you changed and why. Reference any
    related issue.
 
+A PR that touches `src/` also runs the Performance workflow. It builds your
+branch and its base, runs both on the
+[Godot demo projects](https://github.com/godotengine/godot-demo-projects),
+and fails when your branch executes more than 3% more instructions. The job
+summary shows the counts and wall-clock times. If the extra cost is
+intended (a new rule, say), a maintainer adds the `perf-regression-ok`
+label. On Linux with valgrind you can run the same comparison locally:
+
+```bash
+scripts/perf-compare.sh path/to/base/gdstyle target/release/gdstyle path/to/corpus
+```
+
 ## Project layout
 
 A quick map so you can find the right place to land a change:

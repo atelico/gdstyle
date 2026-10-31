@@ -1,0 +1,75 @@
+name: Performance
+
+# Fails a PR whose gdstyle run costs noticeably more than the base branch's.
+# Both binaries are built and measured on the same runner, so runner speed
+# cancels out. See scripts/perf-compare.sh for what is measured.
+on:
+  pull_request:
+    # labeled/unlabeled so adding perf-regression-ok re-runs the check.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/perf-compare.sh"
+      - ".github/workflows/perf.yml"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Real Godot 4 GDScript (about 460 files), pinned so counts stay comparable.
+  CORPUS_REPOSITORY: godotengine/godot-demo-projects
+  CORPUS_REF: b761b4cd5718a7118f2c95eb55f181d0a5f004f1
+
+jobs:
+  compare:
+    name: instruction count vs base
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the PR
+        uses: actions/checkout@v5
+        with:
+          path: candidate
+
+      - name: Check out the base branch
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+
+      - name: Check out the corpus
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.CORPUS_REPOSITORY }}
+          ref: ${{ env.CORPUS_REF }}
+          path: corpus
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            candidate -> target
+            base -> target
+
+      - name: Install valgrind and hyperfine
+        run: sudo apt-get update && sudo apt-get install -y valgrind hyperfine
+
+      - name: Build both binaries
+        run: |
+          cargo build --release --bin gdstyle --manifest-path base/Cargo.toml
+          cargo build --release --bin gdstyle --manifest-path candidate/Cargo.toml
+
+      - name: Compare
+        env:
+          PERF_ALLOW_REGRESSION: ${{ contains(github.event.pull_request.labels.*.name, 'perf-regression-ok') && '1' || '0' }}
+        run: |
+          candidate/scripts/perf-compare.sh \
+            base/target/release/gdstyle \
+            candidate/target/release/gdstyle \
+            corpus
