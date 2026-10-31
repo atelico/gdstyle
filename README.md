@@ -253,6 +253,27 @@ The formatter normalizes indentation, trailing whitespace, blank lines (includin
 
 Consecutive variables sit together with no blank line between them, except a property with an indented `set` / `get` block, which gets one blank line on each side so it reads like a small function.
 
+A comment line longer than `max_line_length` is wrapped at word boundaries. `comment_wrap` picks how:
+
+| `comment_wrap` | What `fmt` does with a long comment line |
+|---|---|
+| `"line"` (default) | Wraps that line on its own. The lines after it stay as they are, so the words moved off it can end up on a short line in the middle of a paragraph. |
+| `"paragraph"` | Wraps that line and refills the rest of its paragraph. |
+| `"off"` | Leaves comments alone. `format/max-line-length` still reports them. |
+
+In `"paragraph"` mode a paragraph is the long line plus the comment lines right below it with the same indent and the same `#` or `##` marker. It ends at an empty comment line, a list item (`- `, `* `, `1. `), a tag like `TODO:`, or a line that looks like code. Lines above the long one are never touched. A long list item wraps under its text. Lines that look like commented-out code, lines with a URL or a `gdstyle:` directive, and the contents of a `[codeblock]` in a doc comment are never wrapped.
+
+```gdscript
+# "line":
+# This comment is long enough that it runs past the one hundred column limit by a word or two
+# which
+# the paragraph goes on with here.
+
+# "paragraph":
+# This comment is long enough that it runs past the one hundred column limit by a word or two
+# which the paragraph goes on with here.
+```
+
 The contents of multi-line strings are data, so the formatter leaves them alone: indentation, trailing whitespace, blank lines and line length inside a string that spans lines (a `"""..."""` literal, or a quoted string with a raw newline or a backslash continuation) are kept. The layout rules don't report those lines either. The one exception is `format/max-line-length` on a string's closing line: when the code after the closing quote is what makes the line too long, it is still reported.
 
 Line endings are kept too, by `fmt` and `check --fix` alike. A file keeps the style most of its line breaks outside strings use, so a CRLF file stays CRLF. A string keeps its own line endings even when they differ from the rest of the file, because Godot keeps a `\r` inside a string as part of its value.
@@ -318,6 +339,11 @@ large_number_threshold = 10_000
 # script-level members; inner-class bodies keep their blank lines as written.
 blank_line_between_public_and_private = false
 
+# How fmt handles a comment line over max_line_length: "line" wraps that line
+# alone, "paragraph" also refills the lines after it, "off" leaves comments
+# alone (default: "line").
+comment_wrap = "line"
+
 # File/directory patterns to exclude
 exclude = [".godot", "addons"]
 
@@ -359,6 +385,7 @@ When no config file is found, gdstyle uses these defaults:
 | `max_inner_classes` | 5 |
 | `large_number_threshold` | `10_000` |
 | `blank_line_between_public_and_private` | `false` |
+| `comment_wrap` | `"line"` |
 | `exclude` | `[".godot", "addons"]` |
 | `include` | `[]` |
 

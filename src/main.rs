@@ -798,6 +798,11 @@ max_parameters = 5
 # variables of the same kind when formatting (default: false).
 # blank_line_between_public_and_private = false
 
+# How fmt handles a comment line over max_line_length: "line" wraps that line
+# alone, "paragraph" also refills the lines after it, "off" leaves comments
+# alone (default: "line").
+# comment_wrap = "line"
+
 # File and directory patterns to exclude from linting.
 # These are matched as glob patterns against file paths.
 exclude = [".godot", "addons"]

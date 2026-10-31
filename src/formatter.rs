@@ -1,5 +1,5 @@
 use crate::ast::{is_export_annotation, ClassMember};
-use crate::config::Config;
+use crate::config::{CommentWrap, Config};
 use crate::fixer;
 use crate::lexer::Lexer;
 use crate::linter::{self, Suppressions};
@@ -916,14 +916,49 @@ fn break_long_lines(
     let string_line_mask = string_lines(source, spanning_strings);
     let mut result: Vec<String> = Vec::new();
 
+    // Whether line `index` may be rewritten: not inside a string that spans
+    // lines and not under a suppression comment.
+    let is_editable =
+        |index: usize| !string_line_mask.is_interior(index) && !is_suppressed(index + 1);
+    let mut is_in_code_block = false;
+
     let mut i = 0;
     while i < lines.len() {
         let line = lines[i];
         let visual_len = visual_line_len(line, TAB_WIDTH);
+        let is_comment = line.trim_start().starts_with('#');
+        // `[codeblock]` contents in a doc comment are code: their line breaks
+        // and spacing are part of the documentation.
+        let was_in_code_block = is_in_code_block;
+        if is_comment && config.comment_wrap == CommentWrap::Paragraph {
+            is_in_code_block = code_block_state_after(line, is_in_code_block);
+        }
 
-        if visual_len <= max_len || string_line_mask.is_interior(i) || is_suppressed(i + 1) {
+        if visual_len <= max_len || !is_editable(i) {
             result.push(line.to_string());
             i += 1;
+            continue;
+        }
+
+        if is_comment && config.comment_wrap != CommentWrap::Line {
+            let paragraph = match config.comment_wrap {
+                CommentWrap::Paragraph if !was_in_code_block && !is_in_code_block => {
+                    reflow_comment_paragraph(&lines, i, max_len, &is_editable)
+                }
+                _ => None,
+            };
+            match paragraph {
+                // The paragraph stops before any `[codeblock]` tag, so the
+                // consumed lines can't change `is_in_code_block`.
+                Some((reflowed, consumed)) => {
+                    result.extend(reflowed);
+                    i += consumed;
+                }
+                None => {
+                    result.push(line.to_string());
+                    i += 1;
+                }
+            }
             continue;
         }
 
@@ -941,6 +976,175 @@ fn break_long_lines(
     }
 
     result.join("\n")
+}
+
+/// Whether a doc comment `[codeblock]` is open after comment `line`, given
+/// whether one was open before it. Godot's variants (`[codeblocks]`,
+/// `[codeblock lang=gdscript]`) open one too.
+fn code_block_state_after(line: &str, is_open: bool) -> bool {
+    if line.contains("[/codeblock") {
+        false
+    } else {
+        is_open || line.contains("[codeblock")
+    }
+}
+
+/// A `#` or `##` comment line split into its parts: the indent, the marker
+/// and one space as the prefix, then the text.
+struct CommentLine<'a> {
+    prefix: &'a str,
+    text: &'a str,
+}
+
+/// Split `line` into a [`CommentLine`]. `None` for anything but a plain
+/// comment: code, `#!`, `#region`, or a comment with no space after the
+/// marker, none of which are wrapped.
+fn split_comment_line(line: &str) -> Option<CommentLine<'_>> {
+    let indent_len = line.len() - line.trim_start_matches([' ', '\t']).len();
+    let content = &line[indent_len..];
+    let marker_len = if content.starts_with("##") { 2 } else { 1 };
+    if !content.starts_with('#') || content.as_bytes().get(marker_len) != Some(&b' ') {
+        return None;
+    }
+    let prefix_len = indent_len + marker_len + 1;
+    Some(CommentLine {
+        prefix: &line[..prefix_len],
+        text: &line[prefix_len..],
+    })
+}
+
+/// Byte length of the list marker and its space at the start of comment
+/// text: `- `, `* `, `+ `, `1. ` or `1) `.
+fn list_marker_len(text: &str) -> Option<usize> {
+    if text.starts_with("- ") || text.starts_with("* ") || text.starts_with("+ ") {
+        return Some(2);
+    }
+    let digits = text.bytes().take_while(u8::is_ascii_digit).count();
+    let after_digits = text.as_bytes().get(digits..digits + 2)?;
+    (digits > 0 && matches!(after_digits, [b'.' | b')', b' '])).then_some(digits + 2)
+}
+
+/// True when comment text starts a paragraph of its own: a list item or a
+/// tag like `TODO:`.
+fn starts_own_paragraph(text: &str) -> bool {
+    const TAGS: [&str; 6] = ["TODO", "FIXME", "NOTE", "HACK", "XXX", "BUG"];
+    list_marker_len(text).is_some()
+        || TAGS.iter().any(|tag| {
+            text.strip_prefix(tag)
+                .is_some_and(|rest| rest.starts_with([':', '(', ' ']))
+        })
+}
+
+/// True when comment text must keep its line breaks: commented-out code, a
+/// URL (which can't be split), or a `gdstyle:` directive.
+///
+/// The code test is a heuristic tuned to miss rather than misfire on prose:
+/// it looks for declarations, block headers ending in `:`, assignments and
+/// lines that are a single call. A miss only means the line is treated as
+/// prose, as `line` mode treats every comment.
+fn is_verbatim_comment_text(text: &str) -> bool {
+    const DECLARATIONS: [&str; 8] = [
+        "var ",
+        "const ",
+        "func ",
+        "signal ",
+        "enum ",
+        "class ",
+        "extends ",
+        "class_name ",
+    ];
+    const BLOCK_KEYWORDS: [&str; 7] = [
+        "if ",
+        "elif ",
+        "else",
+        "for ",
+        "while ",
+        "match ",
+        "static func ",
+    ];
+    let text = text.trim_end();
+    if text.contains("://") || text.starts_with("gdstyle:") {
+        return true;
+    }
+    if text.starts_with('@') || DECLARATIONS.iter().any(|keyword| text.starts_with(keyword)) {
+        return true;
+    }
+    if text.ends_with(':')
+        && BLOCK_KEYWORDS
+            .iter()
+            .any(|keyword| text.starts_with(keyword))
+    {
+        return true;
+    }
+    if matches!(text, "pass" | "break" | "continue" | "return") || text.ends_with(';') {
+        return true;
+    }
+    // `name = value`, `node.speed += 1`: a dotted name, then an assignment.
+    let name_len = text
+        .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.'))
+        .unwrap_or(text.len());
+    let after_name = text[name_len..].trim_start();
+    if name_len > 0 {
+        let is_assignment = ["= ", "+= ", "-= ", "*= ", "/= ", ":= "]
+            .iter()
+            .any(|operator| after_name.starts_with(operator));
+        // `queue_free()`, `$Timer.start(0.5)`: the whole line is one call.
+        let is_call = after_name.starts_with('(') && text.ends_with(')') && !text.contains(' ');
+        if is_assignment || is_call {
+            return true;
+        }
+    }
+    false
+}
+
+/// Wrap the long comment line `lines[start]` and refill the rest of its
+/// paragraph (see [`CommentWrap::Paragraph`]). Returns the new lines and how
+/// many source lines they replace, or `None` to leave the line as it is.
+///
+/// A list item's continuation lines are indented under its text, so a
+/// following line belongs to the item when it has that indent.
+fn reflow_comment_paragraph(
+    lines: &[&str],
+    start: usize,
+    max_len: usize,
+    is_editable: &dyn Fn(usize) -> bool,
+) -> Option<(Vec<String>, usize)> {
+    let first = split_comment_line(lines[start])?;
+    if first.text.trim().is_empty() || is_verbatim_comment_text(first.text) {
+        return None;
+    }
+    let continuation_prefix = match list_marker_len(first.text) {
+        Some(marker_len) => format!("{}{}", first.prefix, " ".repeat(marker_len)),
+        None => first.prefix.to_string(),
+    };
+
+    let mut words: Vec<&str> = first.text.split_whitespace().collect();
+    let mut end = start + 1;
+    while end < lines.len() && is_editable(end) {
+        let Some(text) = lines[end].strip_prefix(continuation_prefix.as_str()) else {
+            break;
+        };
+        let text = text.trim_end();
+        let is_paragraph_line = !text.is_empty()
+            && !text.starts_with([' ', '\t'])
+            && !text.starts_with('#')
+            && !starts_own_paragraph(text)
+            && !is_verbatim_comment_text(text)
+            && !text.contains("[codeblock")
+            && !text.contains("[/codeblock");
+        if !is_paragraph_line {
+            break;
+        }
+        words.extend(text.split_whitespace());
+        end += 1;
+    }
+
+    let reflowed = wrap_comment_words(&words, first.prefix, &continuation_prefix, max_len);
+    let consumed = end - start;
+    if consumed == 1 && reflowed.len() < 2 {
+        return None;
+    }
+    Some((reflowed, consumed))
 }
 
 fn visual_line_len(line: &str, tab_width: usize) -> usize {
@@ -1190,7 +1394,6 @@ fn split_top_level_commas(content: &str) -> Vec<String> {
 
 /// Break a long comment at word boundaries.
 fn try_break_comment(line: &str, max_len: usize) -> Option<Vec<String>> {
-    const TAB_WIDTH: usize = 4;
     let indent: String = line
         .chars()
         .take_while(|c| *c == '\t' || *c == ' ')
@@ -1211,25 +1414,44 @@ fn try_break_comment(line: &str, max_len: usize) -> Option<Vec<String>> {
         ("# ", content.strip_prefix("# ")?)
     };
 
-    let prefix_visual_len = visual_line_len(&format!("{}{}", indent, prefix), TAB_WIDTH);
-
     // Split text into words and wrap.
     let words: Vec<&str> = text.split_whitespace().collect();
     if words.is_empty() {
         return None;
     }
+    let full_prefix = format!("{}{}", indent, prefix);
+    let lines_out = wrap_comment_words(&words, &full_prefix, &full_prefix, max_len);
 
+    // Only return if we actually split into multiple lines.
+    if lines_out.len() < 2 {
+        return None;
+    }
+    Some(lines_out)
+}
+
+/// Lay `words` out as comment lines of at most `max_len` columns. The first
+/// line starts with `first_prefix` (indent and `# `), the others with
+/// `continuation_prefix`. A word wider than a line gets a line of its own.
+fn wrap_comment_words(
+    words: &[&str],
+    first_prefix: &str,
+    continuation_prefix: &str,
+    max_len: usize,
+) -> Vec<String> {
+    const TAB_WIDTH: usize = 4;
     let mut lines_out: Vec<String> = Vec::new();
-    let mut current_line = format!("{}{}", indent, prefix);
+    let mut prefix_visual_len = visual_line_len(first_prefix, TAB_WIDTH);
+    let mut current_line = first_prefix.to_string();
     let mut current_visual = prefix_visual_len;
 
-    for word in &words {
+    for word in words {
         // Columns, not bytes: an accented word takes one column per char.
         let word_len = word.chars().count();
         if current_visual > prefix_visual_len && current_visual + 1 + word_len > max_len {
             // Start a new line.
             lines_out.push(current_line);
-            current_line = format!("{}{}{}", indent, prefix, word);
+            prefix_visual_len = visual_line_len(continuation_prefix, TAB_WIDTH);
+            current_line = format!("{}{}", continuation_prefix, word);
             current_visual = prefix_visual_len + word_len;
         } else {
             if current_visual > prefix_visual_len {
@@ -1241,12 +1463,7 @@ fn try_break_comment(line: &str, max_len: usize) -> Option<Vec<String>> {
         }
     }
     lines_out.push(current_line);
-
-    // Only return if we actually split into multiple lines.
-    if lines_out.len() < 2 {
-        return None;
-    }
-    Some(lines_out)
+    lines_out
 }
 
 /// Break long `if`/`elif`/`while` conditions at `and`/`or` operators.
