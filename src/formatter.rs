@@ -930,7 +930,10 @@ fn break_long_lines(
         // `[codeblock]` contents in a doc comment are code: their line breaks
         // and spacing are part of the documentation.
         let was_in_code_block = is_in_code_block;
-        if is_comment && config.comment_wrap == CommentWrap::Paragraph {
+        if is_comment
+            && config.comment_wrap == CommentWrap::Paragraph
+            && !string_line_mask.is_interior(i)
+        {
             is_in_code_block = code_block_state_after(line, is_in_code_block);
         }
 
@@ -979,18 +982,21 @@ fn break_long_lines(
 }
 
 /// Whether a doc comment `[codeblock]` is open after comment `line`, given
-/// whether one was open before it. Godot's variants (`[codeblocks]`,
-/// `[codeblock lang=gdscript]`) open one too.
+/// whether one was open before it. The tags count only on a line of their
+/// own, as Godot's docs write them, so prose that mentions `[codeblock]`
+/// opens nothing. The variants `[codeblocks]` and `[codeblock lang=...]`
+/// count too.
 fn code_block_state_after(line: &str, is_open: bool) -> bool {
-    if line.contains("[/codeblock") {
+    let text = line.trim_start().trim_start_matches('#').trim();
+    if text.starts_with("[/codeblock") {
         false
     } else {
-        is_open || line.contains("[codeblock")
+        is_open || (text.starts_with("[codeblock") && text.ends_with(']'))
     }
 }
 
-/// A `#` or `##` comment line split into its parts: the indent, the marker
-/// and one space as the prefix, then the text.
+/// A `#` or `##` comment line split into its parts: the prefix (indent,
+/// marker and every space after it) and the text.
 struct CommentLine<'a> {
     prefix: &'a str,
     text: &'a str,
@@ -998,7 +1004,8 @@ struct CommentLine<'a> {
 
 /// Split `line` into a [`CommentLine`]. `None` for anything but a plain
 /// comment: code, `#!`, `#region`, or a comment with no space after the
-/// marker, none of which are wrapped.
+/// marker, none of which are wrapped. The spaces after the marker belong to
+/// the prefix, so a nested list item (`#   - item`) keeps its indent.
 fn split_comment_line(line: &str) -> Option<CommentLine<'_>> {
     let indent_len = line.len() - line.trim_start_matches([' ', '\t']).len();
     let content = &line[indent_len..];
@@ -1006,7 +1013,9 @@ fn split_comment_line(line: &str) -> Option<CommentLine<'_>> {
     if !content.starts_with('#') || content.as_bytes().get(marker_len) != Some(&b' ') {
         return None;
     }
-    let prefix_len = indent_len + marker_len + 1;
+    let after_marker = &content[marker_len..];
+    let spaces_len = after_marker.len() - after_marker.trim_start_matches(' ').len();
+    let prefix_len = indent_len + marker_len + spaces_len;
     Some(CommentLine {
         prefix: &line[..prefix_len],
         text: &line[prefix_len..],
@@ -1036,12 +1045,12 @@ fn starts_own_paragraph(text: &str) -> bool {
 }
 
 /// True when comment text must keep its line breaks: commented-out code, a
-/// URL (which can't be split), or a `gdstyle:` directive.
+/// table, a URL (which can't be split), or a `gdstyle:` directive.
 ///
-/// The code test is a heuristic tuned to miss rather than misfire on prose:
-/// it looks for declarations, block headers ending in `:`, assignments and
-/// lines that are a single call. A miss only means the line is treated as
-/// prose, as `line` mode treats every comment.
+/// The code test is a heuristic tuned to miss rather than misfire on prose.
+/// It looks for declarations, block headers ending in `:`, `return` or
+/// `await` with an expression, assignments, and lines that are one call. A
+/// miss treats the line as prose, as `line` mode treats every comment.
 fn is_verbatim_comment_text(text: &str) -> bool {
     const DECLARATIONS: [&str; 8] = [
         "var ",
@@ -1062,8 +1071,8 @@ fn is_verbatim_comment_text(text: &str) -> bool {
         "match ",
         "static func ",
     ];
-    let text = text.trim_end();
-    if text.contains("://") || text.starts_with("gdstyle:") {
+    let text = text.trim();
+    if text.contains("://") || text.starts_with("gdstyle:") || has_column_gap(text) {
         return true;
     }
     if text.starts_with('@') || DECLARATIONS.iter().any(|keyword| text.starts_with(keyword)) {
@@ -1079,22 +1088,37 @@ fn is_verbatim_comment_text(text: &str) -> bool {
     if matches!(text, "pass" | "break" | "continue" | "return") || text.ends_with(';') {
         return true;
     }
-    // `name = value`, `node.speed += 1`: a dotted name, then an assignment.
-    let name_len = text
-        .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.'))
-        .unwrap_or(text.len());
-    let after_name = text[name_len..].trim_start();
-    if name_len > 0 {
-        let is_assignment = ["= ", "+= ", "-= ", "*= ", "/= ", ":= "]
-            .iter()
-            .any(|operator| after_name.starts_with(operator));
-        // `queue_free()`, `$Timer.start(0.5)`: the whole line is one call.
-        let is_call = after_name.starts_with('(') && text.ends_with(')') && !text.contains(' ');
-        if is_assignment || is_call {
-            return true;
+    // `return x`, `await get_tree().process_frame`. Prose like "return the
+    // value" has more than one word and doesn't end in a bracket.
+    for keyword in ["return ", "await "] {
+        if let Some(expression) = text.strip_prefix(keyword) {
+            if !expression.contains(' ') || expression.ends_with([')', ']']) {
+                return true;
+            }
         }
     }
-    false
+    // A statement that starts with a name: `speed += 1`, `print("hi", x)`,
+    // `$Timer.start(0.5)`. Names may be dotted, node paths included.
+    let name_len = text
+        .find(|c: char| !(c.is_alphanumeric() || matches!(c, '_' | '.' | '$' | '%' | '/')))
+        .unwrap_or(text.len());
+    if name_len == 0 {
+        return false;
+    }
+    let after_name = text[name_len..].trim_start();
+    let is_assignment = ["= ", "+= ", "-= ", "*= ", "/= ", ":= "]
+        .iter()
+        .any(|operator| after_name.starts_with(operator));
+    let is_call = after_name.starts_with('(') && text.ends_with(')');
+    is_assignment || is_call
+}
+
+/// True when `text` has a run of spaces inside it that isn't the double
+/// space some writers put after a sentence: the column gap of a table
+/// (`speed   float   1.0`).
+fn has_column_gap(text: &str) -> bool {
+    text.match_indices("  ")
+        .any(|(index, _)| !text[..index].ends_with(['.', '!', '?', ':']))
 }
 
 /// Wrap the long comment line `lines[start]` and refill the rest of its
@@ -1432,6 +1456,10 @@ fn try_break_comment(line: &str, max_len: usize) -> Option<Vec<String>> {
 /// Lay `words` out as comment lines of at most `max_len` columns. The first
 /// line starts with `first_prefix` (indent and `# `), the others with
 /// `continuation_prefix`. A word wider than a line gets a line of its own.
+///
+/// A wrapped line never starts with a `gdstyle:` word: `# gdstyle:ignore`
+/// at the start of a comment is a suppression directive, so the word before
+/// it moves down too, or it stays on the line it was on.
 fn wrap_comment_words(
     words: &[&str],
     first_prefix: &str,
@@ -1439,30 +1467,28 @@ fn wrap_comment_words(
     max_len: usize,
 ) -> Vec<String> {
     const TAB_WIDTH: usize = 4;
+    // Columns, not bytes: an accented word takes one column per char.
+    let line_width = |prefix: &str, line_words: &[&str]| {
+        let words_width: usize = line_words.iter().map(|word| word.chars().count()).sum();
+        visual_line_len(prefix, TAB_WIDTH) + words_width + line_words.len().saturating_sub(1)
+    };
     let mut lines_out: Vec<String> = Vec::new();
-    let mut prefix_visual_len = visual_line_len(first_prefix, TAB_WIDTH);
-    let mut current_line = first_prefix.to_string();
-    let mut current_visual = prefix_visual_len;
+    let mut prefix = first_prefix;
+    let mut line_words: Vec<&str> = Vec::new();
 
-    for word in words {
-        // Columns, not bytes: an accented word takes one column per char.
-        let word_len = word.chars().count();
-        if current_visual > prefix_visual_len && current_visual + 1 + word_len > max_len {
-            // Start a new line.
-            lines_out.push(current_line);
-            prefix_visual_len = visual_line_len(continuation_prefix, TAB_WIDTH);
-            current_line = format!("{}{}", continuation_prefix, word);
-            current_visual = prefix_visual_len + word_len;
-        } else {
-            if current_visual > prefix_visual_len {
-                current_line.push(' ');
-                current_visual += 1;
-            }
-            current_line.push_str(word);
-            current_visual += word_len;
+    for &word in words {
+        let fits = line_width(prefix, &line_words) + 1 + word.chars().count() <= max_len;
+        let is_directive = word.starts_with("gdstyle:");
+        if line_words.is_empty() || fits || (is_directive && line_words.len() == 1) {
+            line_words.push(word);
+            continue;
         }
+        let carried = if is_directive { line_words.pop() } else { None };
+        lines_out.push(format!("{}{}", prefix, line_words.join(" ")));
+        prefix = continuation_prefix;
+        line_words = carried.into_iter().chain([word]).collect();
     }
-    lines_out.push(current_line);
+    lines_out.push(format!("{}{}", prefix, line_words.join(" ")));
     lines_out
 }
 

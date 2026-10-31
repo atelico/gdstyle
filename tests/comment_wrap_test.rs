@@ -124,6 +124,12 @@ fn paragraph_stops_before_lines_that_start_something_else() {
         "# if is_ready:",
         "# speed += 1",
         "# queue_free()",
+        "# print(\"hello\", x)",
+        "# $Timer.start(0.5)",
+        "# return x",
+        "# await get_tree().process_frame",
+        "# name    type    default",
+        "#     var indented = 1",
         "# see https://godotengine.org",
         "# gdstyle:ignore format/max-line-length",
     ] {
@@ -205,4 +211,77 @@ fn comment_wrap_reads_from_toml() {
     );
     assert_eq!(parse("comment_wrap = \"off\"").unwrap(), CommentWrap::Off);
     assert!(parse("comment_wrap = \"reflow\"").is_err());
+}
+
+#[test]
+fn paragraph_still_refills_prose_that_looks_a_little_like_code() {
+    // "return the value" is prose: more than one word, no bracket at the end.
+    // A double space after a sentence is not a table column.
+    for (next, refilled) in [
+        ("# return the value.", "# jjj kkk return the value."),
+        ("# end.  Then more.", "# jjj kkk end. Then more."),
+    ] {
+        assert_eq!(
+            paragraph_lines(LONG, next),
+            vec!["# aaa bbb ccc ddd eee fff ggg hhh iii", refilled],
+            "next line {next:?}"
+        );
+    }
+}
+
+#[test]
+fn paragraph_wraps_after_prose_that_mentions_a_codeblock_tag() {
+    // Only a tag on its own line opens a code block, so a later long comment
+    // still wraps.
+    let source = "\
+## Wrap examples in [codeblock] tags.
+func f() -> void:
+\t# aaa bbb ccc ddd eee fff ggg hhh iii jjj kkk
+\tpass
+";
+    let formatted = format(source, CommentWrap::Paragraph);
+    assert!(
+        formatted.contains("\t# aaa bbb ccc ddd eee fff ggg hhh\n\t# iii jjj kkk\n"),
+        "{formatted}"
+    );
+}
+
+#[test]
+fn paragraph_wraps_a_nested_list_item_under_its_text() {
+    let source = "\
+# - item
+#   - nested sub item aaa bbb ccc ddd eee
+";
+    assert_eq!(
+        format(source, CommentWrap::Paragraph),
+        "\
+# - item
+#   - nested sub item aaa bbb ccc ddd
+#     eee
+"
+    );
+}
+
+#[test]
+fn wrapping_never_starts_a_line_with_a_suppression_directive() {
+    // `# gdstyle:ignore-file` at the start of a comment would silence the
+    // whole file, so the word before it moves down with it.
+    for mode in [CommentWrap::Line, CommentWrap::Paragraph] {
+        let source = "# aaa bbb ccc ddd eee fff ggg by gdstyle:ignore-file x\nvar badName = 1\n";
+        let formatted = format(source, mode);
+        assert!(
+            formatted
+                .lines()
+                .all(|line| !line.starts_with("# gdstyle:")),
+            "{mode:?}: {formatted}"
+        );
+        let names: Vec<String> = linter::lint_source(&formatted, "test.gd", &config(mode))
+            .into_iter()
+            .map(|d| d.rule)
+            .collect();
+        assert!(
+            names.contains(&"naming/variable-name-snake-case".to_string()),
+            "{mode:?}: {names:?}"
+        );
+    }
 }

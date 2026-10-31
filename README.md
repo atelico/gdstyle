@@ -261,7 +261,7 @@ A comment line longer than `max_line_length` is wrapped at word boundaries. `com
 | `"paragraph"` | Wraps that line and refills the rest of its paragraph. |
 | `"off"` | Leaves comments alone. `format/max-line-length` still reports them. |
 
-In `"paragraph"` mode a paragraph is the long line plus the comment lines right below it with the same indent and the same `#` or `##` marker. It ends at an empty comment line, a list item (`- `, `* `, `1. `), a tag like `TODO:`, or a line that looks like code. Lines above the long one are never touched. A long list item wraps under its text. Lines that look like commented-out code, lines with a URL or a `gdstyle:` directive, and the contents of a `[codeblock]` in a doc comment are never wrapped.
+In `"paragraph"` mode a paragraph is the long line plus the comment lines right below it with the same indent and the same `#` or `##` marker. It ends at an empty comment line, a list item (`- `, `* `, `1. `), a tag like `TODO:`, or a line that looks like code or a table. Lines above the long one are never touched. A long list item, nested ones included, wraps under its text. Lines that look like commented-out code or a table, lines with a URL or a `gdstyle:` directive, and the contents of a `[codeblock]` in a doc comment are never wrapped. In every mode, a wrapped line never starts with `gdstyle:`, so wrapping can't create a suppression comment.
 
 ```gdscript
 # "line":
