@@ -1,4 +1,4 @@
-use crate::ast::ClassMember;
+use crate::ast::{is_export_annotation, ClassMember};
 use crate::config::Config;
 use crate::fixer;
 use crate::lexer::Lexer;
@@ -1440,7 +1440,103 @@ fn safe_reorder_class_members(source: &str) -> String {
     if changes_region_coverage(source, &reordered) {
         return source.to_string();
     }
+
+    // Guard 4: keep every export in the same inspector section. A section
+    // marker moves with the member below it, so sorting can carry an export
+    // past an `@export_group("")` and into the group above.
+    if export_sections(source, &original_members) != export_sections(&reordered, &reordered_members)
+    {
+        return source.to_string();
+    }
     reordered
+}
+
+/// Every exported script variable's name paired with the inspector section it
+/// shows under: the arguments of the `@export_category`, `@export_group` and
+/// `@export_subgroup` in force above it. Sorted, so two orderings compare
+/// equal when no export changed section. Empty when the source has no
+/// section markers, which skips the walk for most files.
+fn export_sections<'s>(source: &'s str, members: &[ClassMember]) -> Vec<(String, [&'s str; 3])> {
+    if !(source.contains("@export_group")
+        || source.contains("@export_subgroup")
+        || source.contains("@export_category"))
+    {
+        return Vec::new();
+    }
+    // Category, group, subgroup. A category ends the group and subgroup
+    // inside it, and a group ends the subgroup.
+    let mut section: [&str; 3] = [""; 3];
+    let mut sections = Vec::new();
+    for member in members {
+        let markers: Vec<(&str, usize)> = match member {
+            ClassMember::Variable { annotations, .. }
+            | ClassMember::StaticVariable { annotations, .. }
+            | ClassMember::Function { annotations, .. } => annotations
+                .iter()
+                .map(|a| (a.name.as_str(), a.span.offset))
+                .collect(),
+            ClassMember::ClassAnnotation { name, span } => vec![(name.as_str(), span.offset)],
+            _ => Vec::new(),
+        };
+        for (name, offset) in markers {
+            let arguments = annotation_arguments(source, offset);
+            match name {
+                "export_category" => section = [arguments, "", ""],
+                "export_group" => section = [section[0], arguments, ""],
+                "export_subgroup" => section[2] = arguments,
+                _ => {}
+            }
+        }
+        if let ClassMember::Variable {
+            name, annotations, ..
+        } = member
+        {
+            if annotations.iter().any(|a| is_export_annotation(&a.name)) {
+                sections.push((name.clone(), section));
+            }
+        }
+    }
+    sections.sort_unstable();
+    sections
+}
+
+/// The text between the parentheses of the annotation starting at byte
+/// `offset`, like `"Stats", "stat_"` for `@export_group("Stats", "stat_")`.
+/// Brackets inside strings don't count (`"Size (px)"`), and the arguments may
+/// span lines. Empty when the annotation has no argument list.
+fn annotation_arguments(source: &str, offset: usize) -> &str {
+    let Some(rest) = source.get(offset..) else {
+        return "";
+    };
+    // Skip `@` and the annotation name, then expect the opening paren.
+    let name_end = rest
+        .char_indices()
+        .skip(1)
+        .find(|(_, c)| !(c.is_alphanumeric() || *c == '_'))
+        .map_or(rest.len(), |(index, _)| index);
+    let after_name = &rest[name_end..];
+    let Some(arguments) = after_name.trim_start_matches([' ', '\t']).strip_prefix('(') else {
+        return "";
+    };
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut is_escaped = false;
+    for (index, c) in arguments.char_indices() {
+        match quote {
+            Some(_) if is_escaped => is_escaped = false,
+            Some(_) if c == '\\' => is_escaped = true,
+            Some(open) if c == open => quote = None,
+            Some(_) => {}
+            None => match c {
+                '"' | '\'' => quote = Some(c),
+                '(' | '[' | '{' => depth += 1,
+                ')' if depth == 0 => return arguments[..index].trim(),
+                ')' | ']' | '}' => depth = depth.saturating_sub(1),
+                _ => {}
+            },
+        }
+    }
+    ""
 }
 
 /// Reorder the members of each inner class, unless doing so would change
@@ -2483,6 +2579,34 @@ mod tests {
             ensure_trailing_newline("hello\n\n\n", &|_| false),
             "hello\n"
         );
+    }
+
+    #[test]
+    fn export_sections_follow_category_group_and_subgroup() {
+        // A category ends the group and subgroup above it, a group ends the
+        // subgroup, and an empty group ends the group.
+        let source = "@export_category(\"Stats\")\n@export_group(\"Combat\", \"combat_\")\n@export_subgroup(\"Melee\")\n@export var combat_reach: float\n@export_group(\"Movement\")\n@export var speed: float\n@export_group(\"\")\nvar _cache: int\n@export var loose: int\n@export_category(\"Looks\")\n@export var tint: Color\n";
+        let sections = export_sections(source, &parse_members(source));
+        let expected: Vec<(String, [&str; 3])> = vec![
+            (
+                "combat_reach".into(),
+                ["\"Stats\"", "\"Combat\", \"combat_\"", "\"Melee\""],
+            ),
+            ("loose".into(), ["\"Stats\"", "\"\"", ""]),
+            ("speed".into(), ["\"Stats\"", "\"Movement\"", ""]),
+            ("tint".into(), ["\"Looks\"", "", ""]),
+        ];
+        assert_eq!(sections, expected);
+    }
+
+    #[test]
+    fn annotation_arguments_skip_brackets_in_strings_and_span_lines() {
+        let source = "@export_group(\"Size (px)\", \"size_\")\n@export_group(\n\t\"Long\"\n)\n@export_group\n";
+        let second = source.find("@export_group(\n").unwrap();
+        let third = source.rfind("@export_group").unwrap();
+        assert_eq!(annotation_arguments(source, 0), "\"Size (px)\", \"size_\"");
+        assert_eq!(annotation_arguments(source, second), "\"Long\"");
+        assert_eq!(annotation_arguments(source, third), "");
     }
 
     #[test]

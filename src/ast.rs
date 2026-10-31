@@ -144,10 +144,7 @@ impl ClassMember {
             ClassMember::Constant { .. } => 6,
             ClassMember::StaticVariable { .. } => 7,
             ClassMember::Variable { annotations, .. } => {
-                if annotations
-                    .iter()
-                    .any(|a| a.name == "export" || a.name.starts_with("export_"))
-                {
+                if annotations.iter().any(|a| is_export_annotation(&a.name)) {
                     8
                 } else if annotations.iter().any(|a| a.name == "onready") {
                     10
@@ -215,10 +212,7 @@ impl ClassMember {
             ClassMember::Constant { .. } => "constant declaration",
             ClassMember::StaticVariable { .. } => "static variable",
             ClassMember::Variable { annotations, .. } => {
-                if annotations
-                    .iter()
-                    .any(|a| a.name == "export" || a.name.starts_with("export_"))
-                {
+                if annotations.iter().any(|a| is_export_annotation(&a.name)) {
                     "@export variable"
                 } else if annotations.iter().any(|a| a.name == "onready") {
                     "@onready variable"
@@ -295,6 +289,29 @@ pub struct Parameter {
 pub struct EnumMember {
     pub name: String,
     pub span: Span,
+}
+
+/// True when the annotation `name` (without `@`) exports the variable it is
+/// on: `export` and its typed forms like `export_range` or `export_file`.
+///
+/// `export_group`, `export_subgroup` and `export_category` only start or end
+/// an inspector section. The parser attaches them to the next variable, which
+/// is often a plain one (`@export_group("")` then `var _cache`).
+///
+/// # Examples
+///
+/// ```
+/// use gdstyle::ast::is_export_annotation;
+///
+/// assert!(is_export_annotation("export"));
+/// assert!(is_export_annotation("export_range"));
+/// assert!(!is_export_annotation("export_group"));
+/// assert!(!is_export_annotation("onready"));
+/// ```
+pub fn is_export_annotation(name: &str) -> bool {
+    name == "export"
+        || (name.starts_with("export_")
+            && !matches!(name, "export_group" | "export_subgroup" | "export_category"))
 }
 
 #[derive(Debug, Clone)]

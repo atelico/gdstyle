@@ -3640,6 +3640,140 @@ fn fmt_inline_warning_ignore_declaration_is_not_absorbed_by_next_member() {
     );
 }
 
+// --- @export_group and friends are not exports (issue #88) --------------------
+
+#[test]
+fn naming_private_underscore_prefix_ignores_a_group_marker_above() {
+    // Issue #88: `@export_group("")` ends a group. The parser attaches it to
+    // the next variable, which used to make `var _private` count as exported.
+    let config = default_config();
+    let source = "\
+extends Node
+
+@export_group(\"A group\")
+@export var export_variable: bool
+@export_group(\"\")
+
+var _private: bool
+
+@export_category(\"Stats\")
+var _health: int
+
+@export_subgroup(\"Inner\")
+@export var _speed: int
+";
+    let lines: Vec<usize> = linter::lint_source(source, "test.gd", &config)
+        .iter()
+        .filter(|d| d.rule == "naming/private-underscore-prefix")
+        .map(|d| d.span.line)
+        .collect();
+    assert_eq!(lines, vec![13], "only the really exported `_speed`");
+}
+
+#[test]
+fn order_class_member_order_reads_a_variable_after_a_group_end_as_plain() {
+    // The variable under `@export_group("")` is a plain variable, so an
+    // exported one after it is out of order.
+    let config = default_config();
+    let source = "\
+extends Node
+
+@export_group(\"Group\")
+@export var a: int
+@export_group(\"\")
+var b: int
+@export var c: int
+";
+    let diagnostics: Vec<String> = linter::lint_source(source, "test.gd", &config)
+        .into_iter()
+        .filter(|d| d.rule == "order/class-member-order")
+        .map(|d| format!("{}: {}", d.span.line, d.message))
+        .collect();
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert!(
+        diagnostics[0].starts_with("7: @export variable"),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn fmt_does_not_move_an_export_into_another_inspector_group() {
+    // Sorting `c` above `b` would carry it above `@export_group("")`, into
+    // "Group" in the inspector. The reorder is skipped; only the blank lines
+    // between exports and the plain variable are added.
+    let config = default_config();
+    let source = "\
+extends Node
+
+@export_group(\"Group\")
+@export var a: int
+@export_group(\"\")
+var b: int
+@export var c: int
+";
+    let expected = "\
+extends Node
+
+@export_group(\"Group\")
+@export var a: int
+
+@export_group(\"\")
+var b: int
+
+@export var c: int
+";
+    assert_eq!(formatter::format_source(source, &config), expected);
+}
+
+#[test]
+fn fmt_still_reorders_when_every_export_keeps_its_group() {
+    // Moving the grouped exports above a plain variable keeps each export
+    // under the same group, so this reorder stays.
+    let config = default_config();
+    let source = "\
+extends Node
+
+var plain: int
+
+@export_group(\"Group\")
+@export var a: int
+@export var b: int
+";
+    let expected = "\
+extends Node
+
+@export_group(\"Group\")
+@export var a: int
+@export var b: int
+
+var plain: int
+";
+    assert_eq!(formatter::format_source(source, &config), expected);
+}
+
+#[test]
+fn fmt_keeps_export_sections_with_brackets_multi_line_markers_and_static_vars() {
+    // Each reorder would move an export into another section: two group
+    // names that differ only after a `)`, a marker whose arguments span
+    // lines, and a marker on a static var, which sorts above the exports.
+    let config = default_config();
+    let sources = [
+        "extends Node\n\n@export_group(\"Size (px)\")\n@export var a: int = 1\n@export_group(\"Size (px) fine\")\nvar _p: int = 0\n@export var b: int = 2\n",
+        "extends Node\n\nvar _p: int = 0\n@export_group(\n\t\"G\")\nvar _q: int = 0\n@export var a: int = 1\n",
+        "extends Node\n\n@export var a: int = 1\n@export_group(\"G\")\nstatic var s: int = 0\n@export var b: int = 2\n",
+    ];
+    for source in sources {
+        let formatted = formatter::format_source(source, &config);
+        let order = |text: &str| -> Vec<String> {
+            text.lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(str::to_string)
+                .collect()
+        };
+        assert_eq!(order(&formatted), order(source), "reordered:\n{formatted}");
+    }
+}
+
 // --- @warning_ignore_start regions survive reordering ------------------------
 
 /// Top-level declaration lines of `source`, in order, with the region marker
