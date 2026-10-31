@@ -59,6 +59,10 @@ pub struct Config {
     /// boundary, and members are not reordered to group them.
     pub blank_line_between_public_and_private: bool,
 
+    /// What `fmt` does with a comment line longer than `max_line_length`
+    /// (default: [`CommentWrap::Line`]).
+    pub comment_wrap: CommentWrap,
+
     /// File/directory patterns to exclude from linting.
     pub exclude: Vec<String>,
 
@@ -71,6 +75,38 @@ pub struct Config {
     /// Per-rule configuration overrides.
     /// Key is the rule name, value is "off", "warn", or "error".
     pub rules: HashMap<String, RuleSeverityConfig>,
+}
+
+/// What `fmt` does with a comment line longer than `max_line_length`. Set
+/// with `comment_wrap` in `gdstyle.toml`. Whatever the mode,
+/// `format/max-line-length` reports a comment line that is still too long.
+///
+/// # Example
+///
+/// ```
+/// use gdstyle::config::{CommentWrap, Config};
+///
+/// let config: Config = toml::from_str("comment_wrap = \"paragraph\"").unwrap();
+/// assert_eq!(config.comment_wrap, CommentWrap::Paragraph);
+/// assert_eq!(Config::default().comment_wrap, CommentWrap::Line);
+/// ```
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CommentWrap {
+    /// Wrap the long line on its own at word boundaries. The lines after it
+    /// are left as they are, so the words moved off it can end up on a short
+    /// line in the middle of a paragraph.
+    #[default]
+    Line,
+    /// Wrap the long line and refill the rest of its paragraph: the comment
+    /// lines below it with the same indent and marker, up to an empty
+    /// comment line, a list item, a `TODO:`-style tag, or a line that looks
+    /// like code. Lines above it are never touched. Lines that look like
+    /// code, hold a URL or a `gdstyle:` directive, and `[codeblock]`
+    /// contents in doc comments are never wrapped.
+    Paragraph,
+    /// Leave comments alone.
+    Off,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -125,6 +161,7 @@ impl Default for Config {
             max_inner_classes: 5,
             large_number_threshold: 10_000,
             blank_line_between_public_and_private: false,
+            comment_wrap: CommentWrap::Line,
             exclude: vec![".godot".to_string(), "addons".to_string()],
             include: Vec::new(),
             rules: HashMap::new(),
