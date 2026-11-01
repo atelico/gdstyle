@@ -8535,6 +8535,7 @@ func g():
 ";
     assert_eq!(flagged_lines(source, "quality/no-else-return"), vec![7]);
     assert_eq!(flagged_lines(source, "quality/unreachable-code"), vec![13]);
+}
 
 // --- annotations closing on their declaration line, trailing body comments --
 
