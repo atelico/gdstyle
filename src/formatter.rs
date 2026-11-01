@@ -390,6 +390,17 @@ fn leading_warning_ignore_start(
         trimmed.starts_with("@warning_ignore(") || trimmed.starts_with("@warning_ignore_start(")
     };
     let mut first_line = below;
+    // A marker whose arguments close on the declaration line itself:
+    // `@warning_ignore(` / `"unused_signal"` / `) signal z`.
+    if declaration_lines.contains(&below) && below <= lines.len() {
+        if let Some(start) =
+            multi_line_annotation_start(lines, below - 1, 0, AfterAnnotation::Declaration)
+                .filter(|&start| is_warning_ignore(lines[start]))
+                .filter(|&start| (start + 1..below).all(|line| !declaration_lines.contains(&line)))
+        {
+            first_line = start + 1;
+        }
+    }
     while first_line > 1 {
         let candidate = first_line - 1;
         let Some(&line) = lines.get(candidate - 1) else {
@@ -403,9 +414,12 @@ fn leading_warning_ignore_start(
             continue;
         }
         // A marker whose arguments span lines and close on `candidate`.
-        let multi_line_start = multi_line_annotation_start(lines, candidate - 1, 0)
-            .filter(|&start| is_warning_ignore(lines[start]))
-            .filter(|&start| (start + 1..candidate).all(|line| !declaration_lines.contains(&line)));
+        let multi_line_start =
+            multi_line_annotation_start(lines, candidate - 1, 0, AfterAnnotation::Nothing)
+                .filter(|&start| is_warning_ignore(lines[start]))
+                .filter(|&start| {
+                    (start + 1..candidate).all(|line| !declaration_lines.contains(&line))
+                });
         match multi_line_start {
             Some(start) => first_line = start + 1,
             None => break,
@@ -428,18 +442,23 @@ fn leading_warning_ignore_start(
 /// never touched. Only column-1 markers count; indented ones belong to an
 /// inner class or a function body, which this pass leaves alone.
 fn tighten_warning_ignore_region_markers(source: &str, tokens: &[Token]) -> String {
-    let marker_lines = |marker_name: &str| -> std::collections::HashSet<usize> {
-        tokens
-            .iter()
-            .filter(|token| {
-                token.span.column == 1
-                    && matches!(&token.kind, TokenKind::Annotation(name) if name == marker_name)
-            })
-            .map(|token| token.span.line)
-            .collect()
+    let is_marker = |token: &Token, marker_name: &str| {
+        token.span.column == 1
+            && matches!(&token.kind, TokenKind::Annotation(name) if name == marker_name)
     };
-    let start_lines = marker_lines("warning_ignore_start");
-    let restore_lines = marker_lines("warning_ignore_restore");
+    // A start marker's arguments may span lines: the blank lines to remove
+    // are those below its closing `)`, the line it ends on.
+    let start_lines: std::collections::HashSet<usize> = tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, token)| is_marker(token, "warning_ignore_start"))
+        .map(|(index, token)| annotation_end_line(tokens, index).unwrap_or(token.span.line))
+        .collect();
+    let restore_lines: std::collections::HashSet<usize> = tokens
+        .iter()
+        .filter(|token| is_marker(token, "warning_ignore_restore"))
+        .map(|token| token.span.line)
+        .collect();
     if start_lines.is_empty() && restore_lines.is_empty() {
         return source.to_string();
     }
@@ -475,6 +494,32 @@ fn tighten_warning_ignore_region_markers(source: &str, tokens: &[Token]) -> Stri
     // newline) are not this pass's business.
     kept.append(&mut pending_blank_lines);
     kept.join("\n")
+}
+
+/// The line of the `)` closing the argument list of the annotation token at
+/// `tokens[annotation_index]`. `None` when it has no argument list or the
+/// list is cut short by another annotation or the end of the file; stopping
+/// at the next annotation keeps every token read by one marker at most.
+fn annotation_end_line(tokens: &[Token], annotation_index: usize) -> Option<usize> {
+    let after_name = tokens.get(annotation_index + 1..)?;
+    if !matches!(after_name.first()?.kind, TokenKind::LeftParen) {
+        return None;
+    }
+    let mut depth = 0usize;
+    for token in after_name {
+        match token.kind {
+            TokenKind::LeftParen => depth += 1,
+            TokenKind::RightParen => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(token.span.line);
+                }
+            }
+            TokenKind::Annotation(_) => return None,
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Top-level item in the source, used by `normalize_member_spacing`. A unit
@@ -1562,28 +1607,52 @@ fn annotation_call(text: &str) -> Option<AnnotationCall<'_>> {
     None
 }
 
+/// Keywords a script-level declaration line starts with. A line starting
+/// with one is never part of an annotation's arguments, and as comment text
+/// it marks commented-out code (see `comments::must_keep_whole`).
+const DECLARATION_KEYWORDS: [&str; 9] = [
+    "var ",
+    "const ",
+    "func ",
+    "static ",
+    "signal ",
+    "enum ",
+    "class ",
+    "class_name ",
+    "extends ",
+];
+
+/// What may follow the closing `)` of the annotation that
+/// [`multi_line_annotation_start`] looks for, on the line it closes on.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AfterAnnotation {
+    /// Nothing but a comment: the annotation has lines of its own above the
+    /// declaration it applies to.
+    Nothing,
+    /// The declaration itself, as in `) var x := 1` or `) signal z`.
+    Declaration,
+}
+
 /// The first line of a script-level annotation whose arguments span lines
 /// and close on line `end` (`@warning_ignore(` / `"unused"` / `)`), if
 /// there is one between `lower_bound` and `end`. Its lines start with
 /// neither `#` nor `@` after the first, so the member walk-back needs this
-/// to keep them together.
-fn multi_line_annotation_start(lines: &[&str], end: usize, lower_bound: usize) -> Option<usize> {
-    const DECLARATIONS: [&str; 9] = [
-        "var ",
-        "const ",
-        "func ",
-        "static ",
-        "signal ",
-        "enum ",
-        "class ",
-        "class_name ",
-        "extends ",
-    ];
+/// to keep them together. `after` says what follows the `)` on line `end`.
+fn multi_line_annotation_start(
+    lines: &[&str],
+    end: usize,
+    lower_bound: usize,
+    after: AfterAnnotation,
+) -> Option<usize> {
     for start in (lower_bound..end).rev() {
         let line = lines[start];
         // Annotation arguments hold no blank line and no declaration, so the
         // scan never runs past the member above.
-        if line.trim().is_empty() || DECLARATIONS.iter().any(|keyword| line.starts_with(keyword)) {
+        if line.trim().is_empty()
+            || DECLARATION_KEYWORDS
+                .iter()
+                .any(|keyword| line.starts_with(keyword))
+        {
             return None;
         }
         if !line.starts_with('@') {
@@ -1591,9 +1660,14 @@ fn multi_line_annotation_start(lines: &[&str], end: usize, lower_bound: usize) -
         }
         let text = lines[start..=end].join("\n");
         let call = annotation_call(&text)?;
-        // The call must end on line `end`, with nothing but a comment after.
+        // The call must end on line `end`.
         let rest = text[call.len..].trim_start_matches([' ', '\t']);
-        let ends_on_the_line = !rest.contains('\n') && (rest.is_empty() || rest.starts_with('#'));
+        let is_comment_or_nothing = rest.is_empty() || rest.starts_with('#');
+        let ends_on_the_line = !rest.contains('\n')
+            && match after {
+                AfterAnnotation::Nothing => is_comment_or_nothing,
+                AfterAnnotation::Declaration => !is_comment_or_nothing,
+            };
         return ends_on_the_line.then_some(start);
     }
     None
@@ -1719,28 +1793,91 @@ type RegionCoverage<'s> = HashMap<(&'s str, Rc<[&'s str]>), usize>;
 ///
 /// Regions are textual in Godot: one runs from its `@warning_ignore_start`
 /// line to the matching `@warning_ignore_restore`, or to the end of the file.
+/// A marker's arguments may span lines; those lines are part of the marker,
+/// not code.
 fn warning_ignore_region_coverage(source: &str) -> RegionCoverage<'_> {
     let mut active_codes: Vec<&str> = Vec::new();
     let mut ignored: Rc<[&str]> = Rc::from([]);
     let mut coverage = RegionCoverage::default();
+    let mut line_start = 0;
+    // Argument lines of the marker read last, still to be skipped.
+    let mut marker_lines_left = 0usize;
     for line in source.split('\n') {
+        let line_offset = line_start;
+        line_start += line.len() + 1;
+        if marker_lines_left > 0 {
+            marker_lines_left -= 1;
+            continue;
+        }
         let trimmed = line.trim();
-        if let Some(arguments) = trimmed.strip_prefix("@warning_ignore_start(") {
-            for code in quoted_strings(arguments) {
-                if !active_codes.contains(&code) {
-                    active_codes.push(code);
+        let is_start = trimmed.starts_with("@warning_ignore_start(");
+        if is_start || trimmed.starts_with("@warning_ignore_restore(") {
+            let arguments_offset = line_offset + line.find('(').map_or(0, |open| open + 1);
+            let (codes, extra_lines) = match warning_codes(&source[arguments_offset..]) {
+                Some(marker) => (marker.codes, marker.extra_lines),
+                // Not a plain list of names: read what this line holds, as
+                // Godot would reject the rest anyway.
+                None => (
+                    quoted_strings(&source[arguments_offset..line_offset + line.len()]),
+                    0,
+                ),
+            };
+            marker_lines_left = extra_lines;
+            if is_start {
+                for code in codes {
+                    if !active_codes.contains(&code) {
+                        active_codes.push(code);
+                    }
                 }
+            } else {
+                active_codes.retain(|code| !codes.contains(code));
             }
-            ignored = sorted_codes(&active_codes);
-        } else if let Some(arguments) = trimmed.strip_prefix("@warning_ignore_restore(") {
-            let restored = quoted_strings(arguments);
-            active_codes.retain(|code| !restored.contains(code));
             ignored = sorted_codes(&active_codes);
         } else if !trimmed.is_empty() && !trimmed.starts_with('#') && !active_codes.is_empty() {
             *coverage.entry((trimmed, Rc::clone(&ignored))).or_default() += 1;
         }
     }
     coverage
+}
+
+/// The warning names of a `@warning_ignore_start(...)` or
+/// `@warning_ignore_restore(...)` marker, read by [`warning_codes`].
+struct WarningCodes<'s> {
+    codes: Vec<&'s str>,
+    /// How many lines after the marker's first one its arguments take.
+    extra_lines: usize,
+}
+
+/// Read the quoted warning names at the start of `arguments` (the text
+/// after a marker's `(`) up to the closing `)`, across lines and past `#`
+/// comments. `None` when something other than names, commas and comments
+/// comes before the `)`, so a malformed marker is read only as far as the
+/// first thing that isn't an argument, never to the end of the file.
+fn warning_codes(arguments: &str) -> Option<WarningCodes<'_>> {
+    let mut codes = Vec::new();
+    let mut extra_lines = 0;
+    let mut rest = arguments;
+    loop {
+        let c = rest.chars().next()?;
+        match c {
+            ')' => return Some(WarningCodes { codes, extra_lines }),
+            '\n' => {
+                extra_lines += 1;
+                rest = &rest[1..];
+            }
+            ' ' | '\t' | '\r' | ',' => rest = &rest[1..],
+            '#' => rest = &rest[rest.find('\n').unwrap_or(rest.len())..],
+            '"' | '\'' => {
+                let close = rest[1..].find([c, '\n'])? + 1;
+                if !rest[close..].starts_with(c) {
+                    return None;
+                }
+                codes.push(&rest[1..close]);
+                rest = &rest[close + 1..];
+            }
+            _ => return None,
+        }
+    }
 }
 
 /// `codes` sorted, so the same set compares equal in any order.
@@ -1985,42 +2122,60 @@ fn collect_member_anchors(members: &[ClassMember], source_lines: &[&str]) -> Vec
 ///
 /// An annotation whose arguments span lines (`@export_range(` / `0, 10` /
 /// `)`) has lines that start with neither `#` nor `@`. The walk takes the
-/// whole annotation (see [`multi_line_annotation_start`]); stopping at its
-/// last line left it with the member above.
+/// whole annotation (see [`multi_line_annotation_start`]), including one
+/// that closes on the declaration line itself (`) signal z`); stopping at
+/// its last line left it with the member above.
+///
+/// Only unindented comments and annotations attach. An indented one, like
+/// a commented-out last statement of a function, is part of the body above
+/// and stays with it.
 fn compute_attached_starts(
     merged: &[Anchor],
     lines: &[&str],
     string_line_mask: &StringLines,
 ) -> Vec<usize> {
+    let has_no_string_lines =
+        |first: usize, last: usize| (first..=last).all(|line| !string_line_mask.is_interior(line));
+    // A comment or annotation line at script level. String data never
+    // counts, even when it looks like one.
+    let is_attachable = |index: usize| {
+        index < lines.len()
+            && !string_line_mask.is_interior(index)
+            && lines[index].starts_with(['#', '@'])
+    };
     let mut attached_starts: Vec<usize> = Vec::new();
     for (i, &(decl_line, _, _)) in merged.iter().enumerate() {
         let prev_boundary = if i > 0 { merged[i - 1].0 + 1 } else { 0 };
         let mut start = decl_line;
-        let mut j = decl_line;
+        if decl_line < lines.len() {
+            if let Some(annotation_start) = multi_line_annotation_start(
+                lines,
+                decl_line,
+                prev_boundary,
+                AfterAnnotation::Declaration,
+            )
+            .filter(|&first| has_no_string_lines(first, decl_line))
+            {
+                start = annotation_start;
+            }
+        }
+        let mut j = start;
         while j > prev_boundary {
             j -= 1;
             if string_line_mask.is_interior(j) {
                 break;
             }
-            let content = if j < lines.len() { lines[j].trim() } else { "" };
-            if content.starts_with('#') || content.starts_with('@') {
+            let content = if j < lines.len() { lines[j] } else { "" };
+            if is_attachable(j) {
                 start = j;
-            } else if content.is_empty() {
+            } else if content.trim().is_empty() {
                 // Blank line: keep looking only if a comment sits directly above.
-                let above = if j > prev_boundary
-                    && j - 1 < lines.len()
-                    && !string_line_mask.is_interior(j - 1)
-                {
-                    lines[j - 1].trim()
-                } else {
-                    ""
-                };
-                if !above.starts_with('#') && !above.starts_with('@') {
+                if !(j > prev_boundary && is_attachable(j - 1)) {
                     break;
                 }
             } else if let Some(annotation_start) =
-                multi_line_annotation_start(lines, j, prev_boundary)
-                    .filter(|&first| (first..=j).all(|line| !string_line_mask.is_interior(line)))
+                multi_line_annotation_start(lines, j, prev_boundary, AfterAnnotation::Nothing)
+                    .filter(|&first| has_no_string_lines(first, j))
             {
                 start = annotation_start;
                 j = annotation_start;

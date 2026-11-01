@@ -8284,4 +8284,276 @@ func g():
 ";
     assert_eq!(flagged_lines(source, "quality/no-else-return"), vec![7]);
     assert_eq!(flagged_lines(source, "quality/unreachable-code"), vec![13]);
+
+// --- annotations closing on their declaration line, trailing body comments --
+
+/// Format `source` with the default config and check a second run changes
+/// nothing.
+fn format_twice(source: &str) -> String {
+    let config = default_config();
+    let formatted = formatter::format_source(source, &config);
+    assert_eq!(
+        formatter::format_source(&formatted, &config),
+        formatted,
+        "not idempotent"
+    );
+    formatted
+}
+
+#[test]
+fn fmt_moves_an_annotation_that_closes_on_its_declaration_line() {
+    // The walk-back only took annotations that close above the declaration,
+    // so `) var x := 1` was sorted away from `@export_range(` / `0, 10`,
+    // which stayed after `f`. Godot rejects both halves.
+    let source = "\
+extends Node
+
+
+func f():
+\tpass
+
+
+@export_range(
+\t0, 10
+) var x := 1
+const K := 1
+";
+    assert_eq!(
+        format_twice(source),
+        "\
+extends Node
+
+const K := 1
+
+@export_range(
+\t0, 10
+) var x := 1
+
+
+func f():
+\tpass
+"
+    );
+}
+
+#[test]
+fn fmt_moves_a_warning_ignore_that_closes_on_its_signal_line() {
+    let source = "\
+extends Node
+
+
+func f():
+\tpass
+
+
+@warning_ignore(
+\t\"unused_signal\"
+) signal z
+";
+    assert_eq!(
+        format_twice(source),
+        "\
+extends Node
+
+@warning_ignore(
+\t\"unused_signal\"
+) signal z
+
+
+func f():
+\tpass
+"
+    );
+}
+
+#[test]
+fn fmt_adds_no_blank_line_inside_annotation_arguments() {
+    // Already in order, so only member spacing runs. It used to read the
+    // `)` line as the declaration and put the member gap above it.
+    let source = "\
+extends Node
+
+var a := 1
+@warning_ignore(
+\t\"unused_signal\"
+) signal z
+";
+    let formatted = format_twice(source);
+    assert!(
+        formatted.contains("@warning_ignore(\n\t\"unused_signal\"\n) signal z\n"),
+        "{formatted}"
+    );
+}
+
+#[test]
+fn fmt_keeps_a_one_line_annotation_above_a_declaration_apart_from_it() {
+    // Negative case: `@export var a` closes on its own line, so the
+    // declaration below it is a member of its own and is sorted on its own.
+    let source = "\
+extends Node
+
+@export var a := 1
+const K := 1
+";
+    assert_eq!(
+        format_twice(source),
+        "extends Node\n\nconst K := 1\n\n@export var a := 1\n"
+    );
+}
+
+#[test]
+fn fmt_leaves_a_function_s_trailing_comment_in_its_body() {
+    // The indented comment is the body's last line. It used to attach to
+    // `var x` and move with it to script level.
+    let source = "\
+extends Node
+
+
+func f() -> void:
+\tvar y := 1
+\tprint(y)
+\t#print(\"debug\")
+
+var x := 1
+";
+    assert_eq!(
+        format_twice(source),
+        "\
+extends Node
+
+var x := 1
+
+
+func f() -> void:
+\tvar y := 1
+\tprint(y)
+\t#print(\"debug\")
+"
+    );
+}
+
+#[test]
+fn fmt_still_moves_a_script_level_comment_with_the_member_below_it() {
+    let source = "\
+extends Node
+
+
+func f() -> void:
+\tpass
+
+# The speed.
+var x := 1
+";
+    assert_eq!(
+        format_twice(source),
+        "\
+extends Node
+
+# The speed.
+var x := 1
+
+
+func f() -> void:
+\tpass
+"
+    );
+}
+
+#[test]
+fn fmt_does_not_reorder_out_of_a_multi_line_warning_ignore_region() {
+    // The codes were read from the marker's first line only, which has
+    // none, so the region looked empty and `_b` was sorted out of it.
+    let source = "\
+extends Node
+
+var a := 1
+@warning_ignore_start(
+\t\"unused_signal\",
+\t\"unused_private_class_variable\"
+)
+signal s
+var _b := 1
+@warning_ignore_restore(\"unused_signal\", \"unused_private_class_variable\")
+const C := 1
+";
+    let formatted = format_twice(source);
+    assert_eq!(
+        declarations_and_region_markers(&formatted),
+        [
+            "extends Node",
+            "var a := 1",
+            "@warning_ignore_start(",
+            ")",
+            "signal s",
+            "var _b := 1",
+            "@warning_ignore_restore(\"unused_signal\", \"unused_private_class_variable\")",
+            "const C := 1",
+        ],
+        "{formatted}"
+    );
+}
+
+#[test]
+fn fmt_reads_a_multi_line_warning_ignore_restore() {
+    // The restore closes the region over lines too. Read from its first
+    // line only, the region looked open to the end of the file, so `C` could
+    // be sorted above the restore, into the region.
+    let source = "\
+extends Node
+
+@warning_ignore_start(\"unused_signal\")
+signal s
+@warning_ignore_restore(
+\t\"unused_signal\"
+)
+var x := 1
+const C := 1
+";
+    let formatted = format_twice(source);
+    assert_eq!(
+        declarations_and_region_markers(&formatted),
+        [
+            "extends Node",
+            "@warning_ignore_start(\"unused_signal\")",
+            "signal s",
+            "@warning_ignore_restore(",
+            ")",
+            "const C := 1",
+            "var x := 1",
+        ],
+        "{formatted}"
+    );
+}
+
+#[test]
+fn fmt_still_reorders_around_a_multi_line_warning_ignore_region() {
+    // The region keeps covering the same signals, so `a` may move below it,
+    // and the start marker stays tight against the code it covers.
+    let source = "\
+extends Node
+
+var a := 1
+@warning_ignore_start(
+\t\"unused_signal\"
+)
+
+signal s
+signal t
+@warning_ignore_restore(\"unused_signal\")
+";
+    assert_eq!(
+        format_twice(source),
+        "\
+extends Node
+
+@warning_ignore_start(
+\t\"unused_signal\"
+)
+signal s
+signal t
+@warning_ignore_restore(\"unused_signal\")
+
+var a := 1
+"
+    );
 }
