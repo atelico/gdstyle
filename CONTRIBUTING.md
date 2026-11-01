@@ -53,14 +53,19 @@ We can discuss in the issue before any code lands.
 
 A PR that touches `src/` also runs the Performance workflow. It builds your
 branch and its base, runs both on the
-[Godot demo projects](https://github.com/godotengine/godot-demo-projects),
-and fails when your branch executes more than 3% more instructions. The job
+[Godot demo projects](https://github.com/godotengine/godot-demo-projects)
+and on large generated files (`scripts/gen-stress-corpus.py`), and fails
+when your branch executes more than 3% more instructions on either. The
+demo files are small, so the generated ones are what catch a pass whose cost
+grows with the square of the file length. The job
 summary shows the counts and wall-clock times. If the extra cost is
 intended (a new rule, say), a maintainer adds the `perf-regression-ok`
 label. On Linux with valgrind you can run the same comparison locally:
 
 ```bash
 scripts/perf-compare.sh path/to/base/gdstyle target/release/gdstyle path/to/corpus
+scripts/gen-stress-corpus.py /tmp/stress
+scripts/perf-compare.sh path/to/base/gdstyle target/release/gdstyle /tmp/stress
 ```
 
 ## Project layout

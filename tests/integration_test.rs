@@ -3940,6 +3940,41 @@ func f(a: bool, b: bool) -> int:
 }
 
 #[test]
+fn quality_no_else_return_reads_else_with_a_space_before_the_colon() {
+    let source = "\
+func f(a: bool) -> int:
+\tif a:
+\t\treturn 1
+\telse :
+\t\treturn 0
+";
+    assert_eq!(flagged_lines(source, "quality/no-else-return"), vec![4]);
+}
+
+#[test]
+fn quality_no_else_return_tracks_nested_and_sibling_chains() {
+    // The inner chain returns in every branch; the outer `if` falls through
+    // after its nested chain, so the outer `else` is needed. A sibling `if`
+    // after the first chain starts a chain of its own.
+    let source = "\
+func f(a: bool, b: bool) -> int:
+\tif a:
+\t\tif b:
+\t\t\treturn 1
+\t\telif not b:
+\t\t\treturn 2
+\t\tprint(a)
+\telse:
+\t\treturn 3
+\tif b:
+\t\treturn 4
+\telse:
+\t\treturn 5
+";
+    assert_eq!(flagged_lines(source, "quality/no-else-return"), vec![5, 12]);
+}
+
+#[test]
 fn fmt_keeps_a_warning_ignore_restore_below_its_region() {
     // The restore closes the region above it. Taken as the head of `const C`,
     // it moved with the constant to above the region's start.

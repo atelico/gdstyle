@@ -1,9 +1,12 @@
+use std::collections::HashMap;
+use std::rc::Rc;
+
 use crate::ast::{is_export_annotation, ClassMember};
 use crate::config::{CommentWrap, Config};
 use crate::fixer;
 use crate::lexer::Lexer;
 use crate::linter::{self, Suppressions};
-use crate::parser::Parser;
+use crate::source_cache::{members_of, tokens_of};
 use crate::token::{StringLines, Token, TokenKind};
 
 mod comments;
@@ -36,13 +39,15 @@ pub fn format_source(source: &str, config: &Config) -> String {
     let mut result = crate::linter::normalize_line_endings(source);
 
     // Multi-pass: apply formatting until stable (idempotent).
-    for _ in 0..5 {
-        let formatted = format_pass(&result, config);
-        if formatted == result {
-            break;
+    crate::source_cache::with_source_cache(|| {
+        for _ in 0..5 {
+            let formatted = format_pass(&result, config);
+            if formatted == result {
+                break;
+            }
+            result = formatted;
         }
-        result = formatted;
-    }
+    });
 
     crate::linter::restore_line_endings(source, &result)
 }
@@ -174,7 +179,7 @@ fn suppressions_in(source: &str) -> Suppressions {
     if !source.contains("gdstyle:ignore") {
         return Suppressions::default();
     }
-    Suppressions::parse(source, &Lexer::new(source).tokenize())
+    Suppressions::parse(source, &tokens_of(source))
 }
 
 /// Whether a source has a string literal that runs over more than one line:
@@ -194,7 +199,7 @@ impl SpanningStrings {
     fn find(source: &str) -> Self {
         let is_spanning =
             |token: &Token| matches!(token.kind, TokenKind::String(_)) && token.text.contains('\n');
-        if Lexer::new(source).tokenize().iter().any(is_spanning) {
+        if tokens_of(source).iter().any(is_spanning) {
             Self::Present
         } else {
             Self::Absent
@@ -210,7 +215,7 @@ fn string_lines(source: &str, spanning_strings: SpanningStrings) -> StringLines 
     let line_count = source.split('\n').count();
     match spanning_strings {
         SpanningStrings::Absent => StringLines::new(&[], line_count),
-        SpanningStrings::Present => StringLines::new(&Lexer::new(source).tokenize(), line_count),
+        SpanningStrings::Present => StringLines::new(&tokens_of(source), line_count),
     }
 }
 
@@ -526,11 +531,9 @@ fn doc_comment_lines(members: &[ClassMember]) -> std::collections::HashSet<usize
 /// constants and variables that would otherwise sit tight get one blank line
 /// wherever a public declaration meets a private (`_`-prefixed) one.
 fn normalize_member_spacing(source: &str, config: &Config) -> String {
-    let tightened = tighten_warning_ignore_region_markers(source, &Lexer::new(source).tokenize());
+    let tightened = tighten_warning_ignore_region_markers(source, &tokens_of(source));
     let source = tightened.as_str();
-    let mut lexer = Lexer::new(source);
-    let tokens = lexer.tokenize();
-    let members = Parser::new(&tokens).parse();
+    let members = parse_members(source);
     if members.is_empty() {
         return source.to_string();
     }
@@ -578,7 +581,7 @@ fn normalize_member_spacing(source: &str, config: &Config) -> String {
         };
 
     let doc_lines = doc_comment_lines(&members);
-    for member in &members {
+    for member in members.iter() {
         match member {
             ClassMember::DocComment { span, .. } if doc_lines.contains(&span.line) => {
                 if let Some(prev_last) = pending_doc_last {
@@ -848,7 +851,7 @@ fn collapse_blank_lines(
 /// the `format/comment-spacing` fix in `lint_then_fix`, which leaves `##`
 /// alone.
 fn normalize_doc_comment_spacing(source: &str, is_suppressed: &dyn Fn(usize) -> bool) -> String {
-    let tokens = Lexer::new(source).tokenize();
+    let tokens = tokens_of(source);
     // Skip empty doc lines, ones already spaced, and `###...` separator lines.
     let insertion_offsets: Vec<usize> = tokens
         .iter()
@@ -1630,7 +1633,7 @@ fn changes_region_coverage(original: &str, reordered: &str) -> bool {
                 &["@warning_ignore_start", "@warning_ignore_restore"],
             ));
     let changes_fold_regions = original.contains("#region")
-        && (fold_region_coverage(original) != fold_region_coverage(reordered)
+        && (fold_region_coverage_differs(original, reordered)
             || region_markers(original, &["#region", "#endregion"])
                 != region_markers(reordered, &["#region", "#endregion"]));
     changes_warning_ignore_regions || changes_fold_regions
@@ -1649,36 +1652,77 @@ fn region_markers<'s>(source: &'s str, prefixes: &[&str]) -> Vec<&'s str> {
         .collect()
 }
 
-/// Every code line paired with the `#region` names enclosing it, outermost
-/// first, sorted so two sources can be compared regardless of line order.
-/// Godot pairs `#endregion` with the nearest open `#region`, so regions nest.
-fn fold_region_coverage(source: &str) -> Vec<(&str, Vec<&str>)> {
-    let mut open_regions: Vec<&str> = Vec::new();
-    let mut coverage: Vec<(&str, Vec<&str>)> = Vec::new();
+/// Whether some code line of `original` sits in other `#region` folds in
+/// `reordered` (see [`fold_region_coverage`]).
+fn fold_region_coverage_differs(original: &str, reordered: &str) -> bool {
+    let mut region_stacks = RegionStacks::default();
+    fold_region_coverage(original, &mut region_stacks)
+        != fold_region_coverage(reordered, &mut region_stacks)
+}
+
+/// How many times each code line appears under each stack of `#region`
+/// names. Two sources compare equal when every line is still in the same
+/// regions, whatever the line order. Godot pairs `#endregion` with the
+/// nearest open `#region`, so regions nest.
+///
+/// A stack is a node of `region_stacks`, shared by the sources being
+/// compared, so equal stacks get the same id and a line costs one hash of
+/// `(line, id)` however deep its regions are.
+fn fold_region_coverage<'s>(
+    source: &'s str,
+    region_stacks: &mut RegionStacks<'s>,
+) -> HashMap<(&'s str, usize), usize> {
+    let mut open_regions: Vec<usize> = Vec::new();
+    let mut coverage = HashMap::new();
     for line in source.split('\n') {
         let trimmed = line.trim();
         if let Some(name) = trimmed.strip_prefix("#region") {
-            open_regions.push(name.trim());
+            let parent = open_regions.last().copied().unwrap_or(RegionStacks::NONE);
+            open_regions.push(region_stacks.child(parent, name.trim()));
         } else if trimmed.starts_with("#endregion") {
             open_regions.pop();
-        } else if !trimmed.is_empty() && !trimmed.starts_with('#') && !open_regions.is_empty() {
-            coverage.push((trimmed, open_regions.clone()));
+        } else if !trimmed.is_empty() && !trimmed.starts_with('#') {
+            if let Some(&enclosing) = open_regions.last() {
+                *coverage.entry((trimmed, enclosing)).or_default() += 1;
+            }
         }
     }
-    coverage.sort_unstable();
     coverage
 }
 
-/// Every code line that sits inside a `@warning_ignore_start` region, paired
-/// with the warning codes ignored at that point, sorted so two sources can be
-/// compared regardless of line order. Reordering only moves lines, so equal
-/// coverage means every line is still ignored for exactly the same warnings.
+/// Interned `#region` stacks for [`fold_region_coverage`]: each id stands for
+/// one sequence of region names, outermost first.
+#[derive(Default)]
+struct RegionStacks<'s> {
+    ids: HashMap<(usize, &'s str), usize>,
+}
+
+impl<'s> RegionStacks<'s> {
+    /// The id of the empty stack.
+    const NONE: usize = 0;
+
+    /// The id of the stack `parent` with the region `name` opened inside it.
+    fn child(&mut self, parent: usize, name: &'s str) -> usize {
+        let next_id = self.ids.len() + 1;
+        *self.ids.entry((parent, name)).or_insert(next_id)
+    }
+}
+
+/// For [`warning_ignore_region_coverage`]: each trimmed code line and the
+/// warning codes ignored on it, with the number of lines that share both.
+type RegionCoverage<'s> = HashMap<(&'s str, Rc<[&'s str]>), usize>;
+
+/// How many times each code line inside a `@warning_ignore_start` region
+/// appears with each set of ignored warning codes (sorted). Reordering only
+/// moves lines, so equal coverage means every line is still ignored for
+/// exactly the same warnings.
 ///
 /// Regions are textual in Godot: one runs from its `@warning_ignore_start`
 /// line to the matching `@warning_ignore_restore`, or to the end of the file.
-fn warning_ignore_region_coverage(source: &str) -> Vec<(&str, Vec<&str>)> {
+fn warning_ignore_region_coverage(source: &str) -> RegionCoverage<'_> {
     let mut active_codes: Vec<&str> = Vec::new();
-    let mut coverage: Vec<(&str, Vec<&str>)> = Vec::new();
+    let mut ignored: Rc<[&str]> = Rc::from([]);
+    let mut coverage = RegionCoverage::default();
     for line in source.split('\n') {
         let trimmed = line.trim();
         if let Some(arguments) = trimmed.strip_prefix("@warning_ignore_start(") {
@@ -1687,17 +1731,23 @@ fn warning_ignore_region_coverage(source: &str) -> Vec<(&str, Vec<&str>)> {
                     active_codes.push(code);
                 }
             }
+            ignored = sorted_codes(&active_codes);
         } else if let Some(arguments) = trimmed.strip_prefix("@warning_ignore_restore(") {
             let restored = quoted_strings(arguments);
             active_codes.retain(|code| !restored.contains(code));
+            ignored = sorted_codes(&active_codes);
         } else if !trimmed.is_empty() && !trimmed.starts_with('#') && !active_codes.is_empty() {
-            let mut codes = active_codes.clone();
-            codes.sort_unstable();
-            coverage.push((trimmed, codes));
+            *coverage.entry((trimmed, Rc::clone(&ignored))).or_default() += 1;
         }
     }
-    coverage.sort_unstable();
     coverage
+}
+
+/// `codes` sorted, so the same set compares equal in any order.
+fn sorted_codes<'s>(codes: &[&'s str]) -> Rc<[&'s str]> {
+    let mut sorted = codes.to_vec();
+    sorted.sort_unstable();
+    Rc::from(sorted)
 }
 
 /// The contents of each `"..."` or `'...'` literal in `text`, in order.
@@ -1718,10 +1768,9 @@ fn quoted_strings(text: &str) -> Vec<&str> {
     contents
 }
 
-fn parse_members(source: &str) -> Vec<ClassMember> {
-    let mut lexer = Lexer::new(source);
-    let tokens = lexer.tokenize();
-    Parser::new(&tokens).parse()
+/// The class members of `source`, through the formatter's source cache.
+fn parse_members(source: &str) -> Rc<Vec<ClassMember>> {
+    members_of(source, &tokens_of(source))
 }
 
 /// True if any module-level `var`/`const`/`static var` initializer references
@@ -1755,12 +1804,16 @@ fn has_cross_referencing_initializer(source: &str, members: &[ClassMember]) -> b
         return false;
     }
 
-    let lines: Vec<&str> = source.split('\n').collect();
+    // Byte offset where each line starts, computed once: summing the line
+    // lengths for every member made this quadratic in the file length.
+    let line_starts: Vec<usize> = std::iter::once(0)
+        .chain(source.match_indices('\n').map(|(newline, _)| newline + 1))
+        .collect();
     let line_start = |line_1based: usize| -> usize {
-        lines[..line_1based.saturating_sub(1)]
-            .iter()
-            .map(|l| l.len() + 1)
-            .sum()
+        line_starts
+            .get(line_1based.saturating_sub(1))
+            .copied()
+            .unwrap_or(source.len())
     };
 
     for (idx, member) in members.iter().enumerate() {
@@ -1988,9 +2041,8 @@ fn compute_attached_starts(
 /// to the first member: function bodies, multi-line expressions, inner
 /// class bodies are all captured correctly.
 fn reorder_class_members(source: &str) -> String {
-    let mut lexer = Lexer::new(source);
-    let tokens = lexer.tokenize();
-    let members = Parser::new(&tokens).parse();
+    let tokens = tokens_of(source);
+    let members = members_of(source, &tokens);
 
     let lines: Vec<&str> = source.split('\n').collect();
     let merged = collect_member_anchors(&members, &lines);
