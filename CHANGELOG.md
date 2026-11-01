@@ -4,6 +4,22 @@ A short summary of every gdstyle release, newest first. The full notes for
 each version are on its
 [GitHub release](https://github.com/atelico/gdstyle/releases).
 
+## 0.6.0 (2026-10-31)
+
+- Changed: `fmt` is about 2x faster than 0.5.0 on small files and up to 4x on
+  large ones; `check` up to 2x on large files (#94).
+- Added: `comment_wrap = "line" | "paragraph" | "off"` (#85, #91).
+- Fixed: `process-get-node` ignores format strings and comments (#86, #82).
+- Fixed: `no-else-return` only fires when the branch always returns (#87, #84,
+  #93).
+- Fixed: `@export_group("")` no longer marks the next variable as exported
+  (#88, #90).
+- Fixed: `match` / `when` as names, comments in parameter lists, return
+  detection, multi-line annotations and indented comments in reorders (#81,
+  #83, #92, #93, #95).
+- Library: `Config` gains `comment_wrap`, and four `quality` check functions
+  take a `&StringLines` (#91, #92).
+
 ## 0.5.0 (2026-10-26)
 
 - Fixed: `fmt` honors rules set to `"off"` and `# gdstyle:ignore` comments,

@@ -679,7 +679,7 @@ Add the following to your project's `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/atelico/gdstyle
-    rev: v0.5.0   # pin to a released tag; bump with `pre-commit autoupdate`
+    rev: v0.6.0   # pin to a released tag; bump with `pre-commit autoupdate`
     hooks:
       - id: gdstyle          # lint (fails the commit on diagnostics)
       - id: gdstyle-fmt      # format in place
