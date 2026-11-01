@@ -216,6 +216,16 @@ fn is_identifier_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || (!c.is_ascii() && !c.is_whitespace())
 }
 
+/// True when the `length` bytes of `code` at `index` are a keyword used as
+/// one: a whole word, and not a member or node name (no `.`, `$` or `%`
+/// right before it), so `return` in `x.return` or `return_value` is not.
+fn is_keyword_at(code: &str, index: usize, length: usize) -> bool {
+    let is_word_start =
+        !code[..index].ends_with(|c: char| is_identifier_char(c) || matches!(c, '.' | '$' | '%'));
+    let is_word_end = !code[index + length..].starts_with(is_identifier_char);
+    is_word_start && is_word_end
+}
+
 /// The code of line `index` that is not inside a string spanning lines: the
 /// whole line normally, the part after the literal's end on its closing
 /// line, and nothing on the lines in between.
@@ -1440,6 +1450,11 @@ fn inline_branch_body(header: &str) -> Option<&str> {
 /// True when one of the `;`-separated statements on trimmed line `text` is
 /// a `return`: `return 1`, and also `print(1); return 2`. A line that
 /// carries one always exits there, so `return 1; print(2)` counts too.
+///
+/// A `;` after a colon outside brackets doesn't count: the statements after
+/// it may belong to a one-line block (`if y: print(1); return 1`, a lambda
+/// `func(a): print(a); return a`) that can be skipped. That also passes over
+/// a type hint (`var x: int = 1; return x`), which only misses a report.
 fn has_return_statement(text: &str) -> bool {
     if is_return_statement(text) {
         return true;
@@ -1451,11 +1466,15 @@ fn has_return_statement(text: &str) -> bool {
     // offset in `text`.
     let code = blank_strings_and_comments(text);
     let mut depth = 0i32;
+    let mut is_after_block_colon = false;
     code.bytes().enumerate().any(|(index, byte)| {
         match byte {
             b'(' | b'[' | b'{' => depth += 1,
             b')' | b']' | b'}' => depth -= 1,
-            b';' if depth == 0 => return is_return_statement(text[index + 1..].trim_start()),
+            b':' if depth == 0 => is_after_block_colon = true,
+            b';' if depth == 0 && !is_after_block_colon => {
+                return is_return_statement(text[index + 1..].trim_start())
+            }
             _ => {}
         }
         false
@@ -1466,20 +1485,21 @@ fn has_return_statement(text: &str) -> bool {
 /// one, and also the ones after a `;` (`print(1); return 2`) or after the
 /// colon of a one-line header (`1: return "a"`, `if x: return 1`).
 /// `return` is a reserved word, so outside strings and comments every
-/// `return` that is a whole word is a statement.
+/// `return` that is a whole word is a statement. One after a `func` on the
+/// same line is a lambda's (`sort_custom(func(a, b): return a < b)`) and
+/// returns from the lambda, so it doesn't count.
 fn count_returns(line: &str) -> usize {
     if !line.contains("return") {
         return 0;
     }
     let code = blank_strings_and_comments(line);
-    code.match_indices("return")
-        .filter(|&(index, keyword)| {
-            // A `.`, `$` or `%` before it makes it a member or node name.
-            let is_word_start = !code[..index]
-                .ends_with(|c: char| is_identifier_char(c) || matches!(c, '.' | '$' | '%'));
-            let is_word_end = !code[index + keyword.len()..].starts_with(is_identifier_char);
-            is_word_start && is_word_end
-        })
+    let lambda_start = code
+        .match_indices("func")
+        .find(|&(index, keyword)| is_keyword_at(&code, index, keyword.len()))
+        .map_or(code.len(), |(index, _)| index);
+    code[..lambda_start]
+        .match_indices("return")
+        .filter(|&(index, keyword)| is_keyword_at(&code, index, keyword.len()))
         .count()
 }
 
@@ -1516,17 +1536,14 @@ pub fn check_unreachable_code(
         let code = code_outside_spanning_strings(file, string_line_mask, index);
         if is_in_terminator {
             terminator_depth += line_bracket_delta(code);
-            is_in_terminator = terminator_depth > 0 || ends_with_backslash_continuation(code);
+            previous_continues = ends_with_backslash_continuation(code);
+            is_in_terminator = terminator_depth > 0 || previous_continues;
             continue;
         }
         let continues_previous = previous_continues;
         previous_continues = ends_with_backslash_continuation(code);
         let trimmed = line.trim();
-        if is_interior
-            || continues_previous
-            || is_comment_or_blank(trimmed)
-            || trimmed.starts_with([')', ']', '}'])
-        {
+        if is_interior || continues_previous || is_comment_or_blank(trimmed) {
             continue;
         }
 
@@ -1536,6 +1553,12 @@ pub fn check_unreachable_code(
             .is_some_and(|&waiting| waiting > indent)
         {
             waiting_indents.pop();
+        }
+        // A line that starts by closing brackets opened earlier continues
+        // that statement (`)` after a lambda's `return`, `).filter(...)`):
+        // it ends deeper blocks but is not a new statement.
+        if trimmed.starts_with([')', ']', '}']) {
+            continue;
         }
         if waiting_indents.last() == Some(&indent) {
             waiting_indents.pop();

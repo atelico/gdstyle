@@ -461,3 +461,18 @@ fn prose_mentioning_a_pipe_still_wraps() {
     let source = "# split the words on | and then join them all again\n";
     assert_ne!(format(source, CommentWrap::Line), source);
 }
+
+#[test]
+fn prose_starting_with_static_still_wraps() {
+    // `static var` / `static func` mark commented-out code; `static` alone
+    // starts a sentence.
+    assert_eq!(
+        format(
+            "# static typing makes this function faster\n",
+            CommentWrap::Line
+        ),
+        "# static typing makes this function\n# faster\n"
+    );
+    let code = "# static func helper(a: int, b: int) -> void:\n";
+    assert_eq!(format(code, CommentWrap::Line), code);
+}

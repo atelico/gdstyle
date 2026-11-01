@@ -589,17 +589,20 @@ pub fn check_node_name_pascal_case(
                     if !is_pascal_case(name) && !name.contains('/') {
                         let fixed = to_pascal_case(name);
                         let name_span = tokens[idx + 1].span;
-                        diagnostics.push(with_rename_fix(
-                            Diagnostic::warning(
-                                "naming/node-name-pascal-case",
-                                format!(
-                                    "node reference '{}' should use PascalCase (e.g., '{}'); also rename the node in the scene tree",
-                                    name, fixed
-                                ),
-                                name_span,
-                                &file.path,
-                            )
-,name, name_span, fixed));
+                        let message = format!(
+                            "node reference '{}' should use PascalCase (e.g., '{}'); \
+                             also rename the node in the scene tree",
+                            name, fixed
+                        );
+                        // Unsafe like every rename: the node itself must be
+                        // renamed in the scene tree too.
+                        let diagnostic = Diagnostic::warning(
+                            "naming/node-name-pascal-case",
+                            message,
+                            name_span,
+                            &file.path,
+                        );
+                        diagnostics.push(with_rename_fix(diagnostic, name, name_span, fixed));
                     }
                 }
             }

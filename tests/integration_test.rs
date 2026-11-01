@@ -8808,3 +8808,74 @@ var a := 1
 "
     );
 }
+
+#[test]
+fn quality_no_else_return_skips_a_semicolon_return_inside_a_one_line_block() {
+    // The `return` after the `;` belongs to the one-line `if` / `for` /
+    // lambda, which can be skipped, so the outer `else` is needed.
+    let source = "\
+func f(x, y, arr):
+\tif x:
+\t\tif y: print(1); return 1
+\telse:
+\t\tprint(2)
+\tif y:
+\t\tfor i in arr: print(i); return i
+\telse:
+\t\tprint(3)
+\tif arr:
+\t\tprint(4); return 4
+\telse:
+\t\tprint(5)
+";
+    assert_eq!(flagged_lines(source, "quality/no-else-return"), vec![12]);
+}
+
+#[test]
+fn quality_unreachable_code_after_a_return_continued_with_a_backslash() {
+    let source = "\
+func f(a, b):
+\treturn a + \\
+\t\tb
+\tprint(1)
+";
+    assert_eq!(flagged_lines(source, "quality/unreachable-code"), vec![4]);
+}
+
+#[test]
+fn quality_unreachable_code_ignores_chained_lambdas() {
+    let source = "\
+func f(arr):
+\tvar out = arr.map(func(x):
+\t\treturn x * 2
+\t).filter(func(y):
+\t\treturn y > 1
+\t)
+\treturn out
+";
+    assert!(flagged_lines(source, "quality/unreachable-code").is_empty());
+}
+
+#[test]
+fn quality_max_returns_leaves_out_one_line_lambda_returns() {
+    let config = Config {
+        max_returns: 1,
+        ..Config::default()
+    };
+    let source = "\
+func f(arr):
+\tarr.sort_custom(func(a, b): return a < b)
+\tvar x = func(): return 1
+\tif arr: return 1
+\treturn 2
+";
+    let messages: Vec<String> = linter::lint_source(source, "test.gd", &config)
+        .into_iter()
+        .filter(|d| d.rule == "quality/max-returns")
+        .map(|d| d.message)
+        .collect();
+    assert_eq!(
+        messages,
+        vec!["function 'f' has 2 return statements (max 1)".to_string()]
+    );
+}

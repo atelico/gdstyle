@@ -163,10 +163,14 @@ fn must_keep_whole(text: &str) -> bool {
     if text.starts_with('|') {
         return true;
     }
+    // `static` alone opens prose too (`static typing makes ...`), so it
+    // counts only as `static var` / `static func`.
+    let declaration = text.strip_prefix("static ").unwrap_or(text);
     if text.starts_with('@')
         || DECLARATION_KEYWORDS
             .iter()
-            .any(|keyword| text.starts_with(keyword))
+            .filter(|&&keyword| keyword != "static ")
+            .any(|keyword| declaration.starts_with(keyword))
     {
         return true;
     }
