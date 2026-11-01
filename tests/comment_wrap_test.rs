@@ -366,3 +366,113 @@ fn line_mode_still_wraps_prose_that_only_looks_a_little_like_code() {
         );
     }
 }
+
+#[test]
+fn wrapping_never_starts_a_doc_comment_line_with_an_at_word() {
+    // `## @experimental` on a line of its own is a Godot doc tag: it would
+    // mark the member experimental. The word before it moves down instead.
+    let source = "## aaa bbb ccc ddd eee fff ggg hhh iii @experimental\nvar x := 1\n";
+    for mode in [CommentWrap::Line, CommentWrap::Paragraph] {
+        assert_eq!(
+            format(source, mode),
+            "## aaa bbb ccc ddd eee fff ggg hhh\n## iii @experimental\nvar x := 1\n",
+            "{mode:?}"
+        );
+    }
+}
+
+#[test]
+fn wrapping_carries_a_run_of_at_words_with_the_word_before_them() {
+    let source = "## aaa bbb ccc ddd eee fff ggg hhh @a @b @c\nvar x := 1\n";
+    let formatted = format(source, CommentWrap::Line);
+    assert_eq!(
+        formatted,
+        "## aaa bbb ccc ddd eee fff ggg\n## hhh @a @b @c\nvar x := 1\n"
+    );
+    assert!(
+        formatted.lines().all(|line| !line.starts_with("## @")),
+        "{formatted}"
+    );
+}
+
+#[test]
+fn wrapping_may_start_a_plain_comment_line_with_an_at_word() {
+    // Only `##` comments have doc tags; a `#` comment wraps as usual.
+    let source = "# aaa bbb ccc ddd eee fff ggg hhh iii @experimental\n";
+    assert_eq!(
+        format(source, CommentWrap::Line),
+        "# aaa bbb ccc ddd eee fff ggg hhh iii\n# @experimental\n"
+    );
+}
+
+#[test]
+fn word_operators_do_not_make_commented_out_code_prose() {
+    // `and not` and `if not` are two words in a row, but they are code.
+    for source in [
+        "# if not is_valid(t) and not t.dead and not flag:\n",
+        "# return a == b and not c and not d and not e\n",
+        "# speed = run_speed if not is_crouching else crouch_speed\n",
+    ] {
+        for mode in [CommentWrap::Line, CommentWrap::Paragraph] {
+            assert_eq!(format(source, mode), source, "{mode:?}: {source:?}");
+        }
+    }
+}
+
+#[test]
+fn paragraph_does_not_merge_code_with_word_operators_into_prose() {
+    let next = "# speed = run if not crouching else crouch";
+    assert_eq!(
+        paragraph_lines(LONG, next),
+        vec!["# aaa bbb ccc ddd eee fff ggg hhh iii", "# jjj kkk", next]
+    );
+}
+
+#[test]
+fn prose_with_word_operators_still_wraps() {
+    // Two plain words in a row besides the operators: still prose.
+    let source = "# this is not in the list and it goes on and on\n";
+    let formatted = format(source, CommentWrap::Line);
+    assert_ne!(formatted, source);
+    assert!(
+        formatted.lines().all(|line| line.len() <= 40),
+        "{formatted}"
+    );
+}
+
+#[test]
+fn pipe_table_rows_are_neither_wrapped_nor_merged() {
+    // Wrapping a row used to leave a lone `# |` on the next line.
+    let row = "# | col a | col b | col c | col d | col e |";
+    let source = format!("{row}\n");
+    for mode in [CommentWrap::Line, CommentWrap::Paragraph] {
+        assert_eq!(format(&source, mode), source, "{mode:?}");
+    }
+    let next = "# | a | b |";
+    assert_eq!(
+        paragraph_lines(LONG, next),
+        vec!["# aaa bbb ccc ddd eee fff ggg hhh iii", "# jjj kkk", next]
+    );
+}
+
+#[test]
+fn prose_mentioning_a_pipe_still_wraps() {
+    // Only a row that starts with `|` is a table; a `|` later on is prose.
+    let source = "# split the words on | and then join them all again\n";
+    assert_ne!(format(source, CommentWrap::Line), source);
+}
+
+#[test]
+fn prose_starting_with_static_still_wraps() {
+    // `static var` / `static func` mark commented-out code; `static` alone
+    // starts a sentence.
+    assert_eq!(
+        format(
+            "# static typing makes this function faster\n",
+            CommentWrap::Line
+        ),
+        "# static typing makes this function\n# faster\n"
+    );
+    let code = "# static func helper(a: int, b: int) -> void:\n";
+    assert_eq!(format(code, CommentWrap::Line), code);
+}

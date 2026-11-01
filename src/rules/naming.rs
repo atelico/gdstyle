@@ -11,7 +11,9 @@ fn is_keyword_name(name: &str) -> bool {
 }
 
 /// The diagnostic `diagnostic` with a rename fix to `new_text` over `span`,
-/// unless `name` is a keyword name (see [`is_keyword_name`]).
+/// unless `name` is a keyword name (see [`is_keyword_name`]). Every rename
+/// fix in this file goes through here, so no rule renames a `match` or
+/// `when` declaration and leaves its references behind.
 fn with_rename_fix(
     diagnostic: Diagnostic,
     name: &str,
@@ -73,18 +75,19 @@ pub fn check_function_name_snake_case(file: &ScriptFile, diagnostics: &mut Vec<D
             return;
         }
         let fixed = to_snake_case(name);
-        diagnostics.push(Diagnostic::warning_with_fix(
-            "naming/function-name-snake-case",
-            format!(
-                "function name '{}' should use snake_case (e.g., '{}')",
-                name, fixed
+        diagnostics.push(with_rename_fix(
+            Diagnostic::warning(
+                "naming/function-name-snake-case",
+                format!(
+                    "function name '{}' should use snake_case (e.g., '{}')",
+                    name, fixed
+                ),
+                *span,
+                &file.path,
             ),
-            *span,
-            &file.path,
-            name_span.offset,
-            name_span.length,
+            name,
+            *name_span,
             fixed,
-            false,
         ));
     });
 }
@@ -107,18 +110,19 @@ fn check_variables_recursive(
             ..
         } if !name.is_empty() && !is_snake_case(name) => {
             let fixed = to_snake_case(name);
-            diagnostics.push(Diagnostic::warning_with_fix(
-                "naming/variable-name-snake-case",
-                format!(
-                    "variable name '{}' should use snake_case (e.g., '{}')",
-                    name, fixed
+            diagnostics.push(with_rename_fix(
+                Diagnostic::warning(
+                    "naming/variable-name-snake-case",
+                    format!(
+                        "variable name '{}' should use snake_case (e.g., '{}')",
+                        name, fixed
+                    ),
+                    *span,
+                    file_path,
                 ),
-                *span,
-                file_path,
-                name_span.offset,
-                name_span.length,
+                name,
+                *name_span,
                 fixed,
-                false,
             ));
         }
         // Static variables accept both snake_case and SCREAMING_SNAKE_CASE
@@ -130,18 +134,19 @@ fn check_variables_recursive(
             ..
         } if !name.is_empty() && !is_snake_case(name) && !is_screaming_snake_case(name) => {
             let fixed = to_snake_case(name);
-            diagnostics.push(Diagnostic::warning_with_fix(
-                "naming/variable-name-snake-case",
-                format!(
+            diagnostics.push(with_rename_fix(
+                Diagnostic::warning(
+                    "naming/variable-name-snake-case",
+                    format!(
                     "variable name '{}' should use snake_case or SCREAMING_SNAKE_CASE (e.g., '{}')",
                     name, fixed
                 ),
-                *span,
-                file_path,
-                name_span.offset,
-                name_span.length,
+                    *span,
+                    file_path,
+                ),
+                name,
+                *name_span,
                 fixed,
-                false,
             ));
         }
         _ => {}
@@ -176,19 +181,20 @@ fn check_constants_recursive(
             return;
         }
         let fixed = to_screaming_snake_case(name);
-        diagnostics.push(Diagnostic::warning_with_fix(
-            "naming/constant-name-screaming-case",
-            format!(
-                "constant name '{}' should use SCREAMING_SNAKE_CASE (e.g., '{}') \
+        diagnostics.push(with_rename_fix(
+            Diagnostic::warning(
+                "naming/constant-name-screaming-case",
+                format!(
+                    "constant name '{}' should use SCREAMING_SNAKE_CASE (e.g., '{}') \
                  or PascalCase for preloaded resources",
-                name, fixed
+                    name, fixed
+                ),
+                *span,
+                file_path,
             ),
-            *span,
-            file_path,
-            name_span.offset,
-            name_span.length,
+            name,
+            *name_span,
             fixed,
-            false,
         ));
     });
 }
@@ -217,18 +223,19 @@ fn check_signals_recursive(
             return;
         }
         let fixed = to_snake_case(name);
-        diagnostics.push(Diagnostic::warning_with_fix(
-            "naming/signal-name-snake-case",
-            format!(
-                "signal name '{}' should use snake_case (e.g., '{}')",
-                name, fixed
+        diagnostics.push(with_rename_fix(
+            Diagnostic::warning(
+                "naming/signal-name-snake-case",
+                format!(
+                    "signal name '{}' should use snake_case (e.g., '{}')",
+                    name, fixed
+                ),
+                *span,
+                file_path,
             ),
-            *span,
-            file_path,
-            name_span.offset,
-            name_span.length,
+            name,
+            *name_span,
             fixed,
-            false,
         ));
     });
 }
@@ -339,7 +346,7 @@ pub fn check_signal_past_tense(file: &ScriptFile, diagnostics: &mut Vec<Diagnost
             let last_word = last_word_of(name);
             if let Some(past) = try_inflect_past_tense(&last_word) {
                 let suggested = replace_last_word(name, &past);
-                diagnostics.push(
+                diagnostics.push(with_rename_fix(
                     Diagnostic::warning(
                         "naming/signal-past-tense",
                         format!(
@@ -348,16 +355,11 @@ pub fn check_signal_past_tense(file: &ScriptFile, diagnostics: &mut Vec<Diagnost
                         ),
                         *span,
                         &file.path,
-                    )
-                    .with_fix(Fix {
-                        replacements: vec![Replacement {
-                            offset: name_span.offset,
-                            length: name_span.length,
-                            new_text: suggested,
-                        }],
-                        is_safe: false,
-                    }),
-                );
+                    ),
+                    name,
+                    *name_span,
+                    suggested,
+                ));
             }
         }
     }
@@ -542,9 +544,11 @@ fn is_state_adjective(word: &str) -> bool {
 /// an `@export` annotation, which makes it part of the node's public face.
 ///
 /// `@export_storage` saves a variable without showing it, which is how
-/// private state is meant to be persisted, so it is not reported.
+/// private state is meant to be persisted, so it is not reported. Inner
+/// classes are checked too: their exports show in the inspector of the
+/// resources and nodes made from them.
 pub fn check_private_underscore_prefix(file: &ScriptFile, diagnostics: &mut Vec<Diagnostic>) {
-    for member in &file.members {
+    for_each_member(&file.members, |member| {
         if let ClassMember::Variable {
             name,
             annotations,
@@ -568,7 +572,7 @@ pub fn check_private_underscore_prefix(file: &ScriptFile, diagnostics: &mut Vec<
                 ));
             }
         }
-    }
+    });
 }
 
 /// Check that $NodePath references use PascalCase.
@@ -585,25 +589,20 @@ pub fn check_node_name_pascal_case(
                     if !is_pascal_case(name) && !name.contains('/') {
                         let fixed = to_pascal_case(name);
                         let name_span = tokens[idx + 1].span;
-                        diagnostics.push(
-                            Diagnostic::warning(
-                                "naming/node-name-pascal-case",
-                                format!(
-                                    "node reference '{}' should use PascalCase (e.g., '{}'); also rename the node in the scene tree",
-                                    name, fixed
-                                ),
-                                name_span,
-                                &file.path,
-                            )
-                            .with_fix(Fix {
-                                replacements: vec![Replacement {
-                                    offset: name_span.offset,
-                                    length: name_span.length,
-                                    new_text: fixed,
-                                }],
-                                is_safe: false, // unsafe: user must also rename node in scene tree
-                            }),
+                        let message = format!(
+                            "node reference '{}' should use PascalCase (e.g., '{}'); \
+                             also rename the node in the scene tree",
+                            name, fixed
                         );
+                        // Unsafe like every rename: the node itself must be
+                        // renamed in the scene tree too.
+                        let diagnostic = Diagnostic::warning(
+                            "naming/node-name-pascal-case",
+                            message,
+                            name_span,
+                            &file.path,
+                        );
+                        diagnostics.push(with_rename_fix(diagnostic, name, name_span, fixed));
                     }
                 }
             }

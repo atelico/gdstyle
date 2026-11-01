@@ -100,12 +100,20 @@ pub enum CommentWrap {
     /// In both wrapping modes, lines that look like code or a table, hold a
     /// URL or a `gdstyle:` directive, and `[codeblock]` contents in doc
     /// comments are never wrapped, and a long list item wraps under its text.
+    /// Code is told from prose by its lack of two plain words in a row;
+    /// word operators like `and`, `not` and `if` don't count as plain words.
+    /// A wrapped line never starts with `gdstyle:`, or in a `##` comment
+    /// with an `@` word, so wrapping creates no directive or doc tag.
     #[default]
     Line,
     /// Wrap the long line and refill the rest of its paragraph: the comment
-    /// lines below it with the same indent and marker, up to an empty
-    /// comment line, a list item, a `TODO:`-style tag, or a line that looks
-    /// like code or a table. Lines above it are never touched.
+    /// lines below it with the same indent and marker, up to the first line
+    /// that starts something else: an empty comment line, a deeper indent, a
+    /// list item, a `TODO:`-style tag, a `[codeblock]` tag, an `@` word, a
+    /// table row (column gaps, or a leading `|`), or a line that reads as
+    /// code: a declaration, statement or block header with no two plain
+    /// words in a row, or a line ending in `;`. Lines above it are never
+    /// touched.
     Paragraph,
     /// Leave comments alone.
     Off,

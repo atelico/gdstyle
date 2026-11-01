@@ -38,12 +38,22 @@ max_parameters = 5
 # These are matched as glob patterns against file paths.
 exclude = [".godot", "addons"]
 
+# Patterns to force-include even when `exclude` matches them. An include always
+# wins over an exclude, so you can lint one plugin inside an otherwise-excluded
+# directory. Empty by default.
+# include = ["addons/my_plugin"]
+
 # Per-rule severity overrides.
 # Values: "off" (disable), "warn" (warning), "error" (error)
 #
-# All rules are enabled with "warn" severity by default.
+# Rules are enabled with "warn" severity by default, except the syntax rules
+# (which default to "error") and a few opt-in advisory rules.
 # Uncomment any line below to change its severity.
 [rules]
+# --- Syntax (error by default: Godot cannot load these files) ---
+# "syntax/lex-error" = "error"
+# "syntax/reserved-identifier" = "error"
+
 # --- Naming ---
 # "naming/class-name-pascal-case" = "warn"
 # "naming/function-name-snake-case" = "warn"

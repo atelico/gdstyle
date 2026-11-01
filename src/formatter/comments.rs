@@ -6,7 +6,7 @@
 //! line [`must_keep_whole`] says is code, a table, a URL or a `gdstyle:`
 //! directive is left as it is, and so are doc-comment `[codeblock]` contents.
 
-use super::{visual_line_len, TAB_WIDTH};
+use super::{visual_line_len, DECLARATION_KEYWORDS, TAB_WIDTH};
 
 /// Whether a doc comment `[codeblock]` is open after `line`, given whether one
 /// was open before it.
@@ -134,6 +134,18 @@ fn starts_own_paragraph(text: &str) -> bool {
         })
 }
 
+/// Keywords that open a block header with a condition after them
+/// (`if is_ready:`, `while queue:`).
+const BLOCK_KEYWORDS: [&str; 4] = ["if ", "elif ", "while ", "match "];
+
+/// GDScript operators and values spelled as words. They read like prose but
+/// sit between names in code (`not is_valid and done`, `a if b else c`), so
+/// they never count as plain words in [`has_prose_words`].
+const WORD_OPERATORS: [&str; 15] = [
+    "and", "or", "not", "in", "is", "as", "if", "elif", "else", "await", "return", "null", "true",
+    "false", "self",
+];
+
 /// True when a long comment line must not be wrapped: commented-out code, a
 /// table row, a URL (which can't be split), or a `gdstyle:` directive.
 ///
@@ -143,22 +155,23 @@ fn starts_own_paragraph(text: &str) -> bool {
 /// `speed += 1` and `if is_ready:` are not. [`ends_prose`] adds the looser
 /// signs that only end a paragraph.
 fn must_keep_whole(text: &str) -> bool {
-    const DECLARATIONS: [&str; 8] = [
-        "var ",
-        "const ",
-        "func ",
-        "signal ",
-        "enum ",
-        "class ",
-        "extends ",
-        "class_name ",
-    ];
-    const BLOCK_KEYWORDS: [&str; 4] = ["if ", "elif ", "while ", "match "];
     let text = text.trim();
     if text.contains("://") || text.starts_with("gdstyle:") || column_gap_count(text) >= 2 {
         return true;
     }
-    if text.starts_with('@') || DECLARATIONS.iter().any(|keyword| text.starts_with(keyword)) {
+    // A `| col a | col b |` table row.
+    if text.starts_with('|') {
+        return true;
+    }
+    // `static` alone opens prose too (`static typing makes ...`), so it
+    // counts only as `static var` / `static func`.
+    let declaration = text.strip_prefix("static ").unwrap_or(text);
+    if text.starts_with('@')
+        || DECLARATION_KEYWORDS
+            .iter()
+            .filter(|&&keyword| keyword != "static ")
+            .any(|keyword| declaration.starts_with(keyword))
+    {
         return true;
     }
     if matches!(text, "pass" | "break" | "continue" | "return" | "else:") || is_for_header(text) {
@@ -198,7 +211,6 @@ fn must_keep_whole(text: &str) -> bool {
 /// single column gap, a trailing `;`, a block header, or `return` / `await`
 /// with a one-word or bracketed expression.
 fn ends_prose(text: &str) -> bool {
-    const BLOCK_KEYWORDS: [&str; 6] = ["if ", "elif ", "else", "while ", "match ", "static func "];
     let text = text.trim();
     if must_keep_whole(text) || column_gap_count(text) > 0 || text.ends_with(';') {
         return true;
@@ -218,11 +230,14 @@ fn ends_prose(text: &str) -> bool {
 
 /// True when `text` has two plain words in a row (`means that`, `you
 /// need`), which prose nearly always has and code nearly never does.
+/// [`WORD_OPERATORS`] don't count: `not done and not c` is code.
 fn has_prose_words(text: &str) -> bool {
     // A word may end a clause or sentence: `value.`, `this,`.
     let is_word = |token: &str| {
         let word = token.trim_end_matches(['.', ',', ';', ':', '!', '?']);
-        !word.is_empty() && word.chars().all(|c| c.is_alphabetic() || c == '\'')
+        !word.is_empty()
+            && word.chars().all(|c| c.is_alphabetic() || c == '\'')
+            && !WORD_OPERATORS.contains(&word)
     };
     let tokens: Vec<&str> = text.split_whitespace().collect();
     tokens
@@ -289,15 +304,22 @@ fn column_gap_count(text: &str) -> usize {
 /// line starts with `first_prefix` (indent and `# `), the others with
 /// `continuation_prefix`. A word wider than a line gets a line of its own.
 ///
-/// A wrapped line never starts with a `gdstyle:` word: `# gdstyle:ignore`
-/// at the start of a comment is a suppression directive, so the word before
-/// it moves down too, or it stays on the line it was on.
+/// A wrapped line never starts with a word that would change what the
+/// comment means there: `gdstyle:` (`# gdstyle:ignore` at the start of a
+/// comment is a suppression directive) or, in a `##` doc comment, an `@`
+/// word (Godot reads `## @deprecated`, `## @experimental` and
+/// `## @tutorial` as doc tags). The words before it move down too, up to
+/// the nearest one that can start a line, or it stays on the line it was
+/// on.
 fn wrap_comment_words(
     words: &[&str],
     first_prefix: &str,
     continuation_prefix: &str,
     max_len: usize,
 ) -> Vec<String> {
+    let is_doc_comment = first_prefix.trim_start().starts_with("##");
+    let cannot_start_line =
+        |word: &str| word.starts_with("gdstyle:") || (is_doc_comment && word.starts_with('@'));
     // Columns, not bytes: an accented word takes one column per char.
     let line_width = |prefix: &str, line_words: &[&str]| {
         let words_width: usize = line_words.iter().map(|word| word.chars().count()).sum();
@@ -309,15 +331,30 @@ fn wrap_comment_words(
 
     for &word in words {
         let fits = line_width(prefix, &line_words) + 1 + word.chars().count() <= max_len;
-        let is_directive = word.starts_with("gdstyle:");
-        if line_words.is_empty() || fits || (is_directive && line_words.len() == 1) {
+        if line_words.is_empty() || fits {
             line_words.push(word);
             continue;
         }
-        let carried = if is_directive { line_words.pop() } else { None };
+        // The new line starts at `split`: right before `word`, or, when
+        // `word` can't start a line, at the last word on this line that can.
+        // Index 0 never counts, as moving every word would leave this line
+        // empty.
+        let split = if cannot_start_line(word) {
+            (1..line_words.len())
+                .rev()
+                .find(|&index| !cannot_start_line(line_words[index]))
+        } else {
+            Some(line_words.len())
+        };
+        let Some(split) = split else {
+            line_words.push(word);
+            continue;
+        };
+        let carried = line_words.split_off(split);
         lines_out.push(format!("{}{}", prefix, line_words.join(" ")));
         prefix = continuation_prefix;
-        line_words = carried.into_iter().chain([word]).collect();
+        line_words = carried;
+        line_words.push(word);
     }
     lines_out.push(format!("{}{}", prefix, line_words.join(" ")));
     lines_out
