@@ -350,6 +350,30 @@ fn the_generated_config_names_only_real_rules() {
 }
 
 #[test]
+fn the_example_config_matches_the_generated_one() {
+    // `gdstyle.example.toml` is the template `gdstyle init` writes, under
+    // another title. Kept by hand, it drifted from the template before.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let status = Command::new(env!("CARGO_BIN_EXE_gdstyle"))
+        .arg("init")
+        .current_dir(dir.path())
+        .status()
+        .expect("run gdstyle init");
+    assert!(status.success());
+    let template = std::fs::read_to_string(dir.path().join("gdstyle.toml")).expect("read template");
+    let example = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("gdstyle.example.toml"),
+    )
+    .expect("read gdstyle.example.toml");
+    let without_title = |text: &str| text.lines().skip(1).collect::<Vec<_>>().join("\n");
+    assert_eq!(
+        without_title(&example),
+        without_title(&template),
+        "gdstyle.example.toml differs from the `gdstyle init` template; copy the template over it"
+    );
+}
+
+#[test]
 fn issue_29_full_user_config() {
     // The reporter's own files, kept verbatim in tests/fixtures/issue29:
     // a config setting every rule to "error" and a script violating two of

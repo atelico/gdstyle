@@ -265,15 +265,22 @@ In `"paragraph"` mode a paragraph is the long line plus the comment lines right 
 
 In both wrapping modes, a long list item, nested ones included, wraps under its text. Lines that look like commented-out code or a table, lines with a URL or a `gdstyle:` directive, and the contents of a `[codeblock]` in a doc comment are never wrapped; `format/max-line-length` still reports them. A wrapped line never starts with `gdstyle:`, so wrapping can't create a suppression comment.
 
+With the default `max_line_length = 100`, this comment's first line is 102 columns:
+
+```gdscript
+# This comment is long enough that it runs past the one hundred column limit by a word or two, so that
+# the paragraph goes on with here.
+```
+
 ```gdscript
 # "line":
-# This comment is long enough that it runs past the one hundred column limit by a word or two
-# which
+# This comment is long enough that it runs past the one hundred column limit by a word or two, so
+# that
 # the paragraph goes on with here.
 
 # "paragraph":
-# This comment is long enough that it runs past the one hundred column limit by a word or two
-# which the paragraph goes on with here.
+# This comment is long enough that it runs past the one hundred column limit by a word or two, so
+# that the paragraph goes on with here.
 ```
 
 The contents of multi-line strings are data, so the formatter leaves them alone: indentation, trailing whitespace, blank lines and line length inside a string that spans lines (a `"""..."""` literal, or a quoted string with a raw newline or a backslash continuation) are kept. The layout rules don't report those lines either. The one exception is `format/max-line-length` on a string's closing line: when the code after the closing quote is what makes the line too long, it is still reported.
