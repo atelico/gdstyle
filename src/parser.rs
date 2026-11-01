@@ -102,7 +102,7 @@ impl<'t> Parser<'t> {
                     members.push(member);
                 }
                 TokenKind::Comment(_) => {
-                    let token = self.current_token().clone();
+                    let token = self.current_token();
                     self.advance();
                     if let TokenKind::Comment(text) = &token.kind {
                         members.push(ClassMember::Comment {
@@ -185,7 +185,7 @@ impl<'t> Parser<'t> {
     }
 
     fn parse_annotation(&mut self) -> AnnotationInfo {
-        let token = self.current_token().clone();
+        let token = self.current_token();
         let name = if let TokenKind::Annotation(ref name) = token.kind {
             name.clone()
         } else {
@@ -199,7 +199,7 @@ impl<'t> Parser<'t> {
     }
 
     fn skip_annotation_args(&mut self) {
-        if !self.is_at_end() && self.current_kind() == TokenKind::LeftParen {
+        if !self.is_at_end() && *self.current_kind() == TokenKind::LeftParen {
             let mut depth = 1;
             self.advance(); // skip (
             while !self.is_at_end() && depth > 0 {
@@ -237,7 +237,7 @@ impl<'t> Parser<'t> {
                 TokenKind::Identifier(ref name) => {
                     base.push_str(name);
                     self.advance();
-                    if !self.is_at_end() && self.current_kind() == TokenKind::Dot {
+                    if !self.is_at_end() && *self.current_kind() == TokenKind::Dot {
                         base.push('.');
                         self.advance();
                     } else {
@@ -252,7 +252,7 @@ impl<'t> Parser<'t> {
     }
 
     fn parse_doc_comment(&mut self) -> ClassMember {
-        let token = self.current_token().clone();
+        let token = self.current_token();
         self.advance();
         let text = if let TokenKind::DocComment(ref text) = token.kind {
             text.clone()
@@ -271,7 +271,7 @@ impl<'t> Parser<'t> {
         self.advance(); // skip signal
 
         let (name, name_span) = self.expect_identifier();
-        let parameters = if !self.is_at_end() && self.current_kind() == TokenKind::LeftParen {
+        let parameters = if !self.is_at_end() && *self.current_kind() == TokenKind::LeftParen {
             self.parse_parameter_list()
         } else {
             Vec::new()
@@ -293,11 +293,11 @@ impl<'t> Parser<'t> {
 
         let mut enum_members = Vec::new();
 
-        if !self.is_at_end() && self.current_kind() == TokenKind::LeftBrace {
+        if !self.is_at_end() && *self.current_kind() == TokenKind::LeftBrace {
             self.advance(); // skip {
-            while !self.is_at_end() && self.current_kind() != TokenKind::RightBrace {
+            while !self.is_at_end() && *self.current_kind() != TokenKind::RightBrace {
                 self.skip_newlines();
-                if self.is_at_end() || self.current_kind() == TokenKind::RightBrace {
+                if self.is_at_end() || *self.current_kind() == TokenKind::RightBrace {
                     break;
                 }
 
@@ -312,7 +312,7 @@ impl<'t> Parser<'t> {
 
                 if let Some((member_name, member_span)) = self.take_name() {
                     // Skip optional value assignment.
-                    if !self.is_at_end() && self.current_kind() == TokenKind::Assign {
+                    if !self.is_at_end() && *self.current_kind() == TokenKind::Assign {
                         self.advance(); // skip =
                         self.skip_expression();
                     }
@@ -328,11 +328,11 @@ impl<'t> Parser<'t> {
                 }
 
                 // Skip comma.
-                if !self.is_at_end() && self.current_kind() == TokenKind::Comma {
+                if !self.is_at_end() && *self.current_kind() == TokenKind::Comma {
                     self.advance();
                 }
             }
-            if !self.is_at_end() && self.current_kind() == TokenKind::RightBrace {
+            if !self.is_at_end() && *self.current_kind() == TokenKind::RightBrace {
                 self.advance(); // skip }
             }
         }
@@ -428,15 +428,15 @@ impl<'t> Parser<'t> {
     fn skip_variable_rest(&mut self) -> bool {
         let mut opens_block = false;
         while !self.is_at_end()
-            && self.current_kind() != TokenKind::Newline
-            && self.current_kind() != TokenKind::Eof
+            && *self.current_kind() != TokenKind::Newline
+            && *self.current_kind() != TokenKind::Eof
         {
             // A trailing comment doesn't change what the line ends with.
             if !matches!(
                 self.current_kind(),
                 TokenKind::Comment(_) | TokenKind::DocComment(_)
             ) {
-                opens_block = self.current_kind() == TokenKind::Colon;
+                opens_block = *self.current_kind() == TokenKind::Colon;
             }
             self.advance();
         }
@@ -480,10 +480,10 @@ impl<'t> Parser<'t> {
     /// matching Dedent. Returns whether a block was there to skip.
     fn skip_indented_block(&mut self) -> bool {
         // Walk past any blank Newlines.
-        while !self.is_at_end() && self.current_kind() == TokenKind::Newline {
+        while !self.is_at_end() && *self.current_kind() == TokenKind::Newline {
             self.advance();
         }
-        if self.is_at_end() || self.current_kind() != TokenKind::Indent {
+        if self.is_at_end() || *self.current_kind() != TokenKind::Indent {
             return false;
         }
         self.advance(); // skip Indent
@@ -509,13 +509,13 @@ impl<'t> Parser<'t> {
         self.advance(); // skip func
 
         let (name, name_span) = self.expect_identifier();
-        let parameters = if !self.is_at_end() && self.current_kind() == TokenKind::LeftParen {
+        let parameters = if !self.is_at_end() && *self.current_kind() == TokenKind::LeftParen {
             self.parse_parameter_list()
         } else {
             Vec::new()
         };
 
-        let return_type = if !self.is_at_end() && self.current_kind() == TokenKind::Arrow {
+        let return_type = if !self.is_at_end() && *self.current_kind() == TokenKind::Arrow {
             self.advance(); // skip ->
             Some(self.expect_type_name())
         } else {
@@ -524,15 +524,15 @@ impl<'t> Parser<'t> {
 
         // Skip to colon.
         while !self.is_at_end()
-            && self.current_kind() != TokenKind::Colon
-            && self.current_kind() != TokenKind::Newline
+            && *self.current_kind() != TokenKind::Colon
+            && *self.current_kind() != TokenKind::Newline
         {
             self.advance();
         }
         // Count body lines (between Indent and Dedent). A bodyless
         // `@abstract func` has no colon. Looking for a body there would skip
         // the comments that follow it, which belong to the next member.
-        let body_line_count = if !self.is_at_end() && self.current_kind() == TokenKind::Colon {
+        let body_line_count = if !self.is_at_end() && *self.current_kind() == TokenKind::Colon {
             self.advance(); // skip :
             self.count_body_lines()
         } else {
@@ -561,7 +561,7 @@ impl<'t> Parser<'t> {
         // (`Node2D.Foo`) or a script path (`"res://base.gd"`), so skip to the
         // header's colon rather than reading a single identifier; stopping
         // short would leave the colon unread and the body unparsed.
-        if !self.is_at_end() && self.current_kind() == TokenKind::Extends {
+        if !self.is_at_end() && *self.current_kind() == TokenKind::Extends {
             self.advance();
             while !self.is_at_end()
                 && !matches!(self.current_kind(), TokenKind::Colon | TokenKind::Newline)
@@ -571,7 +571,7 @@ impl<'t> Parser<'t> {
         }
 
         // Skip colon.
-        if !self.is_at_end() && self.current_kind() == TokenKind::Colon {
+        if !self.is_at_end() && *self.current_kind() == TokenKind::Colon {
             self.advance();
         }
 
@@ -590,11 +590,11 @@ impl<'t> Parser<'t> {
         let mut params = Vec::new();
         self.advance(); // skip (
 
-        while !self.is_at_end() && self.current_kind() != TokenKind::RightParen {
+        while !self.is_at_end() && *self.current_kind() != TokenKind::RightParen {
             // A comment between parameters is not one. Read as a name, it sent
             // the recovery below to the next comma at any depth.
             self.skip_newlines_and_comments();
-            if self.is_at_end() || self.current_kind() == TokenKind::RightParen {
+            if self.is_at_end() || *self.current_kind() == TokenKind::RightParen {
                 break;
             }
 
@@ -602,12 +602,12 @@ impl<'t> Parser<'t> {
             if name.is_empty() {
                 // Recovery: skip to next comma or close paren.
                 while !self.is_at_end()
-                    && self.current_kind() != TokenKind::Comma
-                    && self.current_kind() != TokenKind::RightParen
+                    && *self.current_kind() != TokenKind::Comma
+                    && *self.current_kind() != TokenKind::RightParen
                 {
                     self.advance();
                 }
-                if !self.is_at_end() && self.current_kind() == TokenKind::Comma {
+                if !self.is_at_end() && *self.current_kind() == TokenKind::Comma {
                     self.advance();
                 }
                 continue;
@@ -616,7 +616,7 @@ impl<'t> Parser<'t> {
             let type_hint = self.try_parse_type_hint();
 
             // Skip default value.
-            if !self.is_at_end() && self.current_kind() == TokenKind::Assign {
+            if !self.is_at_end() && *self.current_kind() == TokenKind::Assign {
                 self.advance(); // skip =
                 self.skip_expression();
             }
@@ -627,12 +627,12 @@ impl<'t> Parser<'t> {
                 span: param_span,
             });
 
-            if !self.is_at_end() && self.current_kind() == TokenKind::Comma {
+            if !self.is_at_end() && *self.current_kind() == TokenKind::Comma {
                 self.advance();
             }
         }
 
-        if !self.is_at_end() && self.current_kind() == TokenKind::RightParen {
+        if !self.is_at_end() && *self.current_kind() == TokenKind::RightParen {
             self.advance(); // skip )
         }
 
@@ -640,11 +640,11 @@ impl<'t> Parser<'t> {
     }
 
     fn try_parse_type_hint(&mut self) -> Option<String> {
-        if !self.is_at_end() && self.current_kind() == TokenKind::Colon {
+        if !self.is_at_end() && *self.current_kind() == TokenKind::Colon {
             self.advance(); // skip :
 
             // Check for := (type inference).
-            if !self.is_at_end() && self.current_kind() == TokenKind::Assign {
+            if !self.is_at_end() && *self.current_kind() == TokenKind::Assign {
                 return Some(":=".to_string());
             }
 
@@ -673,7 +673,7 @@ impl<'t> Parser<'t> {
                 // the hint with canonical spacing (`Dictionary[int, String]`)
                 // rather than concatenating raw token text, which would
                 // produce `Dictionary[int,String]`.
-                if !self.is_at_end() && self.current_kind() == TokenKind::LeftBracket {
+                if !self.is_at_end() && *self.current_kind() == TokenKind::LeftBracket {
                     name.push('[');
                     self.advance();
                     let mut depth = 1;
@@ -716,7 +716,7 @@ impl<'t> Parser<'t> {
             return None;
         }
         let name = match self.current_kind() {
-            TokenKind::Identifier(name) => name,
+            TokenKind::Identifier(name) => name.clone(),
             TokenKind::Match | TokenKind::When => self.current_token().text.clone(),
             _ => return None,
         };
@@ -737,7 +737,7 @@ impl<'t> Parser<'t> {
         // between the colon and the indented body (the lexer emits comments
         // before Indent tokens, so we must skip them here).
         self.skip_newlines_and_comments();
-        if self.is_at_end() || self.current_kind() != TokenKind::Indent {
+        if self.is_at_end() || *self.current_kind() != TokenKind::Indent {
             return 0;
         }
 
@@ -792,7 +792,7 @@ impl<'t> Parser<'t> {
             }
         }
 
-        if !self.is_at_end() && self.current_kind() == TokenKind::Dedent {
+        if !self.is_at_end() && *self.current_kind() == TokenKind::Dedent {
             self.advance(); // skip final Dedent
         }
 
@@ -801,7 +801,7 @@ impl<'t> Parser<'t> {
 
     fn parse_indented_block(&mut self) -> Vec<ClassMember> {
         self.skip_newlines();
-        if self.is_at_end() || self.current_kind() != TokenKind::Indent {
+        if self.is_at_end() || *self.current_kind() != TokenKind::Indent {
             return Vec::new();
         }
 
@@ -810,9 +810,9 @@ impl<'t> Parser<'t> {
         let mut members = Vec::new();
         let mut pending_annotations: Vec<AnnotationInfo> = Vec::new();
 
-        while !self.is_at_end() && self.current_kind() != TokenKind::Dedent {
+        while !self.is_at_end() && *self.current_kind() != TokenKind::Dedent {
             self.skip_newlines();
-            if self.is_at_end() || self.current_kind() == TokenKind::Dedent {
+            if self.is_at_end() || *self.current_kind() == TokenKind::Dedent {
                 break;
             }
 
@@ -862,7 +862,7 @@ impl<'t> Parser<'t> {
             }
         }
 
-        if !self.is_at_end() && self.current_kind() == TokenKind::Dedent {
+        if !self.is_at_end() && *self.current_kind() == TokenKind::Dedent {
             self.advance();
         }
 
@@ -870,7 +870,7 @@ impl<'t> Parser<'t> {
     }
 
     fn skip_newlines(&mut self) {
-        while !self.is_at_end() && self.current_kind() == TokenKind::Newline {
+        while !self.is_at_end() && *self.current_kind() == TokenKind::Newline {
             self.advance();
         }
     }
@@ -887,8 +887,8 @@ impl<'t> Parser<'t> {
 
     fn skip_to_newline(&mut self) {
         while !self.is_at_end()
-            && self.current_kind() != TokenKind::Newline
-            && self.current_kind() != TokenKind::Eof
+            && *self.current_kind() != TokenKind::Newline
+            && *self.current_kind() != TokenKind::Eof
         {
             self.advance();
         }
@@ -918,12 +918,14 @@ impl<'t> Parser<'t> {
         }
     }
 
-    fn current_token(&self) -> &Token {
+    /// The token at the cursor. Borrowed from the token slice rather than
+    /// from the parser, so it stays usable across `advance`.
+    fn current_token(&self) -> &'t Token {
         &self.tokens[self.position]
     }
 
-    fn current_kind(&self) -> TokenKind {
-        self.tokens[self.position].kind.clone()
+    fn current_kind(&self) -> &TokenKind {
+        &self.tokens[self.position].kind
     }
 
     fn advance(&mut self) {

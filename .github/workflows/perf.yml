@@ -14,6 +14,7 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "scripts/perf-compare.sh"
+      - "scripts/gen-stress-corpus.py"
       - ".github/workflows/perf.yml"
   # Builds on main fill the cargo cache. PR runs can only read caches that
   # main wrote, so without this every PR builds both binaries from scratch.
@@ -24,10 +25,16 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "scripts/perf-compare.sh"
+      - "scripts/gen-stress-corpus.py"
       - ".github/workflows/perf.yml"
 
 permissions:
   contents: read
+
+# A new push or label on the same PR makes the running comparison moot.
+concurrency:
+  group: perf-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -102,7 +109,21 @@ jobs:
         env:
           PERF_ALLOW_REGRESSION: ${{ contains(github.event.pull_request.labels.*.name, 'perf-regression-ok') && '1' || '0' }}
         run: |
-          candidate/scripts/perf-compare.sh \
+          PERF_CORPUS_NAME="the demo projects" candidate/scripts/perf-compare.sh \
             base/target/release/gdstyle \
             candidate/target/release/gdstyle \
             corpus
+
+      # The demo files are small, so a pass that grows with the square of the
+      # file length hides there. Large generated files make it stand out.
+      - name: Compare on large files
+        # Also after a failed demo comparison: both tables help then.
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        env:
+          PERF_ALLOW_REGRESSION: ${{ contains(github.event.pull_request.labels.*.name, 'perf-regression-ok') && '1' || '0' }}
+        run: |
+          python3 candidate/scripts/gen-stress-corpus.py stress
+          PERF_CORPUS_NAME="large generated files" candidate/scripts/perf-compare.sh \
+            base/target/release/gdstyle \
+            candidate/target/release/gdstyle \
+            stress

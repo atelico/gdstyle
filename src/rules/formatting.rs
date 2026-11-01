@@ -97,14 +97,14 @@ pub fn check_trailing_whitespace(
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     let string_line_mask = StringLines::new(tokens, file.lines.len());
-    for (i, line) in file.lines.iter().enumerate() {
+    for ((i, line), line_start) in file.lines.iter().enumerate().zip(line_starts(&file.lines)) {
         let line_num = i + 1;
         if string_line_mask.ends_inside(i) {
             continue;
         }
         if line.ends_with(' ') || line.ends_with('\t') {
             let trimmed_len = line.trim_end().len();
-            let offset = line_byte_offset(&file.lines, i) + trimmed_len;
+            let offset = line_start + trimmed_len;
             let ws_len = line.len() - trimmed_len;
             diagnostics.push(
                 Diagnostic::warning(
@@ -207,6 +207,17 @@ pub fn check_trailing_newline(file: &ScriptFile, diagnostics: &mut Vec<Diagnosti
     );
 }
 
+/// The byte offset where each of `lines` starts in the source they were
+/// split from (lines joined by `\n`). Walking with this instead of calling
+/// [`line_byte_offset`] per line keeps a rule linear in the file length.
+fn line_starts(lines: &[String]) -> impl Iterator<Item = usize> + '_ {
+    lines.iter().scan(0, |next_start, line| {
+        let start = *next_start;
+        *next_start += line.len() + 1;
+        Some(start)
+    })
+}
+
 /// `indent` (a run of tabs and spaces) as `format/no-tabs-as-spaces` rewrites
 /// it: with tabs, every 4 columns become a tab (a spaces-only indent becomes
 /// at least one); with spaces, each tab becomes 4 spaces.
@@ -246,7 +257,7 @@ pub fn check_indentation_style(
             diagnostic
         }
     };
-    for (i, line) in file.lines.iter().enumerate() {
+    for ((i, line), offset) in file.lines.iter().enumerate().zip(line_starts(&file.lines)) {
         let line_num = i + 1;
         if line.is_empty() || string_line_mask.is_interior(i) {
             continue;
@@ -262,7 +273,6 @@ pub fn check_indentation_style(
 
         let has_tabs = indent.contains('\t');
         let has_spaces = indent.contains(' ');
-        let offset = line_byte_offset(&file.lines, i);
         let indent_len = indent.len();
 
         // Mixed indentation is always wrong.
@@ -701,6 +711,8 @@ pub fn check_one_statement_per_line(
     file: &ScriptFile,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
+    // Built on the first `;`: most files have none.
+    let mut line_start_offsets: Option<Vec<usize>> = None;
     for (idx, token) in tokens.iter().enumerate() {
         if token.kind == TokenKind::Semicolon {
             // Figure out the indentation of the current line for the replacement.
@@ -723,8 +735,12 @@ pub fn check_one_statement_per_line(
             // that `:` is to the LEFT of the `;`. Pattern tokens are
             // identifiers, integers, strings, `_`, with optional `,`-joined
             // alternatives, but never contain `=`/`if`/`for`/`while`.
-            let semi_col =
-                (token.span.offset).saturating_sub(line_byte_offset(&file.lines, line_idx));
+            let line_start = line_start_offsets
+                .get_or_insert_with(|| line_starts(&file.lines).collect())
+                .get(line_idx)
+                .copied()
+                .unwrap_or(0);
+            let semi_col = token.span.offset.saturating_sub(line_start);
             if is_match_arm_line(line, semi_col) {
                 continue;
             }
@@ -839,23 +855,27 @@ pub fn check_blank_lines(tokens: &[Token], file: &ScriptFile, diagnostics: &mut 
     let mut consecutive_blank = 0;
     let mut run_start_idx: usize = 0;
 
-    for (idx, line) in file.lines.iter().enumerate() {
+    let mut run_start_offset: usize = 0;
+    for ((idx, line), line_start) in file.lines.iter().enumerate().zip(line_starts(&file.lines)) {
         if line.trim().is_empty() && !string_line_mask.ends_inside(idx) {
             consecutive_blank += 1;
             if consecutive_blank == 1 {
                 run_start_idx = idx;
+                run_start_offset = line_start;
             }
         } else {
             if consecutive_blank > 2 {
                 // Lines run_start_idx..=idx-1 are blank; keep first 2, remove rest.
-                let first_excess_idx = run_start_idx + 2;
-                let last_excess_idx = idx - 1;
-                let excess_start = line_byte_offset(&file.lines, first_excess_idx);
-                let excess_end = line_byte_offset(&file.lines, last_excess_idx)
-                    + file.lines[last_excess_idx].len()
-                    + 1; // +1 for the newline
+                // Every line of the run is blank (whitespace only), and the
+                // run ends right before line `idx`.
+                let excess_start = run_start_offset
+                    + file.lines[run_start_idx..run_start_idx + 2]
+                        .iter()
+                        .map(|blank| blank.len() + 1)
+                        .sum::<usize>();
+                let excess_end = line_start;
 
-                let report_offset = line_byte_offset(&file.lines, run_start_idx);
+                let report_offset = run_start_offset;
                 diagnostics.push(
                     Diagnostic::warning(
                         "format/blank-lines",

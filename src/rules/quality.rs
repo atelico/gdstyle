@@ -1048,32 +1048,198 @@ pub fn check_max_inner_classes(
 /// would run its body after `foo()` too. A branch returns when its last
 /// statement is a `return` at the branch's own indent (a nested `return`
 /// can fall through), or when it is a one-line `if x: return y`.
+///
+/// One pass over the statements: each open `if` chain sits on a stack by
+/// indent and remembers whether all its branches so far returned. The last
+/// statement of a branch is the statement right before the chain's next
+/// `elif` / `else`, so nothing is ever walked twice.
 pub fn check_no_else_return(
     string_line_mask: &StringLines,
     file: &ScriptFile,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    for (i, line) in file.lines.iter().enumerate() {
-        let trimmed = line.trim();
-        let kind = if is_branch_header(trimmed, "elif") {
-            "elif"
-        } else if trimmed.starts_with("else:") {
-            "else"
-        } else {
-            continue;
-        };
-        if string_line_mask.is_interior(i) {
-            continue;
-        }
-        if every_earlier_branch_returns(file, string_line_mask, i) {
-            diagnostics.push(Diagnostic::warning(
-                "quality/no-else-return",
-                format!("unnecessary '{}' after 'return'", kind),
-                Span::new(i + 1, 1, 0, 0),
-                &file.path,
-            ));
-        }
+    // Most files have no `else` at all; finding none is cheaper than
+    // splitting the file into statements.
+    if !file.lines.iter().any(|line| line.contains("el")) {
+        return;
     }
+    let mut open_chains: Vec<OpenChain> = Vec::new();
+    let mut previous: Option<StatementSummary> = None;
+    for statement in statements(file, string_line_mask) {
+        let indent = statement.indent;
+        if let Some(chain) = open_chains.last_mut() {
+            if chain.body_indent.is_none() && indent > chain.indent {
+                chain.body_indent = Some(indent);
+            }
+        }
+        while open_chains
+            .last()
+            .is_some_and(|chain| chain.indent > indent)
+        {
+            open_chains.pop();
+        }
+        let kind = if is_branch_header(statement.text, "elif") {
+            Some("elif")
+        } else if is_else_header(statement.text) {
+            Some("else")
+        } else {
+            None
+        };
+        let chain_at_indent = open_chains
+            .last_mut()
+            .filter(|chain| chain.indent == indent);
+        match (kind, chain_at_indent) {
+            (Some(kind), Some(chain)) => {
+                let branch_returns = chain.inline_body_returns.unwrap_or_else(|| {
+                    previous.is_some_and(|last| {
+                        last.is_return && Some(last.indent) == chain.body_indent
+                    })
+                });
+                if chain.all_branches_return && branch_returns {
+                    diagnostics.push(Diagnostic::warning(
+                        "quality/no-else-return",
+                        format!("unnecessary '{}' after 'return'", kind),
+                        Span::new(statement.line + 1, 1, 0, 0),
+                        &file.path,
+                    ));
+                }
+                if kind == "else" {
+                    open_chains.pop();
+                } else {
+                    chain.all_branches_return &= branch_returns;
+                    chain.body_indent = None;
+                    chain.inline_body_returns =
+                        inline_branch_body(statement.text).map(is_return_statement);
+                }
+            }
+            (_, chain_at_indent) => {
+                if chain_at_indent.is_some() {
+                    // A sibling statement ends the chain at this indent.
+                    open_chains.pop();
+                }
+                if is_branch_header(statement.text, "if") {
+                    open_chains.push(OpenChain {
+                        indent,
+                        all_branches_return: true,
+                        body_indent: None,
+                        inline_body_returns: inline_branch_body(statement.text)
+                            .map(is_return_statement),
+                    });
+                }
+            }
+        }
+        previous = Some(StatementSummary {
+            indent,
+            is_return: is_return_statement(statement.text),
+        });
+    }
+}
+
+/// An `if` chain whose next `elif` / `else` may still come, for
+/// [`check_no_else_return`].
+struct OpenChain {
+    /// Indent of the `if` / `elif` / `else` headers.
+    indent: usize,
+    /// Whether every branch before the current one ended with a `return`.
+    all_branches_return: bool,
+    /// Indent of the current branch's statements, known after the first one.
+    body_indent: Option<usize>,
+    /// For a one-line branch (`elif x: return 1`), whether its statement is a
+    /// `return`. `None` when the body is on the lines below.
+    inline_body_returns: Option<bool>,
+}
+
+/// What [`check_no_else_return`] keeps of the statement before the current one.
+#[derive(Clone, Copy)]
+struct StatementSummary {
+    indent: usize,
+    is_return: bool,
+}
+
+/// A logical statement: its first line, which carries the keyword.
+struct Statement<'a> {
+    /// 0-indexed line of the statement's first line.
+    line: usize,
+    indent: usize,
+    /// The first line, trimmed.
+    text: &'a str,
+}
+
+/// The statements of `file` in order, skipping blank and comment lines. A
+/// statement continues over the next lines while a bracket is open, a line
+/// ends with a backslash, or a string spans lines, so `return max(` / `1,` /
+/// `)` is one statement starting at the `return`.
+///
+/// A multi-line lambda is the exception: inside its brackets, the lines of
+/// its body (`connect(func():` / `if a:` / `return` / `)`) are statements of
+/// their own, as Godot reads them.
+fn statements<'a>(
+    file: &'a ScriptFile,
+    string_line_mask: &'a StringLines,
+) -> impl Iterator<Item = Statement<'a>> + 'a {
+    let mut open_brackets = 0i32;
+    let mut continues_previous = false;
+    // Lambda bodies open inside brackets, innermost last.
+    let mut lambda_bodies: Vec<LambdaBody> = Vec::new();
+    file.lines
+        .iter()
+        .enumerate()
+        .filter_map(move |(index, line)| {
+            let is_interior = string_line_mask.is_interior(index);
+            // Bracket balance of the line's code, leaving out string data.
+            let code = if is_interior {
+                string_line_mask
+                    .literal_end(index)
+                    .and_then(|end| line.get(end..))
+                    .unwrap_or("")
+            } else {
+                line.as_str()
+            };
+            let trimmed = line.trim();
+            if !is_interior && is_comment_or_blank(trimmed) {
+                return None;
+            }
+            let indent = indent_level(line);
+            if !is_interior {
+                // A line back at the header's indent (the closing `)`) or
+                // shallower has left the body.
+                while lambda_bodies
+                    .last()
+                    .is_some_and(|body| indent <= body.header_indent)
+                {
+                    lambda_bodies.pop();
+                }
+            }
+            let is_in_lambda_body = lambda_bodies
+                .last()
+                .is_some_and(|body| body.open_brackets == open_brackets);
+            let starts_statement =
+                !is_interior && !continues_previous && (open_brackets == 0 || is_in_lambda_body);
+            open_brackets = (open_brackets + line_bracket_delta(code)).max(0);
+            continues_previous = ends_with_backslash_continuation(code);
+            lambda_bodies.retain(|body| body.open_brackets <= open_brackets);
+            // A line inside brackets that ends with a colon opens a block:
+            // a lambda's body, or a block nested in one.
+            if open_brackets > 0 && strip_trailing_comment(code).trim_end().ends_with(':') {
+                lambda_bodies.push(LambdaBody {
+                    header_indent: indent,
+                    open_brackets,
+                });
+            }
+            starts_statement.then_some(Statement {
+                line: index,
+                indent,
+                text: trimmed,
+            })
+        })
+}
+
+/// A block opened inside brackets, for [`statements`].
+struct LambdaBody {
+    /// Indent of the line whose colon opened it.
+    header_indent: usize,
+    /// Brackets open at that colon; a body line at this depth is a statement.
+    open_brackets: i32,
 }
 
 /// True when trimmed `line` is a branch header starting with `keyword`
@@ -1083,57 +1249,10 @@ fn is_branch_header(line: &str, keyword: &str) -> bool {
         .is_some_and(|rest| rest.starts_with([' ', '\t', '(']))
 }
 
-/// True when every branch of the `if` chain before the `elif` / `else` on
-/// line `chain_line` ends with a `return` (see [`check_no_else_return`]).
-fn every_earlier_branch_returns(
-    file: &ScriptFile,
-    string_line_mask: &StringLines,
-    chain_line: usize,
-) -> bool {
-    let header_indent = indent_level(&file.lines[chain_line]);
-    let is_code = |index: usize| {
-        !string_line_mask.is_interior(index) && !is_comment_or_blank(file.lines[index].trim())
-    };
-    let mut branch_end = chain_line;
-    loop {
-        // The branch header is the nearest code line above at the chain's
-        // indent; everything between it and `branch_end` is its body.
-        let Some(header_end) = (0..branch_end)
-            .rev()
-            .filter(|&index| is_code(index))
-            .find(|&index| indent_level(&file.lines[index]) <= header_indent)
-        else {
-            return false;
-        };
-        // A header may continue on lines at its own indent (`if (a` / `and b):`).
-        let header = statement_start(file, string_line_mask, header_end);
-        let header_text = file.lines[header].trim();
-        let is_if = is_branch_header(header_text, "if");
-        if indent_level(&file.lines[header]) != header_indent
-            || !(is_if || is_branch_header(header_text, "elif"))
-        {
-            return false;
-        }
-        let returns = match inline_branch_body(header_text) {
-            Some(body) => is_return_statement(body),
-            None => (header_end + 1..branch_end)
-                .rev()
-                .find(|&index| is_code(index) || string_line_mask.is_interior(index))
-                .is_some_and(|last| {
-                    let start = statement_start(file, string_line_mask, last);
-                    start > header_end
-                        && is_return_statement(file.lines[start].trim())
-                        && return_ends_branch(file, string_line_mask, start, header_indent)
-                }),
-        };
-        if !returns {
-            return false;
-        }
-        if is_if {
-            return true;
-        }
-        branch_end = header;
-    }
+/// True when trimmed `line` is an `else` header: `else:` or `else :`.
+fn is_else_header(line: &str) -> bool {
+    line.strip_prefix("else")
+        .is_some_and(|rest| rest.trim_start().starts_with(':'))
 }
 
 /// The statement after the colon of a one-line `if` / `elif` header:
@@ -1157,36 +1276,6 @@ fn inline_branch_body(header: &str) -> Option<&str> {
     (!body.is_empty() && !body.starts_with('#')).then_some(body)
 }
 
-/// First line of the statement that ends on line `last`. Earlier lines are
-/// part of it when a bracket is still open, a line ends with a backslash,
-/// or a string spans lines: `return max(` / `1,` / `2` / `)` starts at the
-/// `return`.
-fn statement_start(file: &ScriptFile, string_line_mask: &StringLines, last: usize) -> usize {
-    // Bracket balance of a line's code, leaving out string data.
-    let code_delta = |index: usize| {
-        let line = &file.lines[index];
-        if string_line_mask.is_interior(index) {
-            string_line_mask
-                .literal_end(index)
-                .and_then(|end| line.get(end..))
-                .map_or(0, line_bracket_delta)
-        } else {
-            line_bracket_delta(line)
-        }
-    };
-    let mut start = last;
-    let mut depth = code_delta(last);
-    while start > 0
-        && (depth < 0
-            || string_line_mask.is_interior(start)
-            || ends_with_backslash_continuation(&file.lines[start - 1]))
-    {
-        start -= 1;
-        depth += code_delta(start);
-    }
-    start
-}
-
 /// True when the trimmed line is a `return` statement (`return`, `return x`,
 /// `return(x)`, `return;`, `return-1`), not an identifier that starts with
 /// `return` (`returned = true`, `return_value.clear()`).
@@ -1194,27 +1283,6 @@ fn is_return_statement(trimmed: &str) -> bool {
     trimmed
         .strip_prefix("return")
         .is_some_and(|rest| !rest.starts_with(is_identifier_char))
-}
-
-/// True when the `return` on line `return_line` is a statement of the branch
-/// body itself, not of a block nested in it. A nested `return`
-/// (`if b: return 1`) can fall through to the `elif` or `else`, so that one
-/// is needed. Lines inside a string that spans lines are data, not code, so
-/// their indent says nothing about the branch.
-fn return_ends_branch(
-    file: &ScriptFile,
-    string_line_mask: &StringLines,
-    return_line: usize,
-    header_indent: usize,
-) -> bool {
-    let return_indent = indent_level(&file.lines[return_line]);
-    (0..return_line)
-        .rev()
-        .filter(|&index| !string_line_mask.is_interior(index))
-        .map(|index| &file.lines[index])
-        .filter(|line| !is_comment_or_blank(line.trim()))
-        .take_while(|line| indent_level(line) > header_indent)
-        .all(|line| indent_level(line) >= return_indent)
 }
 
 // ---------------------------------------------------------------------------
@@ -1226,27 +1294,43 @@ fn return_ends_branch(
 /// Used by `check_unreachable_code` to skip continuation lines of a
 /// multi-line `return`/`break`/`continue` statement.
 fn line_bracket_delta(line: &str) -> i32 {
+    // Every byte that matters here is ASCII, and no byte of a multi-byte
+    // UTF-8 character is, so scanning bytes reads the same as scanning chars.
+    let bytes = line.as_bytes();
+    let is_triple_at = |index: usize, quote: u8| bytes[index..].starts_with(&[quote; 3]);
     let mut depth: i32 = 0;
-    let mut chars = line.chars().peekable();
-    let mut in_string: Option<char> = None; // ' or " of the current string
-    while let Some(ch) = chars.next() {
-        // Inside a string literal: only the matching quote ends it, and
-        // a backslash escapes the next char.
-        if let Some(q) = in_string {
-            if ch == '\\' {
-                chars.next();
-                continue;
-            }
-            if ch == q {
+    // The quote byte of the current string, and whether it is a `"""` one.
+    let mut in_string: Option<(u8, bool)> = None;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        index += 1;
+        // Inside a string literal: only the matching quote ends it (three of
+        // them for a `"""` string), and a backslash escapes the next byte.
+        if let Some((quote, is_triple)) = in_string {
+            if byte == b'\\' {
+                index += 1;
+            } else if byte == quote && !is_triple {
+                in_string = None;
+            } else if byte == quote && is_triple_at(index - 1, quote) {
+                index += 2;
                 in_string = None;
             }
             continue;
         }
-        match ch {
-            '#' => break, // rest of line is a comment
-            '"' | '\'' => in_string = Some(ch),
-            '(' | '[' | '{' => depth += 1,
-            ')' | ']' | '}' => depth -= 1,
+        match byte {
+            b'#' => break, // rest of line is a comment
+            b'"' | b'\'' => {
+                // `"""` opens one string that only `"""` closes, so
+                // `"""say "(" here"""` holds no bracket.
+                let is_triple = is_triple_at(index - 1, byte);
+                if is_triple {
+                    index += 2;
+                }
+                in_string = Some((byte, is_triple));
+            }
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
             _ => {}
         }
     }

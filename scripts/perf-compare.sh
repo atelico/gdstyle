@@ -14,6 +14,7 @@
 #   PERF_THRESHOLD_PERCENT  largest allowed instruction increase (default 3)
 #   PERF_RUNS               cachegrind runs per binary and command (default 3)
 #   PERF_ALLOW_REGRESSION   when "1", report a regression but exit 0
+#   PERF_CORPUS_NAME        name of the corpus in the report headings
 #   GITHUB_STEP_SUMMARY     when set, the report is appended to it as well
 #
 # Example (Linux, valgrind installed):
@@ -34,6 +35,7 @@ base_binary=$(realpath "$1")
 candidate_binary=$(realpath "$2")
 corpus_dir=$(realpath "$3")
 threshold_percent=${PERF_THRESHOLD_PERCENT:-3}
+corpus_name=${PERF_CORPUS_NAME:-$(basename "$corpus_dir")}
 runs=${PERF_RUNS:-3}
 if ! [[ "$runs" =~ ^[1-9][0-9]*$ ]]; then
     echo "error: PERF_RUNS must be a positive integer, got '$runs'" >&2
@@ -103,7 +105,7 @@ median_instructions() {
 has_regression=0
 
 {
-    echo "### Instruction count (median of $runs runs, gate: +${threshold_percent}%)"
+    echo "### Instruction count on $corpus_name (median of $runs runs, gate: +${threshold_percent}%)"
     echo
     echo "| Command | Base | Candidate | Change |"
     echo "|---|---:|---:|---:|"
@@ -126,7 +128,7 @@ done
 if command -v hyperfine >/dev/null; then
     {
         echo
-        echo "### Wall-clock time (informational, all threads)"
+        echo "### Wall-clock time on $corpus_name (informational, all threads)"
         echo
     } >>"$report"
     for arguments in "${benchmarks[@]}"; do

@@ -3940,6 +3940,41 @@ func f(a: bool, b: bool) -> int:
 }
 
 #[test]
+fn quality_no_else_return_reads_else_with_a_space_before_the_colon() {
+    let source = "\
+func f(a: bool) -> int:
+\tif a:
+\t\treturn 1
+\telse :
+\t\treturn 0
+";
+    assert_eq!(flagged_lines(source, "quality/no-else-return"), vec![4]);
+}
+
+#[test]
+fn quality_no_else_return_tracks_nested_and_sibling_chains() {
+    // The inner chain returns in every branch; the outer `if` falls through
+    // after its nested chain, so the outer `else` is needed. A sibling `if`
+    // after the first chain starts a chain of its own.
+    let source = "\
+func f(a: bool, b: bool) -> int:
+\tif a:
+\t\tif b:
+\t\t\treturn 1
+\t\telif not b:
+\t\t\treturn 2
+\t\tprint(a)
+\telse:
+\t\treturn 3
+\tif b:
+\t\treturn 4
+\telse:
+\t\treturn 5
+";
+    assert_eq!(flagged_lines(source, "quality/no-else-return"), vec![5, 12]);
+}
+
+#[test]
 fn fmt_keeps_a_warning_ignore_restore_below_its_region() {
     // The restore closes the region above it. Taken as the head of `const C`,
     // it moved with the constant to above the region's start.
@@ -8204,4 +8239,49 @@ fn enum_fix_keeps_crlf_line_endings() {
         fixer::apply_fixes(source, &diagnostics, true),
         "extends Node\r\n\r\nenum E {\r\n\tX,\r\n\tY,\r\n} # note\r\n"
     );
+}
+
+#[test]
+fn quality_no_else_return_reads_chains_inside_multi_line_lambdas() {
+    // A lambda's body sits inside the call's brackets, but its lines are
+    // statements of their own.
+    let source = "\
+func _ready():
+\tbutton.pressed.connect(func():
+\t\tif visible:
+\t\t\treturn
+\t\telse:
+\t\t\thide()
+\t)
+\tvar handlers = [func(a):
+\t\tif a:
+\t\t\treturn 1
+\t\telse:
+\t\t\treturn 2
+\t]
+";
+    assert_eq!(flagged_lines(source, "quality/no-else-return"), vec![5, 11]);
+}
+
+#[test]
+fn quality_rules_read_a_bracket_inside_a_triple_quoted_string_as_text() {
+    // `"""Press "(" to open"""` holds no open bracket, so the rules after
+    // it still see each statement.
+    let source = "\
+const HELP = \"\"\"Press \"(\" to open\"\"\"
+
+
+func f(a):
+\tif a:
+\t\treturn 1
+\telse:
+\t\treturn 2
+
+
+func g():
+\treturn \"\"\"a \"(\" b\"\"\"
+\tprint(1)
+";
+    assert_eq!(flagged_lines(source, "quality/no-else-return"), vec![7]);
+    assert_eq!(flagged_lines(source, "quality/unreachable-code"), vec![13]);
 }

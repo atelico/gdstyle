@@ -1,7 +1,6 @@
 use crate::ast::ClassMember;
 use crate::diagnostic::{Diagnostic, Replacement};
 use crate::lexer::Lexer;
-use crate::parser::Parser as GdParser;
 use crate::token::{Token, TokenKind};
 
 /// Classification of an identifier rename, used to decide which token contexts
@@ -97,9 +96,8 @@ pub fn apply_fixes(source: &str, diagnostics: &[Diagnostic], safe_only: bool) ->
     let source = normalized.as_str();
 
     // Single tokenize + parse pass for everything we need below.
-    let mut lexer = Lexer::new(source);
-    let tokens = lexer.tokenize();
-    let members = GdParser::new(&tokens).parse();
+    let tokens = crate::source_cache::tokens_of(source);
+    let members = crate::source_cache::members_of(source, &tokens);
     let class_name = extract_class_name(&members);
     let existing_names = collect_existing_names(&members);
     let identifier_tokens = collect_identifier_tokens(&tokens);
@@ -492,6 +490,78 @@ pub fn apply_scene_renames(
     (out_lines.join("\n"), applied)
 }
 
+/// The `(start, end)` byte ranges of the replacements that delete only
+/// whitespace, for [`apply_replacements`]. Sorted by start, with the largest
+/// end so far kept alongside, so a containment query is a binary search
+/// rather than a scan of every deletion.
+struct WhitespaceDeletions {
+    ranges: Vec<(usize, usize)>,
+    /// `max_end_through[i]` is the largest end among `ranges[..=i]`.
+    max_end_through: Vec<usize>,
+}
+
+impl WhitespaceDeletions {
+    fn new(mut ranges: Vec<(usize, usize)>) -> Self {
+        ranges.sort_unstable();
+        let max_end_through = ranges
+            .iter()
+            .scan(0, |max_end, &(_, end)| {
+                *max_end = (*max_end).max(end);
+                Some(*max_end)
+            })
+            .collect();
+        Self {
+            ranges,
+            max_end_through,
+        }
+    }
+
+    /// Whether the edit of `start..end` lies inside a deletion other than
+    /// itself, which makes it moot. An insertion (`start == end`) at either
+    /// edge of a deletion lands outside the deleted text.
+    fn contains(&self, start: usize, end: usize) -> bool {
+        let starts_before = self.ranges.partition_point(|&(s, _)| s < start);
+        if start == end {
+            return starts_before > 0 && self.max_end_through[starts_before - 1] > start;
+        }
+        // A deletion starting earlier must reach `end`; one starting at
+        // `start` must reach past it (reaching exactly `end` is the edit
+        // itself). Within equal starts the last range has the largest end.
+        let starts_at_or_before = self.ranges.partition_point(|&(s, _)| s <= start);
+        (starts_before > 0 && self.max_end_through[starts_before - 1] >= end)
+            || (starts_at_or_before > starts_before && self.ranges[starts_at_or_before - 1].1 > end)
+    }
+}
+
+/// The spans [`apply_replacements`] has accepted so far, which never overlap:
+/// two spans overlap when each starts before the other ends, so an insertion
+/// (an empty span) overlaps only a span it falls strictly inside.
+///
+/// Because accepted spans don't overlap, the one starting last before a new
+/// span's end is the only one that can reach into it: any span starting
+/// earlier ends at or before that one starts. So a check is one ordered
+/// lookup instead of a scan of every accepted span.
+#[derive(Default)]
+struct AcceptedSpans {
+    spans: std::collections::BTreeSet<(usize, usize)>,
+}
+
+impl AcceptedSpans {
+    /// Accepts `start..end` and returns true, unless it overlaps a span
+    /// already accepted.
+    fn insert_unless_overlapping(&mut self, start: usize, end: usize) -> bool {
+        let overlaps = self
+            .spans
+            .range(..(end, 0))
+            .next_back()
+            .is_some_and(|&(_, previous_end)| previous_end > start);
+        if !overlaps {
+            self.spans.insert((start, end));
+        }
+        !overlaps
+    }
+}
+
 /// Apply `replacements` to `source`. Blank-line runs are left to the
 /// `format/blank-lines` fix, so turning that rule off or suppressing it
 /// keeps them.
@@ -503,9 +573,9 @@ pub fn apply_scene_renames(
 ///    narrower spans win over wider ones (a one-token rename always beats
 ///    a whole-line rewrite that happens to cover the same identifier).
 ///    Walk this list and keep each replacement that doesn't overlap any
-///    already-accepted one. O(K²) in the worst case over the K
-///    replacements, but K is bounded by the number of diagnostics on a
-///    single file (hundreds at most).
+///    already-accepted one ([`AcceptedSpans`]), O(K log K) over the K
+///    replacements. A large file can carry tens of thousands of fixes, so
+///    a pairwise check is too slow.
 /// 2. **Apply.** Sort the accepted replacements by offset ascending and
 ///    walk the source once, copying input bytes up to each replacement
 ///    and substituting `new_text`. Insertions at the same offset as a
@@ -522,43 +592,30 @@ fn apply_replacements(source: &str, replacements: Vec<Replacement>) -> String {
     // excess lines of a blank-line run, makes every edit inside it moot
     // (stripping the tab from one of those lines). Drop such edits, or the
     // narrower edit would win the overlap below and keep the lines.
-    let whitespace_deletions: Vec<(usize, usize)> = replacements
-        .iter()
-        .filter(|r| r.length > 0 && r.new_text.is_empty())
-        .filter(|r| {
-            source
-                .get(r.offset..r.offset + r.length)
-                .is_some_and(|deleted| deleted.trim().is_empty())
-        })
-        .map(|r| (r.offset, r.offset + r.length))
-        .collect();
-    let is_inside_a_whitespace_deletion = |r: &Replacement| {
-        let r_end = r.offset + r.length;
-        whitespace_deletions.iter().any(|&(start, end)| {
-            if r.length == 0 {
-                // An insertion at either edge lands outside the deleted text.
-                start < r.offset && r.offset < end
-            } else {
-                start <= r.offset && r_end <= end && (r.offset, r_end) != (start, end)
-            }
-        })
-    };
+    let whitespace_deletions = WhitespaceDeletions::new(
+        replacements
+            .iter()
+            .filter(|r| r.length > 0 && r.new_text.is_empty())
+            .filter(|r| {
+                source
+                    .get(r.offset..r.offset + r.length)
+                    .is_some_and(|deleted| deleted.trim().is_empty())
+            })
+            .map(|r| (r.offset, r.offset + r.length))
+            .collect(),
+    );
 
     // Phase 1: pick a maximal set of non-overlapping replacements,
     // preferring narrower spans.
     let mut by_width: Vec<&Replacement> = replacements
         .iter()
-        .filter(|r| !is_inside_a_whitespace_deletion(r))
+        .filter(|r| !whitespace_deletions.contains(r.offset, r.offset + r.length))
         .collect();
     by_width.sort_by_key(|r| r.length);
+    let mut accepted_spans = AcceptedSpans::default();
     let mut accepted: Vec<&Replacement> = Vec::with_capacity(by_width.len());
     for r in by_width {
-        let r_end = r.offset + r.length;
-        let overlaps = accepted.iter().any(|a| {
-            let a_end = a.offset + a.length;
-            r.offset < a_end && r_end > a.offset
-        });
-        if !overlaps {
+        if accepted_spans.insert_unless_overlapping(r.offset, r.offset + r.length) {
             accepted.push(r);
         }
     }
@@ -1038,6 +1095,103 @@ fn find_enum_for_member(members: &[ClassMember], member_old_name: &str) -> Optio
 mod tests {
     use super::*;
     use crate::diagnostic::{Diagnostic, DiagnosticSpan, Fix, Replacement, Severity};
+
+    /// The pairwise selection `apply_replacements` used before the sorted
+    /// lookups; kept here as the reference they must agree with.
+    fn select_pairwise(source: &str, replacements: &[Replacement]) -> Vec<(usize, usize)> {
+        let deletions: Vec<(usize, usize)> = replacements
+            .iter()
+            .filter(|r| r.length > 0 && r.new_text.is_empty())
+            .filter(|r| {
+                source
+                    .get(r.offset..r.offset + r.length)
+                    .is_some_and(|deleted| deleted.trim().is_empty())
+            })
+            .map(|r| (r.offset, r.offset + r.length))
+            .collect();
+        let is_moot = |r: &Replacement| {
+            let r_end = r.offset + r.length;
+            deletions.iter().any(|&(start, end)| {
+                if r.length == 0 {
+                    start < r.offset && r.offset < end
+                } else {
+                    start <= r.offset && r_end <= end && (r.offset, r_end) != (start, end)
+                }
+            })
+        };
+        let mut by_width: Vec<&Replacement> = replacements.iter().filter(|r| !is_moot(r)).collect();
+        by_width.sort_by_key(|r| r.length);
+        let mut accepted: Vec<(usize, usize)> = Vec::new();
+        for r in by_width {
+            let r_end = r.offset + r.length;
+            if !accepted
+                .iter()
+                .any(|&(a, a_end)| r.offset < a_end && r_end > a)
+            {
+                accepted.push((r.offset, r_end));
+            }
+        }
+        accepted.sort_unstable();
+        accepted
+    }
+
+    #[test]
+    fn sorted_span_selection_matches_the_pairwise_one() {
+        // Seeded so the test is deterministic; short spans on a short source
+        // give many overlaps, shared edges and insertions inside deletions.
+        let mut seed: u64 = 0x5eed;
+        let mut next = |bound: usize| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 33) as usize) % bound
+        };
+        let source = "a  b\n\n  \n\t\ncd  \n \n\nef g\n";
+        for _ in 0..3000 {
+            let count = 1 + next(12);
+            let replacements: Vec<Replacement> = (0..count)
+                .map(|_| {
+                    let offset = next(source.len());
+                    let length = next(6).min(source.len() - offset);
+                    let new_text = if next(2) == 0 { "" } else { "x" }.to_string();
+                    Replacement {
+                        offset,
+                        length,
+                        new_text,
+                    }
+                })
+                .collect();
+            let deletions = WhitespaceDeletions::new(
+                replacements
+                    .iter()
+                    .filter(|r| r.length > 0 && r.new_text.is_empty())
+                    .filter(|r| source[r.offset..r.offset + r.length].trim().is_empty())
+                    .map(|r| (r.offset, r.offset + r.length))
+                    .collect(),
+            );
+            let mut by_width: Vec<&Replacement> = replacements
+                .iter()
+                .filter(|r| !deletions.contains(r.offset, r.offset + r.length))
+                .collect();
+            by_width.sort_by_key(|r| r.length);
+            let mut spans = AcceptedSpans::default();
+            let mut sorted: Vec<(usize, usize)> = by_width
+                .into_iter()
+                .map(|r| (r.offset, r.offset + r.length))
+                .filter(|&(start, end)| spans.insert_unless_overlapping(start, end))
+                .collect();
+            sorted.sort_unstable();
+            assert_eq!(
+                sorted,
+                select_pairwise(source, &replacements),
+                "replacements: {:?}",
+                replacements
+                    .iter()
+                    .map(|r| (r.offset, r.length, r.new_text.as_str()))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
 
     fn make_diag(offset: usize, length: usize, new_text: &str, is_safe: bool) -> Diagnostic {
         Diagnostic {

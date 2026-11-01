@@ -2,7 +2,6 @@ use crate::ast::ScriptFile;
 use crate::config::Config;
 use crate::diagnostic::Diagnostic;
 use crate::lexer::Lexer;
-use crate::parser::Parser;
 use crate::rules;
 use crate::token::{Token, TokenKind};
 
@@ -26,15 +25,14 @@ pub fn lint_source(source: &str, file_path: &str, config: &Config) -> Vec<Diagno
     let source = normalized.as_str();
 
     // Tokenize.
-    let mut lexer = Lexer::new(source);
-    let tokens = lexer.tokenize();
+    let tokens = crate::source_cache::tokens_of(source);
 
     // Check for inline suppression comments.
     let suppressed_lines = parse_suppression_comments(source, &tokens);
 
-    // Parse.
-    let mut parser = Parser::new(&tokens);
-    let members = parser.parse();
+    // Parse. Outside the formatter's cache this is the only owner, so the
+    // members move out without a copy.
+    let members = std::rc::Rc::unwrap_or_clone(crate::source_cache::members_of(source, &tokens));
 
     // Build the script file representation.
     // Use split('\n') instead of lines() to preserve trailing newline detection.
@@ -54,7 +52,7 @@ pub fn lint_source(source: &str, file_path: &str, config: &Config) -> Vec<Diagno
     // characters). Without this, a syntactically broken file would be
     // reported as clean: the worst failure mode for a linter.
     if config.is_rule_enabled("syntax/lex-error") {
-        for token in &tokens {
+        for token in tokens.iter() {
             if let crate::token::TokenKind::Error(ref message) = token.kind {
                 diagnostics.push(Diagnostic::error(
                     "syntax/lex-error",
