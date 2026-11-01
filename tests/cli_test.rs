@@ -361,10 +361,9 @@ fn the_example_config_matches_the_generated_one() {
         .expect("run gdstyle init");
     assert!(status.success());
     let template = std::fs::read_to_string(dir.path().join("gdstyle.toml")).expect("read template");
-    let example = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("gdstyle.example.toml"),
-    )
-    .expect("read gdstyle.example.toml");
+    let example =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("gdstyle.example.toml"))
+            .expect("read gdstyle.example.toml");
     let without_title = |text: &str| text.lines().skip(1).collect::<Vec<_>>().join("\n");
     assert_eq!(
         without_title(&example),
