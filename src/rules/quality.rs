@@ -1,4 +1,5 @@
-use std::collections::{HashMap, HashSet};
+use std::borrow::Cow;
+use std::collections::HashMap;
 
 use crate::ast::{for_each_member, ClassMember, ScriptFile};
 use crate::config::Config;
@@ -33,49 +34,226 @@ fn is_comment_or_blank(trimmed: &str) -> bool {
     trimmed.is_empty() || trimmed.starts_with('#')
 }
 
-/// Return a copy of `line` with string-literal contents and any trailing
-/// comment replaced by spaces, preserving byte length so column offsets
-/// stay valid. Used by the line-based quality rules so a keyword appearing
+/// Return `line` with string-literal contents and any trailing comment
+/// replaced by spaces, keeping the quotes so the structure is still visible.
+/// Every byte of string data or comment becomes one space, so the copy has
+/// the same byte length and a byte offset in it is the same offset in
+/// `line`. Used by the line-based quality rules so a keyword appearing
 /// inside a string literal (`var s = " await "`) isn't mistaken for code.
-fn blank_strings_and_comments(line: &str) -> String {
-    let mut out = String::with_capacity(line.len());
-    let mut in_string: Option<char> = None;
-    let mut escaped = false;
-    for ch in line.chars() {
-        match in_string {
-            Some(quote) => {
-                // Inside a string: blank everything (including the content),
-                // keep the closing quote so structure is still visible.
-                if escaped {
-                    escaped = false;
-                    out.push(' ');
-                } else if ch == '\\' {
-                    escaped = true;
-                    out.push(' ');
-                } else if ch == quote {
-                    in_string = None;
-                    out.push(ch);
-                } else {
-                    out.push(' ');
-                }
-            }
-            None => {
-                if ch == '"' || ch == '\'' {
-                    in_string = Some(ch);
-                    out.push(ch);
-                } else if ch == '#' {
-                    // Rest of the line is a comment, blank it and stop.
-                    for _ in 0..(line.len() - out.len()) {
-                        out.push(' ');
-                    }
-                    break;
-                } else {
-                    out.push(ch);
-                }
-            }
-        }
+/// A line with no quote and no `#` comes back as it is, without a copy.
+///
+/// Literals are read as [`for_each_line_piece`] reads them.
+fn blank_strings_and_comments(line: &str) -> Cow<'_, str> {
+    if !has_string_or_comment(line) {
+        return Cow::Borrowed(line);
     }
-    out
+    let mut out = String::with_capacity(line.len());
+    let blank = |out: &mut String, length: usize| out.extend(std::iter::repeat_n(' ', length));
+    for_each_line_piece(line, |piece| match piece {
+        LinePiece::Code(code) => out.push_str(code),
+        LinePiece::String {
+            opening,
+            data_length,
+            closing,
+        } => {
+            out.push_str(opening);
+            blank(&mut out, data_length);
+            out.push_str(closing);
+        }
+        LinePiece::Comment(comment) => blank(&mut out, comment.len()),
+    });
+    Cow::Owned(out)
+}
+
+/// True when `line` has a quote or a `#`, the only bytes that start a
+/// string literal or a comment. Most lines have neither, and checking for
+/// them is cheaper than splitting the line with [`for_each_line_piece`].
+fn has_string_or_comment(line: &str) -> bool {
+    line.bytes().any(|byte| matches!(byte, b'"' | b'\'' | b'#'))
+}
+
+/// A piece of one line of code, from [`for_each_line_piece`].
+enum LinePiece<'a> {
+    /// Code outside string literals and comments.
+    Code(&'a str),
+    /// A string literal: its opening quotes, the byte length of its data,
+    /// and its closing quotes (empty when it is still open at the line end).
+    String {
+        opening: &'a str,
+        data_length: usize,
+        closing: &'a str,
+    },
+    /// The trailing comment, from its `#` to the end of the line.
+    Comment(&'a str),
+}
+
+/// Split one line of code into code, string literals and the trailing
+/// comment, and pass each piece to `visit` in order. The pieces cover the
+/// whole line.
+///
+/// Literals are read like Godot reads them, one line at a time: `"""` and
+/// `'''` open a triple-quoted literal that only the same three quotes close,
+/// and a backslash keeps the next character from closing the literal, raw
+/// strings (`r"\""`) included. A literal still open at the end of the line
+/// takes the rest of it. Every piece starts and ends at an ASCII byte or at
+/// the end of the line, so slicing there is always on a character boundary.
+fn for_each_line_piece<'a>(line: &'a str, mut visit: impl FnMut(LinePiece<'a>)) {
+    let bytes = line.as_bytes();
+    // `get` rather than indexing: the offsets below are always character
+    // boundaries (see above), so this never falls back, but it can't panic.
+    let slice = |start: usize, end: usize| line.get(start..end).unwrap_or("");
+    let mut code_start = 0;
+    loop {
+        let special = bytes[code_start..]
+            .iter()
+            .position(|byte| matches!(byte, b'"' | b'\'' | b'#'))
+            .map(|position| code_start + position);
+        let Some(piece_start) = special else {
+            if code_start < bytes.len() {
+                visit(LinePiece::Code(slice(code_start, bytes.len())));
+            }
+            return;
+        };
+        if piece_start > code_start {
+            visit(LinePiece::Code(slice(code_start, piece_start)));
+        }
+        let quote = bytes[piece_start];
+        if quote == b'#' {
+            visit(LinePiece::Comment(slice(piece_start, bytes.len())));
+            return;
+        }
+        let delimiter = if bytes[piece_start..].starts_with(&[quote; 3]) {
+            3
+        } else {
+            1
+        };
+        let data_start = piece_start + delimiter;
+        let mut search_from = data_start;
+        // The data ends at the closing delimiter, or at the line end.
+        let (data_end, closing_end) = loop {
+            let Some(position) = bytes
+                .get(search_from..)
+                .and_then(|rest| rest.iter().position(|&byte| byte == quote || byte == b'\\'))
+            else {
+                break (bytes.len(), bytes.len());
+            };
+            let at = search_from + position;
+            if bytes[at] == b'\\' {
+                // The escaped byte may start a multi-byte character; the
+                // search goes on from inside it, which is fine, since it only
+                // stops at ASCII bytes.
+                search_from = at + 2;
+            } else if delimiter == 1 || bytes[at..].starts_with(&[quote; 3]) {
+                break (at, at + delimiter);
+            } else {
+                search_from = at + 1;
+            }
+        };
+        visit(LinePiece::String {
+            opening: slice(piece_start, data_start.min(bytes.len())),
+            data_length: data_end.saturating_sub(data_start),
+            closing: slice(data_end, closing_end),
+        });
+        if closing_end >= bytes.len() {
+            return;
+        }
+        code_start = closing_end;
+    }
+}
+
+/// Returns the net `(`+`[`+`{` minus `)`+`]`+`}` count on a single line,
+/// ignoring delimiters inside string literals and trailing `#` comments.
+/// Used to tell when a statement continues on the next line.
+fn line_bracket_delta(line: &str) -> i32 {
+    let code_delta = |code: &str| -> i32 {
+        code.bytes()
+            .map(|byte| match byte {
+                b'(' | b'[' | b'{' => 1,
+                b')' | b']' | b'}' => -1,
+                _ => 0,
+            })
+            .sum()
+    };
+    if !has_string_or_comment(line) {
+        return code_delta(line);
+    }
+    let mut depth = 0;
+    for_each_line_piece(line, |piece| {
+        if let LinePiece::Code(code) = piece {
+            depth += code_delta(code);
+        }
+    });
+    depth
+}
+
+/// Returns true if `line` ends with a backslash continuation. Trailing
+/// whitespace after the backslash is allowed; a backslash inside a comment
+/// doesn't count. Godot wants the line break right after the backslash, so
+/// one before a comment (`x + \ # note`) is not a continuation either.
+fn ends_with_backslash_continuation(line: &str) -> bool {
+    // Checking the end first saves reading the many lines without one.
+    line.trim_end().ends_with('\\') && strip_trailing_comment(line).trim_end().ends_with('\\')
+}
+
+/// Strip the trailing `# ...` comment from a line, respecting strings.
+fn strip_trailing_comment(line: &str) -> &str {
+    if !line.contains('#') {
+        return line;
+    }
+    let mut code_length = line.len();
+    for_each_line_piece(line, |piece| {
+        if let LinePiece::Comment(comment) = piece {
+            code_length = line.len() - comment.len();
+        }
+    });
+    line.get(..code_length).unwrap_or(line)
+}
+
+/// True when `c` can be part of a GDScript name. Godot names take Unicode
+/// letters and combining marks (`cafe\u{301}`), and GDScript has no non-ASCII
+/// operators, so any non-ASCII character that isn't a space counts.
+fn is_identifier_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || (!c.is_ascii() && !c.is_whitespace())
+}
+
+/// The code of line `index` that is not inside a string spanning lines: the
+/// whole line normally, the part after the literal's end on its closing
+/// line, and nothing on the lines in between.
+fn code_outside_spanning_strings<'a>(
+    file: &'a ScriptFile,
+    string_line_mask: &StringLines,
+    index: usize,
+) -> &'a str {
+    let line = file.lines[index].as_str();
+    if !string_line_mask.is_interior(index) {
+        return line;
+    }
+    string_line_mask
+        .literal_end(index)
+        .and_then(|end| line.get(end..))
+        .unwrap_or("")
+}
+
+/// True when trimmed `line` is a branch header starting with `keyword`
+/// (`if` or `elif`), as in `if x:` or `elif(x):`.
+fn is_branch_header(line: &str, keyword: &str) -> bool {
+    line.strip_prefix(keyword)
+        .is_some_and(|rest| rest.starts_with([' ', '\t', '(']))
+}
+
+/// True when trimmed `line` is an `else` header: `else:` or `else :`.
+fn is_else_header(line: &str) -> bool {
+    line.strip_prefix("else")
+        .is_some_and(|rest| rest.trim_start().starts_with(':'))
+}
+
+/// True when the trimmed line is a `return` statement (`return`, `return x`,
+/// `return(x)`, `return;`, `return-1`), not an identifier that starts with
+/// `return` (`returned = true`, `return_value.clear()`).
+fn is_return_statement(trimmed: &str) -> bool {
+    trimmed
+        .strip_prefix("return")
+        .is_some_and(|rest| !rest.starts_with(is_identifier_char))
 }
 
 // ---------------------------------------------------------------------------
@@ -1047,7 +1225,11 @@ pub fn check_max_inner_classes(
 /// above. After `if a: foo()` / `elif b: return 1`, dropping the `else`
 /// would run its body after `foo()` too. A branch returns when its last
 /// statement is a `return` at the branch's own indent (a nested `return`
-/// can fall through), or when it is a one-line `if x: return y`.
+/// can fall through), or when it is a one-line `if x: return y`. A line like
+/// `print(1); return 2` carries a `return` too.
+///
+/// `string_line_mask` marks the lines inside strings that span lines, so a
+/// `return` or `else` in string data is not read as code.
 ///
 /// One pass over the statements: each open `if` chain sits on a stack by
 /// indent and remembers whether all its branches so far returned. The last
@@ -1109,7 +1291,7 @@ pub fn check_no_else_return(
                     chain.all_branches_return &= branch_returns;
                     chain.body_indent = None;
                     chain.inline_body_returns =
-                        inline_branch_body(statement.text).map(is_return_statement);
+                        inline_branch_body(statement.text).map(has_return_statement);
                 }
             }
             (_, chain_at_indent) => {
@@ -1123,14 +1305,14 @@ pub fn check_no_else_return(
                         all_branches_return: true,
                         body_indent: None,
                         inline_body_returns: inline_branch_body(statement.text)
-                            .map(is_return_statement),
+                            .map(has_return_statement),
                     });
                 }
             }
         }
         previous = Some(StatementSummary {
             indent,
-            is_return: is_return_statement(statement.text),
+            is_return: has_return_statement(statement.text),
         });
     }
 }
@@ -1187,14 +1369,7 @@ fn statements<'a>(
         .filter_map(move |(index, line)| {
             let is_interior = string_line_mask.is_interior(index);
             // Bracket balance of the line's code, leaving out string data.
-            let code = if is_interior {
-                string_line_mask
-                    .literal_end(index)
-                    .and_then(|end| line.get(end..))
-                    .unwrap_or("")
-            } else {
-                line.as_str()
-            };
+            let code = code_outside_spanning_strings(file, string_line_mask, index);
             let trimmed = line.trim();
             if !is_interior && is_comment_or_blank(trimmed) {
                 return None;
@@ -1242,219 +1417,141 @@ struct LambdaBody {
     open_brackets: i32,
 }
 
-/// True when trimmed `line` is a branch header starting with `keyword`
-/// (`if` or `elif`), as in `if x:` or `elif(x):`.
-fn is_branch_header(line: &str, keyword: &str) -> bool {
-    line.strip_prefix(keyword)
-        .is_some_and(|rest| rest.starts_with([' ', '\t', '(']))
-}
-
-/// True when trimmed `line` is an `else` header: `else:` or `else :`.
-fn is_else_header(line: &str) -> bool {
-    line.strip_prefix("else")
-        .is_some_and(|rest| rest.trim_start().starts_with(':'))
-}
-
 /// The statement after the colon of a one-line `if` / `elif` header:
 /// `return 1` for `if x: return 1`. `None` for a header whose body is on the
 /// lines below.
 fn inline_branch_body(header: &str) -> Option<&str> {
-    // Blanking keeps one character per character before any comment, so a
-    // character position in `code` is the same position in `header`.
+    // Blanking keeps every byte offset, so the colon's offset in `code` is
+    // its offset in `header`.
     let code = blank_strings_and_comments(header);
     let mut depth = 0i32;
-    let colon = code.chars().position(|c| {
-        match c {
-            '(' | '[' | '{' => depth += 1,
-            ')' | ']' | '}' => depth -= 1,
+    let colon = code.bytes().position(|byte| {
+        match byte {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
             _ => {}
         }
-        c == ':' && depth == 0
+        byte == b':' && depth == 0
     })?;
-    let (body_start, _) = header.char_indices().nth(colon + 1)?;
-    let body = header[body_start..].trim();
+    let body = header[colon + 1..].trim();
     (!body.is_empty() && !body.starts_with('#')).then_some(body)
 }
 
-/// True when the trimmed line is a `return` statement (`return`, `return x`,
-/// `return(x)`, `return;`, `return-1`), not an identifier that starts with
-/// `return` (`returned = true`, `return_value.clear()`).
-fn is_return_statement(trimmed: &str) -> bool {
-    trimmed
-        .strip_prefix("return")
-        .is_some_and(|rest| !rest.starts_with(is_identifier_char))
+/// True when one of the `;`-separated statements on trimmed line `text` is
+/// a `return`: `return 1`, and also `print(1); return 2`. A line that
+/// carries one always exits there, so `return 1; print(2)` counts too.
+fn has_return_statement(text: &str) -> bool {
+    if is_return_statement(text) {
+        return true;
+    }
+    if !text.contains(';') {
+        return false;
+    }
+    // Blanking keeps every byte offset, so an offset in `code` is the same
+    // offset in `text`.
+    let code = blank_strings_and_comments(text);
+    let mut depth = 0i32;
+    code.bytes().enumerate().any(|(index, byte)| {
+        match byte {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b';' if depth == 0 => return is_return_statement(text[index + 1..].trim_start()),
+            _ => {}
+        }
+        false
+    })
+}
+
+/// The number of `return` statements on `line`: a line that starts with
+/// one, and also the ones after a `;` (`print(1); return 2`) or after the
+/// colon of a one-line header (`1: return "a"`, `if x: return 1`).
+/// `return` is a reserved word, so outside strings and comments every
+/// `return` that is a whole word is a statement.
+fn count_returns(line: &str) -> usize {
+    if !line.contains("return") {
+        return 0;
+    }
+    let code = blank_strings_and_comments(line);
+    code.match_indices("return")
+        .filter(|&(index, keyword)| {
+            // A `.`, `$` or `%` before it makes it a member or node name.
+            let is_word_start = !code[..index]
+                .ends_with(|c: char| is_identifier_char(c) || matches!(c, '.' | '$' | '%'));
+            let is_word_end = !code[index + keyword.len()..].starts_with(is_identifier_char);
+            is_word_start && is_word_end
+        })
+        .count()
 }
 
 // ---------------------------------------------------------------------------
 // New rule 13: unreachable-code
 // ---------------------------------------------------------------------------
 
-/// Returns the net `(`+`[`+`{` minus `)`+`]`+`}` count on a single line,
-/// ignoring delimiters inside string literals and trailing `#` comments.
-/// Used by `check_unreachable_code` to skip continuation lines of a
-/// multi-line `return`/`break`/`continue` statement.
-fn line_bracket_delta(line: &str) -> i32 {
-    // Every byte that matters here is ASCII, and no byte of a multi-byte
-    // UTF-8 character is, so scanning bytes reads the same as scanning chars.
-    let bytes = line.as_bytes();
-    let is_triple_at = |index: usize, quote: u8| bytes[index..].starts_with(&[quote; 3]);
-    let mut depth: i32 = 0;
-    // The quote byte of the current string, and whether it is a `"""` one.
-    let mut in_string: Option<(u8, bool)> = None;
-    let mut index = 0;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        index += 1;
-        // Inside a string literal: only the matching quote ends it (three of
-        // them for a `"""` string), and a backslash escapes the next byte.
-        if let Some((quote, is_triple)) = in_string {
-            if byte == b'\\' {
-                index += 1;
-            } else if byte == quote && !is_triple {
-                in_string = None;
-            } else if byte == quote && is_triple_at(index - 1, quote) {
-                index += 2;
-                in_string = None;
-            }
-            continue;
-        }
-        match byte {
-            b'#' => break, // rest of line is a comment
-            b'"' | b'\'' => {
-                // `"""` opens one string that only `"""` closes, so
-                // `"""say "(" here"""` holds no bracket.
-                let is_triple = is_triple_at(index - 1, byte);
-                if is_triple {
-                    index += 2;
-                }
-                in_string = Some((byte, is_triple));
-            }
-            b'(' | b'[' | b'{' => depth += 1,
-            b')' | b']' | b'}' => depth -= 1,
-            _ => {}
-        }
-    }
-    depth
-}
-
-/// Returns true if `line` ends with a backslash continuation (any trailing
-/// whitespace after the backslash is allowed but a backslash inside a
-/// string or before a comment doesn't count).
-fn ends_with_backslash_continuation(line: &str) -> bool {
-    // Strip trailing comment first.
-    let no_comment = strip_trailing_comment(line);
-    no_comment.trim_end().ends_with('\\')
-}
-
-/// Strip the trailing `# ...` comment from a line, respecting strings.
-fn strip_trailing_comment(line: &str) -> &str {
-    let mut in_string: Option<char> = None;
-    let bytes = line.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        let ch = bytes[i] as char;
-        if let Some(q) = in_string {
-            if ch == '\\' {
-                i += 2;
-                continue;
-            }
-            if ch == q {
-                in_string = None;
-            }
-            i += 1;
-            continue;
-        }
-        match ch {
-            '"' | '\'' => in_string = Some(ch),
-            '#' => return &line[..i],
-            _ => {}
-        }
-        i += 1;
-    }
-    line
-}
-
 /// Warn about code that appears after `return`, `break`, or `continue` at the
 /// same indentation level within a block.
+///
+/// `string_line_mask` marks the lines inside strings that span lines: they
+/// are string data, never a terminator or unreachable code, and only the
+/// code after the literal's end on its closing line counts.
+///
+/// One pass over the lines. Each terminator waits on a stack by indent: a
+/// deeper line leaves it waiting, a shallower one ends its block, and the
+/// first statement at its own indent is unreachable. The terminator's own
+/// continuation lines (`return max(` / `1,` / `)`) are part of it, and a
+/// line that only closes brackets opened earlier (the `)` after a lambda's
+/// `return`) is not a new statement.
 pub fn check_unreachable_code(
     string_line_mask: &StringLines,
     file: &ScriptFile,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let mut reported: HashSet<usize> = HashSet::new();
-
-    let mut i = 0;
-    while i < file.lines.len() {
-        let line = &file.lines[i];
+    // Indents of the terminators whose block is still open, innermost last.
+    let mut waiting_indents: Vec<usize> = Vec::new();
+    // Inside a terminator statement that spans lines: its bracket depth.
+    let mut terminator_depth = 0i32;
+    let mut is_in_terminator = false;
+    let mut previous_continues = false;
+    for (index, line) in file.lines.iter().enumerate() {
+        let is_interior = string_line_mask.is_interior(index);
+        let code = code_outside_spanning_strings(file, string_line_mask, index);
+        if is_in_terminator {
+            terminator_depth += line_bracket_delta(code);
+            is_in_terminator = terminator_depth > 0 || ends_with_backslash_continuation(code);
+            continue;
+        }
+        let continues_previous = previous_continues;
+        previous_continues = ends_with_backslash_continuation(code);
         let trimmed = line.trim();
-        let is_terminator =
-            is_return_statement(trimmed) || trimmed == "break" || trimmed == "continue";
-        // A `return` line inside a string that spans lines is data.
-        if !is_terminator || string_line_mask.is_interior(i) {
-            i += 1;
+        if is_interior
+            || continues_previous
+            || is_comment_or_blank(trimmed)
+            || trimmed.starts_with([')', ']', '}'])
+        {
             continue;
         }
 
-        let stmt_indent = indent_level(line);
-
-        // The terminator statement can itself span multiple lines via
-        // unclosed brackets (`return floori(\n\t\t1.2\n\t)`) or a
-        // backslash continuation. Walk forward through every line that
-        // is logically part of the same statement before scanning for
-        // unreachable code. Without this, the closing `)` of a
-        // multi-line return is at the same indent as `return` and gets
-        // flagged as "unreachable" even though it's the same statement.
-        let mut depth = line_bracket_delta(line);
-        let mut prev_backslash = ends_with_backslash_continuation(line);
-        let mut stmt_end = i;
-        while (depth > 0 || prev_backslash) && stmt_end + 1 < file.lines.len() {
-            stmt_end += 1;
-            let cont = &file.lines[stmt_end];
-            depth += line_bracket_delta(cont);
-            prev_backslash = ends_with_backslash_continuation(cont);
+        let indent = indent_level(line);
+        while waiting_indents
+            .last()
+            .is_some_and(|&waiting| waiting > indent)
+        {
+            waiting_indents.pop();
+        }
+        if waiting_indents.last() == Some(&indent) {
+            waiting_indents.pop();
+            diagnostics.push(Diagnostic::warning(
+                "quality/unreachable-code",
+                "unreachable code".to_string(),
+                Span::new(index + 1, 1, 0, 0),
+                &file.path,
+            ));
         }
 
-        // Now scan from the line AFTER the statement ends.
-        for j in (stmt_end + 1)..file.lines.len() {
-            let next = &file.lines[j];
-            let next_trimmed = next.trim();
-
-            if next_trimmed.is_empty() || next_trimmed.starts_with('#') {
-                continue;
-            }
-
-            let next_indent = indent_level(next);
-
-            if next_indent < stmt_indent {
-                // We've left the block
-                break;
-            }
-
-            if next_indent == stmt_indent && !reported.contains(&j) {
-                // This is at the same level, it's unreachable
-                // But skip if it's an elif/else/except (those are sibling branches)
-                if next_trimmed.starts_with("elif ")
-                    || next_trimmed.starts_with("elif(")
-                    || next_trimmed == "else:"
-                    || next_trimmed.starts_with("else:")
-                {
-                    break;
-                }
-                reported.insert(j);
-                diagnostics.push(Diagnostic::warning(
-                    "quality/unreachable-code",
-                    "unreachable code".to_string(),
-                    Span::new(j + 1, 1, 0, 0),
-                    &file.path,
-                ));
-                break; // One diagnostic per unreachable block
-            }
+        if is_return_statement(trimmed) || trimmed == "break" || trimmed == "continue" {
+            waiting_indents.push(indent);
+            terminator_depth = line_bracket_delta(line);
+            is_in_terminator = terminator_depth > 0 || previous_continues;
         }
-
-        // Advance past the (possibly multi-line) statement we just
-        // analysed so we don't re-enter the same return on continuation
-        // lines that start with `return` substring.
-        i = stmt_end + 1;
     }
 }
 
@@ -1559,6 +1656,10 @@ pub fn check_allocation_in_loop(file: &ScriptFile, diagnostics: &mut Vec<Diagnos
 
 /// Warn about node lookups (`get_node()`, `$`, `%`) in `_process` and
 /// `_physics_process` methods. These should be cached in `_ready` or `@onready`.
+///
+/// `string_line_mask` marks the lines inside strings that span lines: their
+/// string data is skipped, and on a literal's closing line only the code
+/// after it is checked (`""" + str($Node)`).
 pub fn check_process_get_node(
     string_line_mask: &StringLines,
     file: &ScriptFile,
@@ -1588,14 +1689,14 @@ fn check_process_get_node_recursive(
         }
         let range = function_body_range(span, *body_line_count, file.lines.len());
         for idx in range {
-            // Lines inside a string that spans lines are all data.
-            if string_line_mask.is_interior(idx) {
+            let line = code_outside_spanning_strings(file, string_line_mask, idx);
+            if line.is_empty() {
                 continue;
             }
             // Match against a string-blanked copy so a `%d` placeholder or a
             // `$` inside a string literal isn't read as a node lookup. The
             // quotes stay, so `%"Health Bar"` is still one.
-            let code = blank_strings_and_comments(&file.lines[idx]);
+            let code = blank_strings_and_comments(line);
             let has_node_ref = calls_function(&code, "get_node")
                 || calls_function(&code, "get_node_or_null")
                 || code.contains('$')
@@ -1615,41 +1716,37 @@ fn check_process_get_node_recursive(
     });
 }
 
-/// True when `c` can be part of a GDScript name. Godot names take Unicode
-/// letters and combining marks (`cafe\u{301}`), and GDScript has no non-ASCII
-/// operators, so any non-ASCII character that isn't a space counts.
-fn is_identifier_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_' || (!c.is_ascii() && !c.is_whitespace())
-}
-
 /// True when `code` calls the function `name`: `name(` with no identifier
 /// character right before it, so `my_get_node(` is not `get_node(`. A method
-/// call like `owner.get_node(` counts.
+/// call like `owner.get_node(` counts, and so does a space before the
+/// parenthesis (`get_node ("A")`).
 fn calls_function(code: &str, name: &str) -> bool {
     code.match_indices(name).any(|(index, _)| {
         let is_word_start = !code[..index].ends_with(is_identifier_char);
-        is_word_start && code[index + name.len()..].starts_with('(')
+        is_word_start
+            && code[index + name.len()..]
+                .trim_start_matches([' ', '\t'])
+                .starts_with('(')
     })
 }
 
 /// Check if a line contains a `%UniqueNode` reference, distinguishing it from
 /// the modulo and format operator.
 ///
-/// A unique-node reference is `%` immediately followed by an identifier
-/// character or a quote (`%Player`, `%"Health Bar"`), with no space. That
-/// alone still reads `"%s"%name` and `a %b` as lookups, so the `%` must also
-/// not follow an operand: like Godot's parser, a `%` after a value is the
-/// binary operator. Expects a line from `blank_strings_and_comments`, so the
-/// quotes before an operator `%` are still there. Only the line itself is
-/// seen, so a `%name` that continues the previous line (`"%d" \` then
-/// `%count`) still reads as a lookup.
+/// A unique-node reference is `%` immediately followed by a character that
+/// starts a name or a quote (`%Player`, `%Ünique`, `%"Health Bar"`), with no
+/// space. That alone still reads `"%s"%name` and `a %b` as lookups, so the
+/// `%` must also not follow an operand: like Godot's parser, a `%` after a
+/// value is the binary operator. Expects a line from
+/// `blank_strings_and_comments`, so the quotes before an operator `%` are
+/// still there. Only the line itself is seen, so a `%name` that continues the
+/// previous line (`"%d" \` then `%count`) still reads as a lookup.
 fn has_unique_node_ref(line: &str) -> bool {
-    let bytes = line.as_bytes();
     for (i, _) in line.match_indices('%') {
-        let starts_name = matches!(
-            bytes.get(i + 1),
-            Some(&c) if c.is_ascii_alphabetic() || c == b'_' || c == b'"' || c == b'\''
-        );
+        // A digit after `%` is a number, so `%5` is a modulo, not a name.
+        let starts_name = line[i + 1..].chars().next().is_some_and(|c| {
+            (is_identifier_char(c) && !c.is_ascii_digit()) || c == '"' || c == '\''
+        });
         if starts_name && !follows_operand(&line[..i]) {
             return true;
         }
@@ -1770,7 +1867,12 @@ fn check_nesting_recursive(
 // New rule 18: max-returns
 // ---------------------------------------------------------------------------
 
-/// Warn when a function has too many return statements.
+/// Warn when a function has too many return statements. Every `return` on a
+/// line counts, including one-line ones like `1: return "a"` and
+/// `print(1); return 2`.
+///
+/// `string_line_mask` marks the lines inside strings that span lines: their
+/// string data is not code, so a `return` there is not counted.
 pub fn check_max_returns(
     string_line_mask: &StringLines,
     file: &ScriptFile,
@@ -1798,11 +1900,11 @@ fn check_returns_recursive(
             return;
         };
         let range = function_body_range(span, *body_line_count, file.lines.len());
-        // Lines inside a string that spans lines are data, not returns.
-        let count = range
-            .filter(|&index| !string_line_mask.is_interior(index))
-            .filter(|&index| is_return_statement(file.lines[index].trim()))
-            .count();
+        let count: usize = range
+            .map(|index| {
+                count_returns(code_outside_spanning_strings(file, string_line_mask, index))
+            })
+            .sum();
 
         if count > config.max_returns {
             diagnostics.push(Diagnostic::warning(
@@ -1846,13 +1948,11 @@ fn check_branches_recursive(
         let range = function_body_range(span, *body_line_count, file.lines.len());
         let count = file.lines[range]
             .iter()
-            .filter(|l| {
-                let t = l.trim();
-                t.starts_with("if ")
-                    || t.starts_with("if(")
-                    || t.starts_with("elif ")
-                    || t.starts_with("elif(")
-                    || t.starts_with("match ")
+            .filter(|line| {
+                let trimmed = line.trim();
+                is_branch_header(trimmed, "if")
+                    || is_branch_header(trimmed, "elif")
+                    || is_branch_header(trimmed, "match")
             })
             .count();
 
@@ -1926,12 +2026,12 @@ fn check_local_vars_recursive(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::*;
 
     /// The string-line map of a hand-built file that holds no strings.
     fn no_strings(file: &ScriptFile) -> StringLines {
         StringLines::new(&[], file.lines.len())
     }
-    use crate::ast::*;
 
     fn span(line: usize) -> Span {
         Span::new(line, 1, 0, 0)
@@ -2645,5 +2745,67 @@ mod tests {
         check_max_inner_classes(&file, &Config::default(), &mut diags);
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("6 inner classes"), "{diags:?}");
+    }
+
+    // --- Line helpers ---
+
+    #[test]
+    fn blank_strings_and_comments_keeps_every_byte_offset() {
+        let line = "var s = \"é日\" + x  # ñ";
+        let blanked = blank_strings_and_comments(line);
+        assert_eq!(blanked.len(), line.len());
+        assert_eq!(blanked, "var s = \"     \" + x      ");
+        assert!(matches!(
+            blank_strings_and_comments("var x = 1"),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn blank_strings_and_comments_reads_triple_quotes_on_one_line() {
+        assert_eq!(
+            blank_strings_and_comments("\"\"\"a\"b\"\"\" + $Foo"),
+            "\"\"\"   \"\"\" + $Foo"
+        );
+        assert_eq!(
+            blank_strings_and_comments("'''it's''' + $Foo"),
+            "'''    ''' + $Foo"
+        );
+        // Still open at the end of the line: the rest is string data.
+        assert_eq!(blank_strings_and_comments("x(\"\"\"a)"), "x(\"\"\"  ");
+    }
+
+    #[test]
+    fn blank_strings_and_comments_lets_a_backslash_hold_the_quote() {
+        // Like Godot, a backslash keeps the quote from closing the string,
+        // raw strings included, so `r"C:\"` is still open.
+        assert_eq!(
+            blank_strings_and_comments("r\"C:\\\" + $Foo"),
+            "r\"           "
+        );
+        assert_eq!(
+            blank_strings_and_comments("\"a\\\\\" + $Foo"),
+            "\"   \" + $Foo"
+        );
+    }
+
+    #[test]
+    fn line_helpers_skip_strings_and_comments() {
+        assert_eq!(line_bracket_delta("foo(\"(\", [1]  # ("), 1);
+        assert_eq!(line_bracket_delta("\"\"\"a\"(\"\"\" + (1"), 1);
+        assert_eq!(strip_trailing_comment("x = \"#\" # c"), "x = \"#\" ");
+        assert!(ends_with_backslash_continuation("x = 1 + \\  "));
+        assert!(!ends_with_backslash_continuation("x = 1  # C:\\"));
+        assert!(!ends_with_backslash_continuation("x = 1 + \\ # note"));
+    }
+
+    #[test]
+    fn return_helpers_find_every_return_statement() {
+        assert!(has_return_statement("print(1); return 2"));
+        assert!(has_return_statement("return 1; print(2)"));
+        assert!(!has_return_statement("print(\"; return\"); pass"));
+        assert_eq!(count_returns("1: return \"return\"  # return"), 1);
+        assert_eq!(count_returns("if x: return 1; else_return()"), 1);
+        assert_eq!(count_returns("x.return_value; y.return"), 0);
     }
 }

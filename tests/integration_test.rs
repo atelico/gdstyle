@@ -3975,6 +3975,32 @@ func f(a: bool, b: bool) -> int:
 }
 
 #[test]
+fn quality_no_else_return_sees_a_return_after_a_semicolon() {
+    let source = "\
+func f(x: bool) -> int:
+\tif x:
+\t\tprint(1); return 2
+\telse:
+\t\treturn 3
+
+
+func g(x: bool) -> int:
+\tif x: print(1); return 2
+\telse:
+\t\treturn 3
+
+
+func h(x: bool) -> int:
+\tif x:
+\t\tprint(\"a; return 1\"); pass
+\telse:
+\t\treturn 3
+\treturn 0
+";
+    assert_eq!(flagged_lines(source, "quality/no-else-return"), vec![4, 10]);
+}
+
+#[test]
 fn fmt_keeps_a_warning_ignore_restore_below_its_region() {
     // The restore closes the region above it. Taken as the head of `const C`,
     // it moved with the constant to above the region's start.
@@ -4062,6 +4088,43 @@ fn keyword_names_are_reported_without_a_rename_fix() {
 }
 
 #[test]
+fn keyword_names_get_no_rename_fix_from_any_naming_rule() {
+    // `when` and `match` lex as keywords where they are used, so a rename of
+    // the declaration would leave `print(when)` and `match.emit()` behind.
+    let source = "\
+extends Node
+
+const when = 1
+signal match
+
+
+func f() -> void:
+\tprint(when)
+\tmatch.emit()
+";
+    let diagnostics = linter::lint_source(source, "test.gd", &default_config());
+    let keyword_diagnostics: Vec<&Diagnostic> = diagnostics
+        .iter()
+        .filter(|d| {
+            d.rule == "naming/constant-name-screaming-case" || d.rule == "naming/signal-past-tense"
+        })
+        .collect();
+    assert_eq!(keyword_diagnostics.len(), 2, "{diagnostics:?}");
+    assert!(keyword_diagnostics.iter().all(|d| d.fix.is_none()));
+    let fixed = fixer::apply_fixes(source, &diagnostics, false);
+    assert!(
+        fixed.contains("const when = 1") && fixed.contains("signal match"),
+        "{fixed}"
+    );
+
+    // Other names keep their rename fix.
+    let source = "const speed = 1\nsignal health_change\n";
+    let diagnostics = linter::lint_source(source, "test.gd", &default_config());
+    let fixed = fixer::apply_fixes(source, &diagnostics, false);
+    assert_eq!(fixed, "const SPEED = 1\nsignal health_changed\n");
+}
+
+#[test]
 fn return_rules_skip_strings_that_span_lines() {
     // A `return` line inside a `"""` string is data: nothing after it is
     // unreachable and it is not one of the function's returns.
@@ -4093,6 +4156,23 @@ fn naming_private_underscore_prefix_allows_export_storage() {
     assert_eq!(
         flagged_lines(source, "naming/private-underscore-prefix"),
         vec![2]
+    );
+}
+
+#[test]
+fn naming_private_underscore_prefix_checks_inner_classes() {
+    let source = "\
+extends Node
+
+
+class Inner:
+\t@export var _hidden := 1
+\t@export_storage var _stored := 1
+\tvar _plain := 1
+";
+    assert_eq!(
+        flagged_lines(source, "naming/private-underscore-prefix"),
+        vec![5]
     );
 }
 
@@ -6342,6 +6422,84 @@ func foo(x: int) -> int:
     );
 }
 
+#[test]
+fn quality_unreachable_skips_a_returned_string_that_spans_lines() {
+    // The lines after `return """` are the string's data, not code.
+    let source = "\
+func help() -> String:
+\treturn \"\"\"
+\tSome help text.
+\t\"\"\"
+";
+    assert!(flagged_lines(source, "quality/unreachable-code").is_empty());
+}
+
+#[test]
+fn quality_unreachable_reads_on_after_a_return_whose_string_spans_lines() {
+    // The `(` inside the string data must not keep the `return` open: the
+    // statement ends at `""")`, and the rest of the file is still checked.
+    let source = "\
+func g() -> String:
+\treturn tr(\"\"\"
+\tline (
+\t\"\"\")
+\tprint(1)
+
+
+func h() -> int:
+\treturn 1
+\tprint(2)
+";
+    assert_eq!(
+        flagged_lines(source, "quality/unreachable-code"),
+        vec![5, 10]
+    );
+}
+
+#[test]
+fn quality_unreachable_lambda_closing_bracket_not_flagged() {
+    // The `)` closes the call the lambda sits in; it is not a statement
+    // after the lambda's `return`. Code after that `return` inside the
+    // lambda still is.
+    let source = "\
+func f(arr: Array) -> Array:
+\tvar doubled := arr.map(func(v):
+\t\treturn v * 2
+\t\t)
+\tvar tripled := arr.map(func(v):
+\t\treturn v * 3
+\t\tprint(v)
+\t\t)
+\treturn doubled + tripled
+";
+    assert_eq!(flagged_lines(source, "quality/unreachable-code"), vec![7]);
+}
+
+#[test]
+fn quality_unreachable_sibling_branches_after_return_not_flagged() {
+    // `elif`, `else` and the next `match` arm sit one level out from the
+    // `return` they follow, so they end its block.
+    let source = "\
+func f(x: int) -> int:
+\tif x == 1:
+\t\treturn 1
+\telif\tx == 2:
+\t\treturn 2
+\telse :
+\t\treturn 3
+
+
+func g(x: int) -> int:
+\tmatch x:
+\t\t1:
+\t\t\treturn 1
+\t\t2:
+\t\t\treturn 2
+\treturn 0
+";
+    assert!(flagged_lines(source, "quality/unreachable-code").is_empty());
+}
+
 // --- await-in-loop ---
 
 #[test]
@@ -6587,6 +6745,51 @@ func _physics_process(_delta: float) -> void:
     assert_eq!(lines, vec![5, 6, 7, 8]);
 }
 
+#[test]
+fn quality_process_get_node_reads_code_after_a_string_that_spans_lines() {
+    // `$NotNode` is string data; `$Real` follows the closing `"""`.
+    let source = "\
+func _process(_delta: float) -> void:
+\tvar t := \"\"\"
+\t$NotNode
+\t\"\"\" + str($Real)
+\tvar u := \"\"\"
+\t$NotNode
+\t\"\"\" + str(1)
+";
+    assert_eq!(flagged_lines(source, "quality/process-get-node"), vec![4]);
+}
+
+#[test]
+fn quality_process_get_node_reads_one_line_triple_quoted_strings() {
+    let source = "\
+func _process(_delta: float) -> void:
+\tvar f := \"\"\"a\"b\"\"\" + str($Foo)
+\tvar g := \"\"\"a\"$b\"\"\" + str(1)
+\tvar h := '''it's''' + str($Bar)
+";
+    assert_eq!(
+        flagged_lines(source, "quality/process-get-node"),
+        vec![2, 4]
+    );
+}
+
+#[test]
+fn quality_process_get_node_sees_non_ascii_unique_names_and_spaced_calls() {
+    let source = "\
+func _process(_delta: float) -> void:
+\tvar a := (%Ünique)
+\tvar b := get_node (\"A\")
+\tvar c := \"%Ünique\"
+\tvar d := my_get_node (\"A\")
+\tvar e := 名前 %Node
+";
+    assert_eq!(
+        flagged_lines(source, "quality/process-get-node"),
+        vec![2, 3]
+    );
+}
+
 // --- unnecessary-pass ---
 
 #[test]
@@ -6811,6 +7014,31 @@ func foo(x: int) -> int:
     );
 }
 
+#[test]
+fn quality_max_returns_counts_inline_and_semicolon_returns() {
+    let config = Config {
+        max_returns: 2,
+        ..Config::default()
+    };
+    let flagged = |source: &str| {
+        linter::lint_source(source, "test.gd", &config)
+            .iter()
+            .any(|d| d.rule == "quality/max-returns")
+    };
+    // Three returns, two of them after a match arm's colon.
+    assert!(flagged(
+        "func f(x: int) -> String:\n\tmatch x:\n\t\t1: return \"a\"\n\t\t2: return \"b\"\n\treturn \"\"\n"
+    ));
+    // Three returns, one after a `;` and one after a one-line `if`.
+    assert!(flagged(
+        "func f(x: int) -> int:\n\tif x == 1: return 1\n\tif x == 2:\n\t\tprint(1); return 2\n\treturn 3\n"
+    ));
+    // One return; the rest are strings, comments and other names.
+    assert!(!flagged(
+        "func f(x: Array) -> int:\n\tvar s := \"return; return\"  # return\n\tx.return_value.clear()\n\tvar returned := x.return\n\treturn 1\n"
+    ));
+}
+
 // --- max-branches ---
 
 #[test]
@@ -6827,6 +7055,29 @@ func foo(x: int) -> void:
     assert!(
         !diagnostics.iter().any(|d| d.rule == "quality/max-branches"),
         "2 branches should be within default limit of 8"
+    );
+}
+
+#[test]
+fn quality_max_branches_counts_headers_followed_by_a_tab() {
+    let config = Config {
+        max_branches: 2,
+        ..Config::default()
+    };
+    let count_flagged = |source: &str| {
+        linter::lint_source(source, "test.gd", &config)
+            .iter()
+            .filter(|d| d.rule == "quality/max-branches")
+            .count()
+    };
+    assert_eq!(
+        count_flagged("func f(x: int) -> void:\n\tif x == 1:\n\t\tpass\n\telif\tx == 2:\n\t\tpass\n\telif(x == 3):\n\t\tpass\n"),
+        1
+    );
+    // Names that start with a branch keyword are not branches.
+    assert_eq!(
+        count_flagged("func f(x: int) -> void:\n\tif x == 1:\n\t\tpass\n\tif_count = 1\n\telifant = 2\n\tmatcher.run()\n"),
+        0
     );
 }
 
