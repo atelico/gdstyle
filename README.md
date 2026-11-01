@@ -263,7 +263,7 @@ A comment line longer than `max_line_length` is wrapped at word boundaries. `com
 
 In `"paragraph"` mode a paragraph is the long line plus the comment lines right below it with the same indent and the same `#` or `##` marker. It ends at an empty comment line, a list item (`- `, `* `, `1. `), a tag like `TODO:`, or a line that looks like code or a table. Lines above the long one are never touched.
 
-In both wrapping modes, a long list item, nested ones included, wraps under its text. Lines that look like commented-out code or a table, lines with a URL or a `gdstyle:` directive, and the contents of a `[codeblock]` in a doc comment are never wrapped; `format/max-line-length` still reports them. A wrapped line never starts with `gdstyle:`, so wrapping can't create a suppression comment.
+In both wrapping modes, a long list item, nested ones included, wraps under its text. Lines that look like commented-out code or a table, lines with a URL or a `gdstyle:` directive, and the contents of a `[codeblock]` in a doc comment are never wrapped; `format/max-line-length` still reports them. A wrapped line never starts with `gdstyle:`, so wrapping can't create a suppression comment, and in a `##` doc comment it never starts with an `@` word, so it can't create a doc tag like `@deprecated`. A table row may also start with `|` (`# | name | type |`).
 
 With the default `max_line_length = 100`, this comment's first line is 102 columns:
 
