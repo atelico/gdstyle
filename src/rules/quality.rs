@@ -1169,12 +1169,18 @@ struct Statement<'a> {
 /// statement continues over the next lines while a bracket is open, a line
 /// ends with a backslash, or a string spans lines, so `return max(` / `1,` /
 /// `)` is one statement starting at the `return`.
+///
+/// A multi-line lambda is the exception: inside its brackets, the lines of
+/// its body (`connect(func():` / `if a:` / `return` / `)`) are statements of
+/// their own, as Godot reads them.
 fn statements<'a>(
     file: &'a ScriptFile,
     string_line_mask: &'a StringLines,
 ) -> impl Iterator<Item = Statement<'a>> + 'a {
     let mut open_brackets = 0i32;
     let mut continues_previous = false;
+    // Lambda bodies open inside brackets, innermost last.
+    let mut lambda_bodies: Vec<LambdaBody> = Vec::new();
     file.lines
         .iter()
         .enumerate()
@@ -1189,19 +1195,51 @@ fn statements<'a>(
             } else {
                 line.as_str()
             };
-            let starts_statement = !is_interior && !continues_previous && open_brackets == 0;
             let trimmed = line.trim();
             if !is_interior && is_comment_or_blank(trimmed) {
                 return None;
             }
+            let indent = indent_level(line);
+            if !is_interior {
+                // A line back at the header's indent (the closing `)`) or
+                // shallower has left the body.
+                while lambda_bodies
+                    .last()
+                    .is_some_and(|body| indent <= body.header_indent)
+                {
+                    lambda_bodies.pop();
+                }
+            }
+            let is_in_lambda_body = lambda_bodies
+                .last()
+                .is_some_and(|body| body.open_brackets == open_brackets);
+            let starts_statement =
+                !is_interior && !continues_previous && (open_brackets == 0 || is_in_lambda_body);
             open_brackets = (open_brackets + line_bracket_delta(code)).max(0);
             continues_previous = ends_with_backslash_continuation(code);
-            starts_statement.then(|| Statement {
+            lambda_bodies.retain(|body| body.open_brackets <= open_brackets);
+            // A line inside brackets that ends with a colon opens a block:
+            // a lambda's body, or a block nested in one.
+            if open_brackets > 0 && strip_trailing_comment(code).trim_end().ends_with(':') {
+                lambda_bodies.push(LambdaBody {
+                    header_indent: indent,
+                    open_brackets,
+                });
+            }
+            starts_statement.then_some(Statement {
                 line: index,
-                indent: indent_level(line),
+                indent,
                 text: trimmed,
             })
         })
+}
+
+/// A block opened inside brackets, for [`statements`].
+struct LambdaBody {
+    /// Indent of the line whose colon opened it.
+    header_indent: usize,
+    /// Brackets open at that colon; a body line at this depth is a statement.
+    open_brackets: i32,
 }
 
 /// True when trimmed `line` is a branch header starting with `keyword`
@@ -1258,23 +1296,39 @@ fn is_return_statement(trimmed: &str) -> bool {
 fn line_bracket_delta(line: &str) -> i32 {
     // Every byte that matters here is ASCII, and no byte of a multi-byte
     // UTF-8 character is, so scanning bytes reads the same as scanning chars.
+    let bytes = line.as_bytes();
+    let is_triple_at = |index: usize, quote: u8| bytes[index..].starts_with(&[quote; 3]);
     let mut depth: i32 = 0;
-    let mut bytes = line.bytes();
-    let mut in_string: Option<u8> = None; // b'\'' or b'"' of the current string
-    while let Some(byte) = bytes.next() {
-        // Inside a string literal: only the matching quote ends it, and
-        // a backslash escapes the next byte.
-        if let Some(quote) = in_string {
+    // The quote byte of the current string, and whether it is a `"""` one.
+    let mut in_string: Option<(u8, bool)> = None;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        index += 1;
+        // Inside a string literal: only the matching quote ends it (three of
+        // them for a `"""` string), and a backslash escapes the next byte.
+        if let Some((quote, is_triple)) = in_string {
             if byte == b'\\' {
-                bytes.next();
-            } else if byte == quote {
+                index += 1;
+            } else if byte == quote && !is_triple {
+                in_string = None;
+            } else if byte == quote && is_triple_at(index - 1, quote) {
+                index += 2;
                 in_string = None;
             }
             continue;
         }
         match byte {
             b'#' => break, // rest of line is a comment
-            b'"' | b'\'' => in_string = Some(byte),
+            b'"' | b'\'' => {
+                // `"""` opens one string that only `"""` closes, so
+                // `"""say "(" here"""` holds no bracket.
+                let is_triple = is_triple_at(index - 1, byte);
+                if is_triple {
+                    index += 2;
+                }
+                in_string = Some((byte, is_triple));
+            }
             b'(' | b'[' | b'{' => depth += 1,
             b')' | b']' | b'}' => depth -= 1,
             _ => {}

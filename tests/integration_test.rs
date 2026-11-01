@@ -8240,3 +8240,48 @@ fn enum_fix_keeps_crlf_line_endings() {
         "extends Node\r\n\r\nenum E {\r\n\tX,\r\n\tY,\r\n} # note\r\n"
     );
 }
+
+#[test]
+fn quality_no_else_return_reads_chains_inside_multi_line_lambdas() {
+    // A lambda's body sits inside the call's brackets, but its lines are
+    // statements of their own.
+    let source = "\
+func _ready():
+\tbutton.pressed.connect(func():
+\t\tif visible:
+\t\t\treturn
+\t\telse:
+\t\t\thide()
+\t)
+\tvar handlers = [func(a):
+\t\tif a:
+\t\t\treturn 1
+\t\telse:
+\t\t\treturn 2
+\t]
+";
+    assert_eq!(flagged_lines(source, "quality/no-else-return"), vec![5, 11]);
+}
+
+#[test]
+fn quality_rules_read_a_bracket_inside_a_triple_quoted_string_as_text() {
+    // `"""Press "(" to open"""` holds no open bracket, so the rules after
+    // it still see each statement.
+    let source = "\
+const HELP = \"\"\"Press \"(\" to open\"\"\"
+
+
+func f(a):
+\tif a:
+\t\treturn 1
+\telse:
+\t\treturn 2
+
+
+func g():
+\treturn \"\"\"a \"(\" b\"\"\"
+\tprint(1)
+";
+    assert_eq!(flagged_lines(source, "quality/no-else-return"), vec![7]);
+    assert_eq!(flagged_lines(source, "quality/unreachable-code"), vec![13]);
+}

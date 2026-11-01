@@ -117,7 +117,8 @@ jobs:
       # The demo files are small, so a pass that grows with the square of the
       # file length hides there. Large generated files make it stand out.
       - name: Compare on large files
-        if: github.event_name == 'pull_request'
+        # Also after a failed demo comparison: both tables help then.
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
         env:
           PERF_ALLOW_REGRESSION: ${{ contains(github.event.pull_request.labels.*.name, 'perf-regression-ok') && '1' || '0' }}
         run: |
