@@ -1,5 +1,25 @@
 use crate::token::*;
 
+const CONFLICT_MARKER_LEN: usize = 7;
+
+const CONFLICT_MARKER_MESSAGE: &str = "merge conflict marker";
+
+/// True when `source` holds a version-control conflict marker outside a
+/// string. The cheap line scan comes first, so a file without one is not
+/// lexed again.
+pub fn has_conflict_marker(source: &str) -> bool {
+    let may_hold_one = source.lines().any(|line| {
+        let bytes = line.as_bytes();
+        bytes.len() >= CONFLICT_MARKER_LEN
+            && matches!(bytes[0], b'<' | b'=' | b'>')
+            && bytes[..CONFLICT_MARKER_LEN].iter().all(|&b| b == bytes[0])
+    });
+    may_hold_one
+        && Lexer::new(source).tokenize().iter().any(
+            |token| matches!(&token.kind, TokenKind::Error(m) if m.starts_with(CONFLICT_MARKER_MESSAGE)),
+        )
+}
+
 /// Tokenizes GDScript source code into a stream of tokens.
 pub struct Lexer<'a> {
     source: &'a str,
@@ -51,6 +71,12 @@ impl<'a> Lexer<'a> {
         // Return pending tokens first (indentation changes).
         if let Some(token) = self.pending_tokens.pop() {
             return token;
+        }
+
+        if self.at_line_start && self.column == 1 {
+            if let Some(token) = self.read_conflict_marker() {
+                return token;
+            }
         }
 
         // Handle indentation at line start.
@@ -320,6 +346,41 @@ impl<'a> Lexer<'a> {
         }
 
         Token::new(TokenKind::Newline, span, "\n".to_string())
+    }
+
+    /// Read a version-control conflict marker line (`<<<<<<<`, `=======` or
+    /// `>>>>>>>` at the start of a line) into one lex error, so its
+    /// characters are never read as operators.
+    fn read_conflict_marker(&mut self) -> Option<Token> {
+        let rest = &self.chars[self.position..];
+        let marker = *rest.first()?;
+        if !matches!(marker, '<' | '=' | '>') || rest.len() < CONFLICT_MARKER_LEN {
+            return None;
+        }
+        if rest[..CONFLICT_MARKER_LEN].iter().any(|&ch| ch != marker) {
+            return None;
+        }
+        let ends_marker = match rest.get(CONFLICT_MARKER_LEN) {
+            None | Some('\n' | '\r') => true,
+            Some(' ') => marker != '=',
+            Some(_) => false,
+        };
+        if !ends_marker {
+            return None;
+        }
+        let start_offset = self.byte_offset;
+        let mut text = String::new();
+        while !self.is_at_end() && !matches!(self.current_char(), '\n' | '\r') {
+            text.push(self.current_char());
+            self.advance();
+        }
+        self.at_line_start = false;
+        let span = Span::new(self.line, 1, start_offset, text.len());
+        let message = format!(
+            "{CONFLICT_MARKER_MESSAGE} '{}'",
+            marker.to_string().repeat(CONFLICT_MARKER_LEN)
+        );
+        Some(Token::new(TokenKind::Error(message), span, text))
     }
 
     fn read_comment(&mut self) -> Token {
@@ -1938,5 +1999,46 @@ func _ready() -> void:
             Some(1),
             "space should count as 1 column"
         );
+    }
+
+    #[test]
+    fn conflict_marker_lines_are_lex_errors() {
+        for (source, message) in [
+            ("<<<<<<< HEAD\n", "merge conflict marker '<<<<<<<'"),
+            ("<<<<<<<\n", "merge conflict marker '<<<<<<<'"),
+            ("=======\n", "merge conflict marker '======='"),
+            (">>>>>>> topic\n", "merge conflict marker '>>>>>>>'"),
+            (
+                "var a = [\n<<<<<<< HEAD\n]\n",
+                "merge conflict marker '<<<<<<<'",
+            ),
+        ] {
+            let tokens = tokenize(source);
+            assert!(
+                tokens
+                    .iter()
+                    .any(|t| matches!(&t.kind, TokenKind::Error(m) if m == message)),
+                "{source:?} should lex to an error {message:?}, got {tokens:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn near_misses_are_not_conflict_markers() {
+        for source in [
+            "var a = 1\n    <<<<<<< HEAD\n",
+            "<<<<<<<<\n",
+            "<<<<<<<x\n",
+            "======== \n",
+            "========\n",
+            "<<<<<<\n",
+            "var s = \"\"\"\n=======\n\"\"\"\n",
+        ] {
+            assert!(
+                !has_conflict_marker(source),
+                "{source:?} is not a conflict marker"
+            );
+        }
+        assert!(has_conflict_marker("var a = 1\n>>>>>>> topic\n"));
     }
 }

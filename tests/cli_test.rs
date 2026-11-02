@@ -439,3 +439,42 @@ fn issue_32_reserved_identifiers_fail_check() {
     );
     assert!(stdout.contains("2 errors found"), "got:\n{}", stdout);
 }
+
+#[test]
+fn conflict_markers_fail_check_and_fmt_leaves_them_alone() {
+    // `fmt` used to turn `<<<<<<< HEAD` into `<<<<<< < HEAD`, and `check`
+    // then passed the file with a spacing warning.
+    let source = "extends Node\n\nconst OUT: String = \"--shots-out=\"\n<<<<<<< HEAD\nconst A: int = 1\n=======\nconst A: int = 2\n>>>>>>> topic\n";
+    let p = project("[rules]\n", source);
+
+    let output = check(&p.config, &p.script, &[]);
+    let stdout = stdout_of(&output);
+    assert_eq!(output.status.code(), Some(1), "stdout:\n{}", stdout);
+    assert!(
+        stdout.contains("4:1 error merge conflict marker '<<<<<<<'"),
+        "got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("6:1 error merge conflict marker '======='"),
+        "got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("8:1 error merge conflict marker '>>>>>>>'"),
+        "got:\n{}",
+        stdout
+    );
+    assert!(stdout.contains("3 errors found"), "got:\n{}", stdout);
+
+    let fmt = Command::new(env!("CARGO_BIN_EXE_gdstyle"))
+        .arg("fmt")
+        .arg(&p.script)
+        .arg("--config")
+        .arg(&p.config)
+        .arg("--no-color")
+        .output()
+        .expect("run gdstyle");
+    assert!(fmt.status.success(), "stderr:\n{}", stderr_of(&fmt));
+    assert_eq!(std::fs::read_to_string(&p.script).unwrap(), source);
+}
