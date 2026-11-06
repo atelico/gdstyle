@@ -614,6 +614,7 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
         formatted: Option<String>,
         read_error: Option<String>,
         write_error: Option<String>,
+        conflict: bool,
     }
 
     let format_results: Vec<FormatFileResult> = files
@@ -626,6 +627,7 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
                 formatted: None,
                 read_error: None,
                 write_error: None,
+                conflict: false,
             };
             let source = match std::fs::read_to_string(file_path) {
                 Ok(s) => s,
@@ -634,6 +636,10 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
                     return r;
                 }
             };
+            if gdstyle::lexer::has_conflict_marker(&source) {
+                r.conflict = true;
+                return r;
+            }
             let formatted = gdstyle::formatter::format_source(&source, &config);
             if formatted == source {
                 return r;
@@ -653,9 +659,19 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
 
     let mut changed_count = 0;
     let mut formatted_count = 0;
+    let mut conflict_count = 0;
     for r in &format_results {
         if let Some(e) = &r.read_error {
             eprintln!("{}: {}", "error".red(), e);
+            continue;
+        }
+        if r.conflict {
+            eprintln!(
+                "{}: cannot format {}: it holds a merge conflict marker",
+                "error".red(),
+                r.path.display()
+            );
+            conflict_count += 1;
             continue;
         }
         if let Some(e) = &r.write_error {
@@ -694,8 +710,8 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
                 )
                 .yellow()
             );
-            process::exit(1);
-        } else {
+            process::exit(if conflict_count > 0 { 2 } else { 1 });
+        } else if conflict_count == 0 {
             println!(
                 "{}",
                 format!(
@@ -716,6 +732,10 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
             )
             .green()
         );
+    }
+
+    if conflict_count > 0 {
+        process::exit(2);
     }
 }
 
