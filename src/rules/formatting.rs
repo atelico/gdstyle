@@ -1109,8 +1109,11 @@ pub fn check_trailing_comma(
                     tokens[last_item].span.line + tokens[last_item].text.matches('\n').count();
                 let closer_starts_own_line = tokens[k].span.line > last_item_end_line;
 
+                // A lex error is not an element: the token before the closer
+                // can be a conflict marker line such as `>>>>>>> topic`.
                 if last_item > i
                     && tokens[last_item].kind != TokenKind::Comma
+                    && !matches!(tokens[last_item].kind, TokenKind::Error(_))
                     && closer_starts_own_line
                 {
                     let insert_offset =

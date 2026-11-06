@@ -8915,22 +8915,15 @@ fn format_source_returns_a_conflicted_file_unchanged() {
 const CONFLICT_IN_DICTIONARY: &str = "extends Node\n\nvar d := {\n\t\"a\": 1,\n<<<<<<< HEAD\n\t\"b\":2,\n=======\n\t\"b\":3,\n>>>>>>> topic\n}\n";
 
 #[test]
-fn only_the_marker_is_reported_on_a_conflict_marker_line() {
-    // `format/trailing-comma` asked for a comma after `>>>>>>> topic`.
-    let marker_lines = [5, 7, 9];
+fn trailing_comma_does_not_take_a_lex_error_for_the_last_element() {
+    // The rule asked for a comma after `>>>>>>> topic`, the last token
+    // before the closing brace.
     let diagnostics = linter::lint_source(CONFLICT_IN_DICTIONARY, "test.gd", &default_config());
-    let on_marker_lines: Vec<(usize, &str)> = diagnostics
-        .iter()
-        .filter(|d| marker_lines.contains(&d.span.line))
-        .map(|d| (d.span.line, d.rule.as_str()))
-        .collect();
-    assert_eq!(
-        on_marker_lines,
-        vec![
-            (5, "syntax/lex-error"),
-            (7, "syntax/lex-error"),
-            (9, "syntax/lex-error")
-        ]
+    assert!(
+        diagnostics
+            .iter()
+            .all(|d| d.rule != "format/trailing-comma"),
+        "got {diagnostics:?}"
     );
     assert!(
         diagnostics
@@ -8939,15 +8932,41 @@ fn only_the_marker_is_reported_on_a_conflict_marker_line() {
         "the code between the markers is still linted, got {diagnostics:?}"
     );
 
-    // Turning the marker rule off does not bring the other rules back.
-    let config = config_with_rules_off(&["syntax/lex-error"]);
-    let diagnostics = linter::lint_source(CONFLICT_IN_DICTIONARY, "test.gd", &config);
+    // Any lex error, not only a marker.
+    let unexpected_character = "var a := [\n\t1,\n\t2 `\n]\n";
+    let diagnostics = linter::lint_source(unexpected_character, "test.gd", &default_config());
+    assert!(
+        diagnostics.iter().any(|d| d.rule == "syntax/lex-error"),
+        "the source has a lex error before the closing bracket, got {diagnostics:?}"
+    );
     assert!(
         diagnostics
             .iter()
-            .all(|d| !marker_lines.contains(&d.span.line)),
+            .all(|d| d.rule != "format/trailing-comma"),
         "got {diagnostics:?}"
     );
+}
+
+#[test]
+fn a_conflict_marker_does_not_hide_the_other_diagnostics_on_its_line() {
+    // File-level rules report at 1:1 and `format/trailing-newline` on the
+    // last line. A marker on that line must not swallow them.
+    let config = Config {
+        max_file_length: 5,
+        ..Config::default()
+    };
+    let source =
+        "<<<<<<< HEAD\nextends Node\n=======\nextends Node2D\n\n\nvar a: int = 1\n>>>>>>> topic";
+    let rules: Vec<String> = linter::lint_source(source, "test.gd", &config)
+        .into_iter()
+        .map(|d| d.rule)
+        .collect();
+    for expected in ["quality/max-file-length", "format/trailing-newline"] {
+        assert!(
+            rules.iter().any(|rule| rule == expected),
+            "{expected} is missing from {rules:?}"
+        );
+    }
 }
 
 #[test]
