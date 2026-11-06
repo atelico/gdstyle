@@ -23,6 +23,8 @@ mod comments;
 /// Godot keeps a `\r` inside a string as part of its value. See
 /// [`crate::linter::restore_line_endings`].
 ///
+/// A file holding a version-control conflict marker is returned as it is.
+///
 /// # Example
 ///
 /// ```
@@ -33,6 +35,10 @@ mod comments;
 /// assert_eq!(formatted, "var x = 1\n");
 /// ```
 pub fn format_source(source: &str, config: &Config) -> String {
+    // The passes read a marker's characters as operators and rewrite them.
+    if crate::lexer::has_conflict_marker(source) {
+        return source.to_string();
+    }
     // Normalize line endings up front so byte-offset computations don't
     // disagree across passes. See `linter::normalize_line_endings` for the
     // full motivation. Idempotent on LF-only input.

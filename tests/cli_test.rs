@@ -439,3 +439,235 @@ fn issue_32_reserved_identifiers_fail_check() {
     );
     assert!(stdout.contains("2 errors found"), "got:\n{}", stdout);
 }
+
+#[test]
+fn conflict_markers_fail_check() {
+    // A marker read as operators was spaced out to `<<<<<< < HEAD`, and
+    // `check` passed the file with a spacing warning.
+    let source = "extends Node\n\nconst OUT: String = \"--shots-out=\"\n<<<<<<< HEAD\nconst A: int = 1\n=======\nconst A: int = 2\n>>>>>>> topic\n";
+    let p = project("[rules]\n", source);
+
+    let output = check(&p.config, &p.script, &[]);
+    let stdout = stdout_of(&output);
+    assert_eq!(output.status.code(), Some(1), "stdout:\n{}", stdout);
+    assert!(
+        stdout.contains("4:1 error merge conflict marker '<<<<<<<'"),
+        "got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("6:1 error merge conflict marker '======='"),
+        "got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("8:1 error merge conflict marker '>>>>>>>'"),
+        "got:\n{}",
+        stdout
+    );
+    assert!(stdout.contains("3 errors found"), "got:\n{}", stdout);
+}
+
+#[test]
+fn diff3_and_longer_conflict_markers_fail_check() {
+    let source = "extends Node\n\n<<<<<<<< HEAD\nconst A: int = 1\n||||||| base\nconst A: int = 0\n==========\nconst A: int = 2\n>>>>>>>>> topic\n";
+    let p = project("[rules]\n", source);
+
+    let output = check(&p.config, &p.script, &[]);
+    let stdout = stdout_of(&output);
+    assert_eq!(output.status.code(), Some(1), "stdout:\n{}", stdout);
+    assert!(
+        stdout.contains("5:1 error merge conflict marker '|||||||'"),
+        "got:\n{}",
+        stdout
+    );
+    assert!(stdout.contains("4 errors found"), "got:\n{}", stdout);
+}
+
+/// Run `fmt` (with `--check` when asked) over `files`.
+fn fmt(config: &Path, files: &[&Path], check_only: bool) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_gdstyle"));
+    command.arg("fmt");
+    if check_only {
+        command.arg("--check");
+    }
+    command
+        .args(files)
+        .arg("--config")
+        .arg(config)
+        .arg("--no-color")
+        .output()
+        .expect("run gdstyle")
+}
+
+#[test]
+fn fmt_exits_2_on_a_conflicted_file_and_still_formats_the_rest() {
+    let conflicted =
+        "extends Node\n\n<<<<<<< HEAD\nvar x := 'a'\n=======\nvar x := 'b'\n>>>>>>> topic\n";
+    let p = project("", conflicted);
+    let valid = p.script.with_file_name("valid.gd");
+    std::fs::write(&valid, "extends Node\n\nvar x := 'a'\n").expect("write script");
+
+    let output = fmt(&p.config, &[&p.script, &valid], false);
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("bad_test.gd") && stderr.contains("merge conflict marker"),
+        "got stderr:\n{stderr}"
+    );
+    assert_eq!(std::fs::read_to_string(&p.script).unwrap(), conflicted);
+    assert_eq!(
+        std::fs::read_to_string(&valid).unwrap(),
+        "extends Node\n\nvar x := \"a\"\n",
+        "the valid file is still formatted"
+    );
+}
+
+#[test]
+fn fmt_check_exits_2_on_a_conflicted_file_and_still_checks_the_rest() {
+    let conflicted = "extends Node\n\n||||||| base\nvar x := 'a'\n";
+    let p = project("", conflicted);
+    let valid = p.script.with_file_name("valid.gd");
+    std::fs::write(&valid, "extends Node\n\nvar x := 'a'\n").expect("write script");
+
+    let output = fmt(&p.config, &[&p.script, &valid], true);
+    let stdout = stdout_of(&output);
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("bad_test.gd") && stderr.contains("merge conflict marker"),
+        "got stderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("valid.gd") && stdout.contains("1 file would be reformatted."),
+        "the valid file is still checked; got stdout:\n{stdout}"
+    );
+    assert_eq!(std::fs::read_to_string(&p.script).unwrap(), conflicted);
+}
+
+#[test]
+fn fmt_check_exits_2_when_the_only_file_is_conflicted() {
+    let source = "extends Node\n\n==========\n";
+    let p = project("", source);
+
+    let output = fmt(&p.config, &[&p.script], true);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stderr:\n{}",
+        stderr_of(&output)
+    );
+    assert_eq!(std::fs::read_to_string(&p.script).unwrap(), source);
+}
+
+#[test]
+fn conflict_markers_after_line_continuations_fail_check_and_fmt() {
+    // Every marker follows a line ending in a backslash. A continuation does
+    // not start a new logical line, so all three were read as operators:
+    // `check` passed the file and `fmt` spaced the markers out.
+    let source = "extends Node\n\nvar x: int = 1 + \\\n<<<<<<< HEAD\n\t2 + \\\n=======\n\t3 + \\\n>>>>>>> topic\n\t4\n";
+    let p = project("[rules]\n", source);
+
+    let output = check(&p.config, &p.script, &[]);
+    let stdout = stdout_of(&output);
+    assert_eq!(output.status.code(), Some(1), "stdout:\n{stdout}");
+    for marker in [
+        "4:1 error merge conflict marker '<<<<<<<'",
+        "6:1 error merge conflict marker '======='",
+        "8:1 error merge conflict marker '>>>>>>>'",
+    ] {
+        assert!(stdout.contains(marker), "missing {marker:?} in:\n{stdout}");
+    }
+    assert!(stdout.contains("3 errors found"), "got:\n{stdout}");
+
+    let output = fmt(&p.config, &[&p.script], false);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stderr:\n{}",
+        stderr_of(&output)
+    );
+    assert_eq!(std::fs::read_to_string(&p.script).unwrap(), source);
+}
+
+/// Bytes that are not valid UTF-8, so reading the file as text fails on
+/// every platform.
+const NOT_UTF8: [u8; 3] = [0xff, 0xfe, b'\n'];
+
+#[test]
+fn fmt_exits_2_on_an_unreadable_file_and_still_formats_the_rest() {
+    // `fmt` used to print the error and exit 0.
+    let p = project("", "extends Node\n\nvar x := 'a'\n");
+    let unreadable = p.script.with_file_name("unreadable.gd");
+    std::fs::write(&unreadable, NOT_UTF8).expect("write script");
+
+    let output = fmt(&p.config, &[&unreadable, &p.script], false);
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("cannot read") && stderr.contains("unreadable.gd"),
+        "got stderr:\n{stderr}"
+    );
+    assert_eq!(std::fs::read(&unreadable).unwrap(), NOT_UTF8);
+    assert_eq!(
+        std::fs::read_to_string(&p.script).unwrap(),
+        "extends Node\n\nvar x := \"a\"\n",
+        "the valid file is still formatted"
+    );
+}
+
+#[test]
+fn fmt_check_exits_2_on_an_unreadable_file() {
+    let p = project("", "extends Node\n\nvar x := \"a\"\n");
+    let unreadable = p.script.with_file_name("unreadable.gd");
+    std::fs::write(&unreadable, NOT_UTF8).expect("write script");
+
+    let output = fmt(&p.config, &[&unreadable, &p.script], true);
+    let stdout = stdout_of(&output);
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("cannot read") && stderr.contains("unreadable.gd"),
+        "got stderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("already formatted"),
+        "a file that was never read is not reported as formatted; got stdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn fmt_exits_2_when_a_file_cannot_be_written() {
+    // `fmt` used to print the error and exit 0.
+    let source = "extends Node\n\nvar x := 'a'\n";
+    let p = project("", source);
+    let writable = std::fs::metadata(&p.script)
+        .expect("script metadata")
+        .permissions();
+    let mut read_only = writable.clone();
+    read_only.set_readonly(true);
+    std::fs::set_permissions(&p.script, read_only).expect("make the script read-only");
+    // A privileged user (root in a container) can still write the file, and
+    // then there is no write failure to observe.
+    if std::fs::OpenOptions::new()
+        .write(true)
+        .open(&p.script)
+        .is_ok()
+    {
+        eprintln!("skipped: this user can write a read-only file");
+        return;
+    }
+
+    let output = fmt(&p.config, &[&p.script], false);
+    // Windows cannot delete a read-only file, so restore the permissions
+    // before any assertion can fail and leave the temporary directory behind.
+    std::fs::set_permissions(&p.script, writable).expect("restore the permissions");
+
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("cannot write") && stderr.contains("bad_test.gd"),
+        "got stderr:\n{stderr}"
+    );
+    assert_eq!(std::fs::read_to_string(&p.script).unwrap(), source);
+}

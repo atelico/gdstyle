@@ -117,7 +117,7 @@ gdstyle ships with 57 rules organized into five categories. Most rules are enabl
 
 | Rule | Description | Fixable |
 |------|-------------|---------|
-| `syntax/lex-error` | Report lexer errors: unterminated strings, invalid numbers, unexpected characters | - |
+| `syntax/lex-error` | Report lexer errors: unterminated strings, invalid numbers, unexpected characters, merge conflict markers | - |
 | `syntax/reserved-identifier` | Reserved words (`namespace`, `trait`, `yield`, `self`, ...) used as a function, parameter, variable, constant, signal, enum, class or loop-variable name. Godot refuses to parse these files, so this defaults to `error` | - |
 
 ### Naming (11 rules)
@@ -636,7 +636,7 @@ gdstyle [COMMAND] [OPTIONS] [PATHS]...
 |------|---------|
 | `0` | Linting/formatting completed (warnings only, or no issues) |
 | `1` | Linting completed with errors, `--max-warnings` was exceeded, or `fmt --check` found changes |
-| `2` | Configuration error |
+| `2` | Configuration error, or `fmt` could not process a file: it holds a merge conflict marker (the file is left untouched), or it could not be read or written |
 
 There are two ways to make warnings fail a build. Set the rules you care
 about to `"error"` in `[rules]` to fail on those specifically, or pass

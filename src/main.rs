@@ -614,6 +614,7 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
         formatted: Option<String>,
         read_error: Option<String>,
         write_error: Option<String>,
+        conflict: bool,
     }
 
     let format_results: Vec<FormatFileResult> = files
@@ -626,6 +627,7 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
                 formatted: None,
                 read_error: None,
                 write_error: None,
+                conflict: false,
             };
             let source = match std::fs::read_to_string(file_path) {
                 Ok(s) => s,
@@ -634,6 +636,10 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
                     return r;
                 }
             };
+            if gdstyle::lexer::has_conflict_marker(&source) {
+                r.conflict = true;
+                return r;
+            }
             let formatted = gdstyle::formatter::format_source(&source, &config);
             if formatted == source {
                 return r;
@@ -653,9 +659,22 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
 
     let mut changed_count = 0;
     let mut formatted_count = 0;
+    // Files `fmt` could not process: unreadable, unwritable, or holding a
+    // conflict marker. One is enough for the run to exit 2.
+    let mut failed_count = 0;
     for r in &format_results {
         if let Some(e) = &r.read_error {
-            eprintln!("{}: {}", "error".red(), e);
+            eprintln!("{}: cannot read {}: {}", "error".red(), r.path.display(), e);
+            failed_count += 1;
+            continue;
+        }
+        if r.conflict {
+            eprintln!(
+                "{}: cannot format {}: it holds a merge conflict marker",
+                "error".red(),
+                r.path.display()
+            );
+            failed_count += 1;
             continue;
         }
         if let Some(e) = &r.write_error {
@@ -665,6 +684,7 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
                 r.path.display(),
                 e
             );
+            failed_count += 1;
             continue;
         }
         if !r.changed {
@@ -694,8 +714,8 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
                 )
                 .yellow()
             );
-            process::exit(1);
-        } else {
+            process::exit(if failed_count > 0 { 2 } else { 1 });
+        } else if failed_count == 0 {
             println!(
                 "{}",
                 format!(
@@ -716,6 +736,10 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
             )
             .green()
         );
+    }
+
+    if failed_count > 0 {
+        process::exit(2);
     }
 }
 
