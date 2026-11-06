@@ -2064,6 +2064,36 @@ func _ready() -> void:
     }
 
     #[test]
+    fn a_conflict_marker_token_is_its_whole_line() {
+        // The label is free text. A quote or bracket in it must not open a
+        // string or a bracket that swallows the lines below. The `é` puts
+        // the byte offset ahead of the character count.
+        let label = ">>>>>>> topic (fix \"é [";
+        let source = format!("var é = 1\n{label}\nvar b = 2\n");
+        let tokens = tokenize(&source);
+
+        let marker_index = tokens
+            .iter()
+            .position(is_conflict_marker)
+            .expect("a marker token");
+        let marker = &tokens[marker_index];
+        assert_eq!(marker.text, label);
+        assert_eq!(
+            marker.span,
+            Span::new(2, 1, source.find(label).unwrap(), label.len())
+        );
+
+        let kinds_after: Vec<&TokenKind> =
+            tokens[marker_index + 1..].iter().map(|t| &t.kind).collect();
+        let line_below = tokenize("\nvar b = 2\n");
+        let expected: Vec<&TokenKind> = line_below.iter().map(|t| &t.kind).collect();
+        assert_eq!(
+            kinds_after, expected,
+            "the line below the marker lexes as code"
+        );
+    }
+
+    #[test]
     fn conflict_markers_after_a_line_continuation_are_lex_errors() {
         // Every marker follows a line ending in a backslash, which does not
         // start a new logical line.

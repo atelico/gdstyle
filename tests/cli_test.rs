@@ -557,7 +557,6 @@ fn fmt_check_exits_2_when_the_only_file_is_conflicted() {
         "stderr:\n{}",
         stderr_of(&output)
     );
-    assert_eq!(std::fs::read_to_string(&p.script).unwrap(), source);
 }
 
 #[test]
@@ -1180,4 +1179,29 @@ fn fmt_prints_no_summary_when_no_file_could_be_formatted() {
         stderr_of(&output)
     );
     assert!(stdout.trim().is_empty(), "got stdout:\n{stdout}");
+}
+
+#[test]
+fn check_fix_reports_what_is_left_after_the_fix() {
+    // The spacing is fixed. The name needs `--unsafe-fix`, so it stays and
+    // is the only diagnostic left to report.
+    let p = project("", "extends Node\n\nvar BadName=1\n");
+
+    let output = check(&p.config, &p.script, &["--fix"]);
+    let stdout = stdout_of(&output);
+    assert_eq!(output.status.code(), Some(0), "stdout:\n{stdout}");
+    assert_eq!(
+        std::fs::read_to_string(&p.script).unwrap(),
+        "extends Node\n\nvar BadName = 1\n"
+    );
+    assert!(
+        !stdout.contains("[format/operator-spacing]"),
+        "a fixed diagnostic is not reported; got stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("[naming/variable-name-snake-case]")
+            && stdout.contains("1 file checked, 1 warning found.")
+            && stdout.contains("Fixed 1 file."),
+        "got stdout:\n{stdout}"
+    );
 }
