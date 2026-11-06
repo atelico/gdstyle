@@ -636,7 +636,7 @@ gdstyle [COMMAND] [OPTIONS] [PATHS]...
 |------|---------|
 | `0` | Linting/formatting completed (warnings only, or no issues) |
 | `1` | Linting completed with errors, `--max-warnings` was exceeded, or `fmt --check` found changes |
-| `2` | Configuration error, or `fmt` found a file with a merge conflict marker and left it untouched |
+| `2` | Configuration error, or `fmt` could not process a file: it holds a merge conflict marker (the file is left untouched), or it could not be read or written |
 
 There are two ways to make warnings fail a build. Set the rules you care
 about to `"error"` in `[rules]` to fail on those specifically, or pass

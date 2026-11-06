@@ -659,10 +659,13 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
 
     let mut changed_count = 0;
     let mut formatted_count = 0;
-    let mut conflict_count = 0;
+    // Files `fmt` could not process: unreadable, unwritable, or holding a
+    // conflict marker. One is enough for the run to exit 2.
+    let mut failed_count = 0;
     for r in &format_results {
         if let Some(e) = &r.read_error {
-            eprintln!("{}: {}", "error".red(), e);
+            eprintln!("{}: cannot read {}: {}", "error".red(), r.path.display(), e);
+            failed_count += 1;
             continue;
         }
         if r.conflict {
@@ -671,7 +674,7 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
                 "error".red(),
                 r.path.display()
             );
-            conflict_count += 1;
+            failed_count += 1;
             continue;
         }
         if let Some(e) = &r.write_error {
@@ -681,6 +684,7 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
                 r.path.display(),
                 e
             );
+            failed_count += 1;
             continue;
         }
         if !r.changed {
@@ -710,8 +714,8 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
                 )
                 .yellow()
             );
-            process::exit(if conflict_count > 0 { 2 } else { 1 });
-        } else if conflict_count == 0 {
+            process::exit(if failed_count > 0 { 2 } else { 1 });
+        } else if failed_count == 0 {
             println!(
                 "{}",
                 format!(
@@ -734,7 +738,7 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
         );
     }
 
-    if conflict_count > 0 {
+    if failed_count > 0 {
         process::exit(2);
     }
 }

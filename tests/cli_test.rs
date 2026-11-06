@@ -589,3 +589,85 @@ fn conflict_markers_after_line_continuations_fail_check_and_fmt() {
     );
     assert_eq!(std::fs::read_to_string(&p.script).unwrap(), source);
 }
+
+/// Bytes that are not valid UTF-8, so reading the file as text fails on
+/// every platform.
+const NOT_UTF8: [u8; 3] = [0xff, 0xfe, b'\n'];
+
+#[test]
+fn fmt_exits_2_on_an_unreadable_file_and_still_formats_the_rest() {
+    // `fmt` used to print the error and exit 0.
+    let p = project("", "extends Node\n\nvar x := 'a'\n");
+    let unreadable = p.script.with_file_name("unreadable.gd");
+    std::fs::write(&unreadable, NOT_UTF8).expect("write script");
+
+    let output = fmt(&p.config, &[&unreadable, &p.script], false);
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("cannot read") && stderr.contains("unreadable.gd"),
+        "got stderr:\n{stderr}"
+    );
+    assert_eq!(std::fs::read(&unreadable).unwrap(), NOT_UTF8);
+    assert_eq!(
+        std::fs::read_to_string(&p.script).unwrap(),
+        "extends Node\n\nvar x := \"a\"\n",
+        "the valid file is still formatted"
+    );
+}
+
+#[test]
+fn fmt_check_exits_2_on_an_unreadable_file() {
+    let p = project("", "extends Node\n\nvar x := \"a\"\n");
+    let unreadable = p.script.with_file_name("unreadable.gd");
+    std::fs::write(&unreadable, NOT_UTF8).expect("write script");
+
+    let output = fmt(&p.config, &[&unreadable, &p.script], true);
+    let stdout = stdout_of(&output);
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("cannot read") && stderr.contains("unreadable.gd"),
+        "got stderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("already formatted"),
+        "a file that was never read is not reported as formatted; got stdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn fmt_exits_2_when_a_file_cannot_be_written() {
+    // `fmt` used to print the error and exit 0.
+    let source = "extends Node\n\nvar x := 'a'\n";
+    let p = project("", source);
+    let writable = std::fs::metadata(&p.script)
+        .expect("script metadata")
+        .permissions();
+    let mut read_only = writable.clone();
+    read_only.set_readonly(true);
+    std::fs::set_permissions(&p.script, read_only).expect("make the script read-only");
+    // A privileged user (root in a container) can still write the file, and
+    // then there is no write failure to observe.
+    if std::fs::OpenOptions::new()
+        .write(true)
+        .open(&p.script)
+        .is_ok()
+    {
+        eprintln!("skipped: this user can write a read-only file");
+        return;
+    }
+
+    let output = fmt(&p.config, &[&p.script], false);
+    // Windows cannot delete a read-only file, so restore the permissions
+    // before any assertion can fail and leave the temporary directory behind.
+    std::fs::set_permissions(&p.script, writable).expect("restore the permissions");
+
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("cannot write") && stderr.contains("bad_test.gd"),
+        "got stderr:\n{stderr}"
+    );
+    assert_eq!(std::fs::read_to_string(&p.script).unwrap(), source);
+}
