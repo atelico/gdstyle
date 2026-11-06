@@ -559,3 +559,33 @@ fn fmt_check_exits_2_when_the_only_file_is_conflicted() {
     );
     assert_eq!(std::fs::read_to_string(&p.script).unwrap(), source);
 }
+
+#[test]
+fn conflict_markers_after_line_continuations_fail_check_and_fmt() {
+    // Every marker follows a line ending in a backslash. A continuation does
+    // not start a new logical line, so all three were read as operators:
+    // `check` passed the file and `fmt` spaced the markers out.
+    let source = "extends Node\n\nvar x: int = 1 + \\\n<<<<<<< HEAD\n\t2 + \\\n=======\n\t3 + \\\n>>>>>>> topic\n\t4\n";
+    let p = project("[rules]\n", source);
+
+    let output = check(&p.config, &p.script, &[]);
+    let stdout = stdout_of(&output);
+    assert_eq!(output.status.code(), Some(1), "stdout:\n{stdout}");
+    for marker in [
+        "4:1 error merge conflict marker '<<<<<<<'",
+        "6:1 error merge conflict marker '======='",
+        "8:1 error merge conflict marker '>>>>>>>'",
+    ] {
+        assert!(stdout.contains(marker), "missing {marker:?} in:\n{stdout}");
+    }
+    assert!(stdout.contains("3 errors found"), "got:\n{stdout}");
+
+    let output = fmt(&p.config, &[&p.script], false);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stderr:\n{}",
+        stderr_of(&output)
+    );
+    assert_eq!(std::fs::read_to_string(&p.script).unwrap(), source);
+}

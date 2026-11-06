@@ -89,7 +89,9 @@ impl<'a> Lexer<'a> {
             return token;
         }
 
-        if self.at_line_start && self.column == 1 {
+        // The column, not `at_line_start`: a backslash continuation moves to
+        // the next line without setting that flag, and a marker can follow it.
+        if self.column == 1 {
             if let Some(token) = self.read_conflict_marker() {
                 return token;
             }
@@ -2043,6 +2045,26 @@ func _ready() -> void:
     }
 
     #[test]
+    fn conflict_markers_after_a_line_continuation_are_lex_errors() {
+        // Every marker follows a line ending in a backslash, which does not
+        // start a new logical line.
+        for source in [
+            "var x = 1 + \\\n<<<<<<< HEAD\n\t2 + \\\n=======\n\t3 + \\\n>>>>>>> topic\n\t4\n",
+            "var x = 1 + \\\r\n<<<<<<< HEAD\r\n\t2 + \\\r\n=======\r\n\t3 + \\\r\n>>>>>>> topic\r\n\t4\r\n",
+        ] {
+            let tokens = tokenize(source);
+            let marker_count = tokens
+                .iter()
+                .filter(|t| matches!(&t.kind, TokenKind::Error(m) if m.starts_with(CONFLICT_MARKER_MESSAGE)))
+                .count();
+            assert_eq!(
+                marker_count, 3,
+                "{source:?} holds three markers, got {tokens:?}"
+            );
+        }
+    }
+
+    #[test]
     fn near_misses_are_not_conflict_markers() {
         for source in [
             "var a = 1\n    <<<<<<< HEAD\n",
@@ -2052,6 +2074,7 @@ func _ready() -> void:
             "var s = \"\"\"\n=======\n\"\"\"\n",
             "var s = \"\"\"\n|||||||\n\"\"\"\n",
             "var s = \"\"\"\n==========\n\"\"\"\n",
+            "var a = b \\\n<< 2\n",
         ] {
             assert!(
                 !has_conflict_marker(source),
