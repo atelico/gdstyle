@@ -8880,3 +8880,18 @@ func f(arr):
         vec!["function 'f' has 2 return statements (max 1)".to_string()]
     );
 }
+
+#[test]
+fn format_source_returns_a_conflicted_file_unchanged() {
+    // The reorder pass would sort `const A` above `var b` and so carry it
+    // from one side of the conflict to the other. This is the path the
+    // GDExtension takes; the CLI refuses the file before it gets here.
+    let conflicted = "extends Node\n\nconst B: int = 2\n<<<<<<< HEAD\nvar b: int = 2\n||||||| base\nvar b: int = 0\n=======\nconst A: int = 1\n>>>>>>> topic\n\n\nfunc f() -> void:\n\tpass\n";
+    assert_eq!(
+        formatter::format_source(conflicted, &default_config()),
+        conflicted
+    );
+
+    let crlf = conflicted.replace('\n', "\r\n");
+    assert_eq!(formatter::format_source(&crlf, &default_config()), crlf);
+}

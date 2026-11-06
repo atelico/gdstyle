@@ -35,7 +35,9 @@ mod comments;
 /// assert_eq!(formatted, "var x = 1\n");
 /// ```
 pub fn format_source(source: &str, config: &Config) -> String {
-    // The passes read a marker's characters as operators and rewrite them.
+    // A marker line is not a member, so the layout passes would treat it as
+    // part of one: reordering then carries code from one side of the
+    // conflict to the other.
     if crate::lexer::has_conflict_marker(source) {
         return source.to_string();
     }
