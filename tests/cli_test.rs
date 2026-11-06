@@ -989,3 +989,25 @@ fn check_unsafe_fix_leaves_references_in_a_conflicted_file_untouched() {
         "both stale references are named; got stderr:\n{stderr}"
     );
 }
+
+#[test]
+fn fmt_ends_with_a_note_that_explains_exit_code_2() {
+    // `check` closes with the reason for exit 2. `fmt` only had the
+    // per-file error, somewhere among the lines for the other files.
+    let conflicted = "extends Node\n\n<<<<<<< HEAD\n";
+    for check_only in [false, true] {
+        let p = project("", conflicted);
+        let unformatted = p.script.with_file_name("unformatted.gd");
+        std::fs::write(&unformatted, "extends Node\n\nvar y=1\n").expect("write script");
+
+        let output = fmt(&p.config, &[&p.script, &unformatted], check_only);
+        let stderr = stderr_of(&output);
+        assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+        assert!(
+            stderr
+                .trim_end()
+                .ends_with("error: 1 file could not be formatted, see above"),
+            "check_only={check_only}; got stderr:\n{stderr}"
+        );
+    }
+}

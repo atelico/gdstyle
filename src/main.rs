@@ -777,7 +777,6 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
                 )
                 .yellow()
             );
-            process::exit(if failed_count > 0 { 2 } else { 1 });
         } else if failed_count == 0 {
             println!(
                 "{}",
@@ -801,8 +800,20 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
         );
     }
 
+    // Exit code. A file that could not be formatted outranks "would be
+    // reformatted". Its error is among the lines for the other files, so
+    // repeat the reason at the end, the way `check` does.
     if failed_count > 0 {
+        eprintln!(
+            "{}: {} file{} could not be formatted, see above",
+            "error".red(),
+            failed_count,
+            if failed_count == 1 { "" } else { "s" }
+        );
         process::exit(2);
+    }
+    if (check || diff) && changed_count > 0 {
+        process::exit(1);
     }
 }
 
