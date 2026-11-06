@@ -1,17 +1,33 @@
 use crate::token::*;
 
+/// Fewest repeated characters that make a conflict marker. Godot's own
+/// tokenizer uses the same `>= 7`, and git writes longer markers for nested
+/// conflicts and a `conflict-marker-size` setting.
 const CONFLICT_MARKER_LEN: usize = 7;
 
 const CONFLICT_MARKER_MESSAGE: &str = "merge conflict marker";
 
+/// Characters a marker line starts with. `<<<<<<<` and `>>>>>>>` open and
+/// close a conflict, `=======` splits it and `|||||||` starts the base
+/// section that `merge.conflictStyle = diff3` adds.
+fn is_conflict_marker_char(ch: char) -> bool {
+    matches!(ch, '<' | '=' | '>' | '|')
+}
+
 /// True when `source` holds a version-control conflict marker outside a
 /// string. The cheap line scan comes first, so a file without one is not
 /// lexed again.
+///
+/// # Example
+///
+/// ```
+/// assert!(gdstyle::lexer::has_conflict_marker("var a = 1\n<<<<<<< HEAD\n"))
+/// ```
 pub fn has_conflict_marker(source: &str) -> bool {
     let may_hold_one = source.lines().any(|line| {
         let bytes = line.as_bytes();
         bytes.len() >= CONFLICT_MARKER_LEN
-            && matches!(bytes[0], b'<' | b'=' | b'>')
+            && is_conflict_marker_char(char::from(bytes[0]))
             && bytes[..CONFLICT_MARKER_LEN].iter().all(|&b| b == bytes[0])
     });
     may_hold_one
@@ -348,24 +364,17 @@ impl<'a> Lexer<'a> {
         Token::new(TokenKind::Newline, span, "\n".to_string())
     }
 
-    /// Read a version-control conflict marker line (`<<<<<<<`, `=======` or
-    /// `>>>>>>>` at the start of a line) into one lex error, so its
-    /// characters are never read as operators.
+    /// Read a version-control conflict marker line (a run of seven or more
+    /// `<`, `=`, `>` or `|` at the start of a line) into one lex error, so
+    /// its characters are never read as operators. Like Godot, it ignores
+    /// what follows the run.
     fn read_conflict_marker(&mut self) -> Option<Token> {
         let rest = &self.chars[self.position..];
         let marker = *rest.first()?;
-        if !matches!(marker, '<' | '=' | '>') || rest.len() < CONFLICT_MARKER_LEN {
+        if !is_conflict_marker_char(marker) || rest.len() < CONFLICT_MARKER_LEN {
             return None;
         }
         if rest[..CONFLICT_MARKER_LEN].iter().any(|&ch| ch != marker) {
-            return None;
-        }
-        let ends_marker = match rest.get(CONFLICT_MARKER_LEN) {
-            None | Some('\n' | '\r') => true,
-            Some(' ') => marker != '=',
-            Some(_) => false,
-        };
-        if !ends_marker {
             return None;
         }
         let start_offset = self.byte_offset;
@@ -2008,6 +2017,16 @@ func _ready() -> void:
             ("<<<<<<<\n", "merge conflict marker '<<<<<<<'"),
             ("=======\n", "merge conflict marker '======='"),
             (">>>>>>> topic\n", "merge conflict marker '>>>>>>>'"),
+            ("||||||| base\n", "merge conflict marker '|||||||'"),
+            ("|||||||\n", "merge conflict marker '|||||||'"),
+            ("<<<<<<<< HEAD\n", "merge conflict marker '<<<<<<<'"),
+            ("==========\n", "merge conflict marker '======='"),
+            (">>>>>>>>>> topic\n", "merge conflict marker '>>>>>>>'"),
+            ("||||||||| base\n", "merge conflict marker '|||||||'"),
+            (
+                "var a = 1\r\n||||||| base\r\n",
+                "merge conflict marker '|||||||'",
+            ),
             (
                 "var a = [\n<<<<<<< HEAD\n]\n",
                 "merge conflict marker '<<<<<<<'",
@@ -2027,18 +2046,29 @@ func _ready() -> void:
     fn near_misses_are_not_conflict_markers() {
         for source in [
             "var a = 1\n    <<<<<<< HEAD\n",
-            "<<<<<<<<\n",
-            "<<<<<<<x\n",
-            "======== \n",
-            "========\n",
             "<<<<<<\n",
+            "||||||\n",
+            "var a = 1\n    ||||||| base\n",
             "var s = \"\"\"\n=======\n\"\"\"\n",
+            "var s = \"\"\"\n|||||||\n\"\"\"\n",
+            "var s = \"\"\"\n==========\n\"\"\"\n",
         ] {
             assert!(
                 !has_conflict_marker(source),
                 "{source:?} is not a conflict marker"
             );
         }
-        assert!(has_conflict_marker("var a = 1\n>>>>>>> topic\n"));
+        for source in [
+            "var a = 1\n>>>>>>> topic\n",
+            "<<<<<<<<\n",
+            "<<<<<<<x\n",
+            "======== \n",
+            "========\n",
+        ] {
+            assert!(
+                has_conflict_marker(source),
+                "{source:?} is a conflict marker"
+            );
+        }
     }
 }
