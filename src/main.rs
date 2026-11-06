@@ -386,30 +386,31 @@ fn run_check(options: CheckOptions) {
             let file_str = file_path.to_string_lossy().to_string();
             let diagnostics = linter::lint_source(&source, &file_str, &config);
 
-            if do_fix {
-                // Track renames for cross-file reference updates.
-                if unsafe_fix {
-                    let members = parse_members(&source);
-                    result.renames =
-                        fixer::extract_renames(&source, &diagnostics, &file_str, &members);
-                }
-
-                let fixed_source = fixer::apply_fixes(&source, &diagnostics, safe_only);
-                if fixed_source != source {
-                    if let Err(e) = std::fs::write(file_path, &fixed_source) {
-                        report_io_failure("write", file_path, &e);
-                    } else {
-                        result.was_fixed = true;
-                    }
-                    // Re-lint to report remaining issues.
-                    result.diagnostics = linter::lint_source(&fixed_source, &file_str, &config);
-                } else {
-                    result.diagnostics = diagnostics;
-                }
-            } else {
+            if !do_fix {
                 result.diagnostics = diagnostics;
+                return result;
             }
 
+            let fixed_source = fixer::apply_fixes(&source, &diagnostics, safe_only);
+            if fixed_source == source {
+                result.diagnostics = diagnostics;
+                return result;
+            }
+            if let Err(e) = std::fs::write(file_path, &fixed_source) {
+                // The file on disk is unchanged: it keeps its diagnostics,
+                // and its renames must not reach the files that reference it.
+                report_io_failure("write", file_path, &e);
+                result.diagnostics = diagnostics;
+                return result;
+            }
+            result.was_fixed = true;
+            // Track renames for cross-file reference updates.
+            if unsafe_fix {
+                let members = parse_members(&source);
+                result.renames = fixer::extract_renames(&source, &diagnostics, &file_str, &members);
+            }
+            // Re-lint to report remaining issues.
+            result.diagnostics = linter::lint_source(&fixed_source, &file_str, &config);
             result
         })
         .collect();

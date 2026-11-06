@@ -680,6 +680,10 @@ fn fmt_exits_2_when_a_file_cannot_be_written() {
 const DECLARES_DO_THING: &str =
     "class_name Thing\nextends Node\n\n\nfunc DoThing() -> void:\n\tpass\n";
 
+/// A script that calls the method `DECLARES_DO_THING` declares.
+const CALLS_DO_THING: &str =
+    "extends Node\n\n\nfunc _ready() -> void:\n\tvar thing := Thing.new()\n\tthing.DoThing()\n";
+
 #[test]
 fn check_exits_2_on_an_unreadable_file_and_still_reports_the_rest() {
     // `check` used to print the error without the file name and exit by the
@@ -738,11 +742,9 @@ fn check_fix_exits_2_when_a_file_cannot_be_written() {
 fn check_unsafe_fix_exits_2_when_a_reference_cannot_be_rewritten() {
     // The rename lands in the declaring file, but the read-only file that
     // calls the method keeps the old name. `check` used to exit 0.
-    let caller_source =
-        "extends Node\n\n\nfunc _ready() -> void:\n\tvar thing := Thing.new()\n\tthing.DoThing()\n";
     let p = project("", DECLARES_DO_THING);
     let caller = p.script.with_file_name("caller.gd");
-    std::fs::write(&caller, caller_source).expect("write script");
+    std::fs::write(&caller, CALLS_DO_THING).expect("write script");
     let Some(writable) = make_read_only(&caller) else {
         return;
     };
@@ -760,7 +762,7 @@ fn check_unsafe_fix_exits_2_when_a_reference_cannot_be_rewritten() {
         stderr.contains("cannot write") && stderr.contains("caller.gd"),
         "got stderr:\n{stderr}"
     );
-    assert_eq!(std::fs::read_to_string(&caller).unwrap(), caller_source);
+    assert_eq!(std::fs::read_to_string(&caller).unwrap(), CALLS_DO_THING);
 }
 
 #[test]
@@ -804,4 +806,45 @@ fn check_unsafe_fix_exits_2_when_a_scene_cannot_be_written() {
         "got stderr:\n{stderr}"
     );
     assert_eq!(std::fs::read_to_string(&scene).unwrap(), scene_source);
+}
+
+#[test]
+fn check_unsafe_fix_keeps_references_when_the_declaration_cannot_be_written() {
+    // The rename never reached the read-only declaring file. `check` still
+    // renamed the call in the other file, which then named a method that
+    // does not exist, and reported the declaring file as fixed.
+    let p = project("", DECLARES_DO_THING);
+    let caller = p.script.with_file_name("caller.gd");
+    std::fs::write(&caller, CALLS_DO_THING).expect("write script");
+    let Some(writable) = make_read_only(&p.script) else {
+        return;
+    };
+
+    let output = check(
+        &p.config,
+        &p.script,
+        &["--unsafe-fix", caller.to_str().expect("UTF-8 path")],
+    );
+    std::fs::set_permissions(&p.script, writable).expect("restore the permissions");
+
+    let stdout = stdout_of(&output);
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("cannot write") && stderr.contains("bad_test.gd"),
+        "got stderr:\n{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&p.script).unwrap(),
+        DECLARES_DO_THING
+    );
+    assert_eq!(
+        std::fs::read_to_string(&caller).unwrap(),
+        CALLS_DO_THING,
+        "the call keeps the name the declaration still has"
+    );
+    assert!(
+        stdout.contains("function name 'DoThing' should use snake_case"),
+        "the declaring file is unchanged, so its diagnostic is still reported; got stdout:\n{stdout}"
+    );
 }
