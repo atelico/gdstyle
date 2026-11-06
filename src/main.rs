@@ -717,11 +717,13 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
                     return r;
                 }
             };
-            if gdstyle::lexer::has_conflict_marker(&source) {
-                r.conflict = true;
-                return r;
-            }
-            let formatted = gdstyle::formatter::format_source(&source, &config);
+            let formatted = match gdstyle::formatter::try_format_source(&source, &config) {
+                Ok(formatted) => formatted,
+                Err(gdstyle::formatter::ConflictMarkerError) => {
+                    r.conflict = true;
+                    return r;
+                }
+            };
             if formatted == source {
                 return r;
             }

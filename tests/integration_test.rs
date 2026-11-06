@@ -8894,6 +8894,20 @@ fn format_source_returns_a_conflicted_file_unchanged() {
 
     let crlf = conflicted.replace('\n', "\r\n");
     assert_eq!(formatter::format_source(&crlf, &default_config()), crlf);
+
+    // The caller that needs to know why nothing changed.
+    for source in [conflicted, crlf.as_str()] {
+        assert_eq!(
+            formatter::try_format_source(source, &default_config()),
+            Err(formatter::ConflictMarkerError)
+        );
+    }
+    // A marker-looking line inside a string is data, not a marker.
+    let banner_in_string = "var s := \"\"\"\n=======\n\"\"\"\nvar y=1\n";
+    assert_eq!(
+        formatter::try_format_source(banner_in_string, &default_config()),
+        Ok("var s := \"\"\"\n=======\n\"\"\"\nvar y = 1\n".to_string())
+    );
 }
 
 /// A conflict at the tail of a multi-line dictionary. Rules that read tokens
