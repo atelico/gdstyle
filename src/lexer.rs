@@ -2081,6 +2081,10 @@ func _ready() -> void:
                 "{source:?} is not a conflict marker"
             );
         }
+    }
+
+    #[test]
+    fn a_longer_run_or_text_glued_to_it_is_still_a_conflict_marker() {
         for source in [
             "var a = 1\n>>>>>>> topic\n",
             "<<<<<<<<\n",

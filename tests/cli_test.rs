@@ -1011,3 +1011,31 @@ fn fmt_ends_with_a_note_that_explains_exit_code_2() {
         );
     }
 }
+
+#[test]
+fn check_json_stays_parsable_when_a_file_cannot_be_read() {
+    // The errors and the closing note go to stderr, so stdout is still the
+    // JSON report of the files that were read.
+    let p = project("", TWO_VIOLATIONS);
+    let unreadable = p.script.with_file_name("unreadable.gd");
+    std::fs::write(&unreadable, NOT_UTF8).expect("write script");
+
+    let output = check(
+        &p.config,
+        &p.script,
+        &["--format", "json", unreadable.to_str().expect("UTF-8 path")],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stderr:\n{}",
+        stderr_of(&output)
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout is valid JSON");
+    assert_eq!(
+        report.as_array().map(Vec::len),
+        Some(2),
+        "the two violations of the readable file; got:\n{report}"
+    );
+}
