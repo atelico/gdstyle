@@ -848,3 +848,47 @@ fn check_unsafe_fix_keeps_references_when_the_declaration_cannot_be_written() {
         "the declaring file is unchanged, so its diagnostic is still reported; got stdout:\n{stdout}"
     );
 }
+
+#[test]
+fn check_prints_no_summary_when_no_file_could_be_read() {
+    // `check` used to print "0 files checked, no issues found." with a
+    // green tick next to the read error.
+    let p = project("", "");
+    std::fs::write(&p.script, NOT_UTF8).expect("write script");
+
+    let output = check(&p.config, &p.script, &[]);
+    let stdout = stdout_of(&output);
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(
+        stdout.trim().is_empty(),
+        "nothing was checked, so there is nothing to summarize; got stdout:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("cannot read") && stderr.contains("bad_test.gd"),
+        "got stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn check_ends_with_a_note_that_explains_exit_code_2() {
+    // The per-file errors are printed before the report, so on a large
+    // project they scroll far away from the end of the output.
+    let p = project("", TWO_VIOLATIONS);
+    let unreadable = p.script.with_file_name("unreadable.gd");
+    std::fs::write(&unreadable, NOT_UTF8).expect("write script");
+
+    let output = check(
+        &p.config,
+        &p.script,
+        &[unreadable.to_str().expect("UTF-8 path")],
+    );
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(
+        stderr
+            .trim_end()
+            .ends_with("error: 1 read or write error, see above"),
+        "got stderr:\n{stderr}"
+    );
+}

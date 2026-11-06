@@ -532,10 +532,14 @@ fn run_check(options: CheckOptions) {
             if !all_diagnostics.is_empty() {
                 print!("{}", reporter::format_text(&all_diagnostics));
             }
-            println!(
-                "{}",
-                reporter::format_summary(&all_diagnostics, checked_count)
-            );
+            // No file was read: "0 files checked, no issues found" would
+            // read as a pass.
+            if checked_count > 0 {
+                println!(
+                    "{}",
+                    reporter::format_summary(&all_diagnostics, checked_count)
+                );
+            }
             if do_fix && fixed_count > 0 {
                 println!(
                     "{}",
@@ -554,8 +558,17 @@ fn run_check(options: CheckOptions) {
     }
 
     // Exit code. A file that could not be read or written outranks the
-    // diagnostics: the report above is incomplete.
-    if io_failure_count.load(Ordering::Relaxed) > 0 {
+    // diagnostics: the report above is incomplete. The per-file errors were
+    // printed before the report, so repeat the reason here, on stderr so
+    // `--format json` keeps stdout machine-readable.
+    let io_failure_count = io_failure_count.load(Ordering::Relaxed);
+    if io_failure_count > 0 {
+        eprintln!(
+            "{}: {} read or write error{}, see above",
+            "error".red(),
+            io_failure_count,
+            if io_failure_count == 1 { "" } else { "s" }
+        );
         process::exit(2);
     }
 
