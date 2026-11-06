@@ -931,3 +931,61 @@ fn check_reports_a_failing_file_once() {
         "the rename still reaches the readable caller"
     );
 }
+
+#[test]
+fn check_fix_leaves_a_conflicted_file_untouched() {
+    // `fmt` refuses a conflicted file, but `check --fix` still spaced out
+    // the code on both sides, and the `%%%%%%%` line of a Jujutsu conflict.
+    for conflicted in [
+        "extends Node\n\n<<<<<<< HEAD\nvar y=1\n=======\nvar y=2\n>>>>>>> topic\n",
+        "extends Node\n\n<<<<<<< Conflict 1 of 1\n%%%%%%% Changes from base to side #1\n-var y=0\n+var y=1\n+++++++ Contents of side #2\nvar y=2\n>>>>>>> Conflict 1 of 1 ends\n",
+    ] {
+        let p = project("", conflicted);
+
+        let output = check(&p.config, &p.script, &["--fix"]);
+        let stdout = stdout_of(&output);
+        let stderr = stderr_of(&output);
+        assert_eq!(output.status.code(), Some(1), "stderr:\n{stderr}");
+        assert_eq!(std::fs::read_to_string(&p.script).unwrap(), conflicted);
+        assert!(
+            stderr.contains("fixes not applied to")
+                && stderr.contains("bad_test.gd")
+                && stderr.contains("merge conflict marker"),
+            "got stderr:\n{stderr}"
+        );
+        assert!(
+            stdout.contains("[format/operator-spacing]"),
+            "the file is unchanged, so its fixable diagnostics are still reported; got stdout:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn check_unsafe_fix_leaves_references_in_a_conflicted_file_untouched() {
+    // The rename lands in the declaring file. The conflicted caller is left
+    // as it is, and each stale reference is named.
+    let conflicted_caller = "extends Node\n\n\nfunc _ready() -> void:\n\tvar thing := Thing.new()\n<<<<<<< HEAD\n\tthing.DoThing()\n=======\n\tthing.DoThing()\n\tprint(thing)\n>>>>>>> topic\n";
+    let p = project("", DECLARES_DO_THING);
+    let caller = p.script.with_file_name("caller.gd");
+    std::fs::write(&caller, conflicted_caller).expect("write script");
+
+    let output = check(
+        &p.config,
+        &p.script,
+        &["--unsafe-fix", caller.to_str().expect("UTF-8 path")],
+    );
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(1), "stderr:\n{stderr}");
+    assert_eq!(
+        std::fs::read_to_string(&p.script).unwrap(),
+        DECLARES_DO_THING.replace("DoThing", "do_thing")
+    );
+    assert_eq!(std::fs::read_to_string(&caller).unwrap(), conflicted_caller);
+    assert_eq!(
+        stderr
+            .matches("reference to 'DoThing' (renamed to 'do_thing'")
+            .count(),
+        2,
+        "both stale references are named; got stderr:\n{stderr}"
+    );
+}

@@ -287,6 +287,8 @@ The contents of multi-line strings are data, so the formatter leaves them alone:
 
 Line endings are kept too, by `fmt` and `check --fix` alike. A file keeps the style most of its line breaks outside strings use, so a CRLF file stays CRLF. A string keeps its own line endings even when they differ from the rest of the file, because Godot keeps a `\r` inside a string as part of its value.
 
+A file that holds a merge conflict marker (a line starting with seven or more `<`, `=`, `>` or `|`, outside a string) is left untouched by `fmt`, `check --fix` and `check --unsafe-fix`: rewriting either side would make the conflict harder to resolve. `check` reports each marker as a `syntax/lex-error`, `fmt` exits `2`, and `--fix` / `--unsafe-fix` print a warning naming the file.
+
 > **Note:** Line wrapping breaks at comma boundaries inside delimiters (parentheses, brackets, braces), `and`/`or` operators in `if`/`elif`/`while` conditions, and word boundaries in long comments. Lines without any breakable pattern (e.g., long strings, property chains, continuation lines without enclosing delimiters) are left alone.
 
 ## Configuration

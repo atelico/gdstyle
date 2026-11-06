@@ -375,6 +375,9 @@ fn run_check(options: CheckOptions) {
         was_fixed: bool,
         /// False when the file could not be read, so it was never linted.
         was_checked: bool,
+        /// True when the file has fixes that were held back because it
+        /// holds a conflict marker.
+        is_fix_held_back: bool,
     }
 
     let lint_results: Vec<LintFileResult> = files
@@ -385,6 +388,7 @@ fn run_check(options: CheckOptions) {
                 renames: Vec::new(),
                 was_fixed: false,
                 was_checked: false,
+                is_fix_held_back: false,
             };
             let source = match std::fs::read_to_string(file_path) {
                 Ok(s) => s,
@@ -404,6 +408,13 @@ fn run_check(options: CheckOptions) {
 
             let fixed_source = fixer::apply_fixes(&source, &diagnostics, safe_only);
             if fixed_source == source {
+                result.diagnostics = diagnostics;
+                return result;
+            }
+            // Fixes would rewrite the code on both sides of a conflict, so a
+            // conflicted file is left as it is, the way `fmt` leaves it.
+            if gdstyle::lexer::has_conflict_marker(&source) {
+                result.is_fix_held_back = true;
                 result.diagnostics = diagnostics;
                 return result;
             }
@@ -430,7 +441,8 @@ fn run_check(options: CheckOptions) {
     let mut all_renames: Vec<fixer::AppliedRename> = Vec::new();
     let mut fixed_count = 0;
     let mut checked_count = 0;
-    for r in lint_results {
+    // `lint_results` is in the order of `files`, so these warnings are too.
+    for (file_path, r) in files.iter().zip(lint_results) {
         all_diagnostics.extend(r.diagnostics);
         all_renames.extend(r.renames);
         if r.was_fixed {
@@ -438,6 +450,13 @@ fn run_check(options: CheckOptions) {
         }
         if r.was_checked {
             checked_count += 1;
+        }
+        if r.is_fix_held_back {
+            eprintln!(
+                "{}: fixes not applied to {}: it holds a merge conflict marker",
+                "warning".yellow(),
+                file_path.display()
+            );
         }
     }
     // Sort diagnostics for deterministic output across runs (parallel
@@ -467,12 +486,16 @@ fn run_check(options: CheckOptions) {
             if refs.is_empty() {
                 return;
             }
-            let fixed = fixer::apply_cross_file_fixes(&source, &refs);
-            if fixed != source {
-                if let Err(e) = std::fs::write(file_path, &fixed) {
-                    report_io_failure("write", file_path, &e);
-                } else {
-                    cross_ref_fixed.fetch_add(1, Ordering::Relaxed);
+            // A conflicted file is left as it is here too. Its references
+            // are then reported below as not updated.
+            if !gdstyle::lexer::has_conflict_marker(&source) {
+                let fixed = fixer::apply_cross_file_fixes(&source, &refs);
+                if fixed != source {
+                    if let Err(e) = std::fs::write(file_path, &fixed) {
+                        report_io_failure("write", file_path, &e);
+                    } else {
+                        cross_ref_fixed.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
 
