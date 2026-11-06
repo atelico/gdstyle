@@ -248,6 +248,15 @@ fn fmt_check_counts_only_the_files_that_would_change() {
         stdout.contains("1 file would be reformatted."),
         "two files checked, one needs changes; got stdout:\n{stdout}"
     );
+    assert_eq!(output.status.code(), Some(1), "stdout:\n{stdout}");
+
+    let output = fmt(&p.config, &[&formatted], true);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a formatted file passes; stdout:\n{}",
+        stdout_of(&output)
+    );
 }
 
 #[test]
@@ -887,7 +896,7 @@ fn check_ends_with_a_note_that_explains_exit_code_2() {
     assert!(
         stderr
             .trim_end()
-            .ends_with("error: 1 path could not be read or written, see above"),
+            .ends_with("error: 1 path could not be processed, see above"),
         "got stderr:\n{stderr}"
     );
 }
@@ -921,7 +930,7 @@ fn check_reports_a_failing_file_once() {
     assert!(
         stderr
             .trim_end()
-            .ends_with("error: 1 path could not be read or written, see above"),
+            .ends_with("error: 1 path could not be processed, see above"),
         "got stderr:\n{stderr}"
     );
     assert_eq!(
@@ -944,10 +953,11 @@ fn check_fix_leaves_a_conflicted_file_untouched() {
         let output = check(&p.config, &p.script, &["--fix"]);
         let stdout = stdout_of(&output);
         let stderr = stderr_of(&output);
-        assert_eq!(output.status.code(), Some(1), "stderr:\n{stderr}");
+        // Exit 2, as `fmt` exits on the same file: the fix was not made.
+        assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
         assert_eq!(std::fs::read_to_string(&p.script).unwrap(), conflicted);
         assert!(
-            stderr.contains("fixes not applied to")
+            stderr.contains("cannot fix")
                 && stderr.contains("bad_test.gd")
                 && stderr.contains("merge conflict marker"),
             "got stderr:\n{stderr}"
@@ -960,33 +970,43 @@ fn check_fix_leaves_a_conflicted_file_untouched() {
 }
 
 #[test]
-fn check_unsafe_fix_leaves_references_in_a_conflicted_file_untouched() {
+fn check_unsafe_fix_exits_2_when_a_reference_sits_in_a_conflicted_file() {
     // The rename lands in the declaring file. The conflicted caller is left
-    // as it is, and each stale reference is named.
+    // as it is, so the rename is half done: each stale reference is named
+    // and the run fails, as it does for a caller that cannot be written.
+    // Without the marker errors (`--select naming`) it used to exit 0.
     let conflicted_caller = "extends Node\n\n\nfunc _ready() -> void:\n\tvar thing := Thing.new()\n<<<<<<< HEAD\n\tthing.DoThing()\n=======\n\tthing.DoThing()\n\tprint(thing)\n>>>>>>> topic\n";
-    let p = project("", DECLARES_DO_THING);
-    let caller = p.script.with_file_name("caller.gd");
-    std::fs::write(&caller, conflicted_caller).expect("write script");
+    for selection in [&[][..], &["--select", "naming"][..]] {
+        let p = project("", DECLARES_DO_THING);
+        let caller = p.script.with_file_name("caller.gd");
+        std::fs::write(&caller, conflicted_caller).expect("write script");
 
-    let output = check(
-        &p.config,
-        &p.script,
-        &["--unsafe-fix", caller.to_str().expect("UTF-8 path")],
-    );
-    let stderr = stderr_of(&output);
-    assert_eq!(output.status.code(), Some(1), "stderr:\n{stderr}");
-    assert_eq!(
-        std::fs::read_to_string(&p.script).unwrap(),
-        DECLARES_DO_THING.replace("DoThing", "do_thing")
-    );
-    assert_eq!(std::fs::read_to_string(&caller).unwrap(), conflicted_caller);
-    assert_eq!(
-        stderr
-            .matches("reference to 'DoThing' (renamed to 'do_thing'")
-            .count(),
-        2,
-        "both stale references are named; got stderr:\n{stderr}"
-    );
+        let mut arguments = vec!["--unsafe-fix", caller.to_str().expect("UTF-8 path")];
+        arguments.extend_from_slice(selection);
+        let output = check(&p.config, &p.script, &arguments);
+        let stderr = stderr_of(&output);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "selection={selection:?}; stderr:\n{stderr}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&p.script).unwrap(),
+            DECLARES_DO_THING.replace("DoThing", "do_thing")
+        );
+        assert_eq!(std::fs::read_to_string(&caller).unwrap(), conflicted_caller);
+        assert!(
+            stderr.contains("cannot fix") && stderr.contains("caller.gd"),
+            "got stderr:\n{stderr}"
+        );
+        assert_eq!(
+            stderr
+                .matches("reference to 'DoThing' (renamed to 'do_thing'")
+                .count(),
+            2,
+            "both stale references are named; got stderr:\n{stderr}"
+        );
+    }
 }
 
 #[test]
@@ -1148,7 +1168,7 @@ fn the_closing_note_counts_every_failure() {
     assert!(
         stderr
             .trim_end()
-            .ends_with("error: 2 paths could not be read or written, see above"),
+            .ends_with("error: 2 paths could not be processed, see above"),
         "got stderr:\n{stderr}"
     );
 
@@ -1202,6 +1222,89 @@ fn check_fix_reports_what_is_left_after_the_fix() {
         stdout.contains("[naming/variable-name-snake-case]")
             && stdout.contains("1 file checked, 1 warning found.")
             && stdout.contains("Fixed 1 file."),
+        "got stdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn check_fix_on_a_conflicted_file_with_nothing_to_fix_is_not_a_failure() {
+    // The markers are errors, so the run exits 1. It exits 2 only when a
+    // fix had to be held back.
+    let p = project(
+        "",
+        "extends Node\n\n<<<<<<< HEAD\nvar y = 1\n=======\nvar y = 2\n>>>>>>> topic\n",
+    );
+
+    let output = check(&p.config, &p.script, &["--fix"]);
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(1), "stderr:\n{stderr}");
+    assert!(!stderr.contains("cannot fix"), "got stderr:\n{stderr}");
+}
+
+#[test]
+fn check_unsafe_fix_still_updates_connections_in_a_conflicted_scene() {
+    // A scene is not lexed, so a line that looks like a marker cannot be
+    // told from text inside a string. The rename only touches the
+    // `[connection]` rows, on both sides of the conflict.
+    let scene_source = "[gd_scene format=3]\n\n<<<<<<< HEAD\n[connection signal=\"pressed\" from=\"A\" to=\".\" method=\"DoThing\"]\n=======\n[connection signal=\"pressed\" from=\"B\" to=\".\" method=\"DoThing\"]\n>>>>>>> topic\n";
+    let p = project("", DECLARES_DO_THING);
+    let scene = p.script.with_file_name("main.tscn");
+    std::fs::write(&scene, scene_source).expect("write scene");
+    let project_dir = p.script.parent().expect("script directory");
+
+    let output = check(&p.config, project_dir, &["--unsafe-fix"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr:\n{}",
+        stderr_of(&output)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&scene).unwrap(),
+        scene_source.replace("DoThing", "do_thing")
+    );
+}
+
+#[test]
+fn a_path_given_twice_is_processed_and_reported_once() {
+    // `fmt` listed a missing path once per mention, and a script named
+    // twice was linted and formatted twice.
+    let p = project("", TWO_VIOLATIONS);
+    let missing = p.script.with_file_name("missing.gd");
+    let other_missing = p.script.with_file_name("other_missing.gd");
+
+    let output = fmt(&p.config, &[&missing, &missing], true);
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert_eq!(
+        stderr.matches("cannot read").count(),
+        1,
+        "got stderr:\n{stderr}"
+    );
+    assert!(
+        stderr
+            .trim_end()
+            .ends_with("error: 1 path could not be formatted, see above"),
+        "got stderr:\n{stderr}"
+    );
+
+    let output = fmt(&p.config, &[&missing, &other_missing], true);
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr
+            .trim_end()
+            .ends_with("error: 2 paths could not be formatted, see above"),
+        "got stderr:\n{stderr}"
+    );
+
+    let output = check(
+        &p.config,
+        &p.script,
+        &[p.script.to_str().expect("UTF-8 path")],
+    );
+    let stdout = stdout_of(&output);
+    assert!(
+        stdout.contains("1 file checked, 2 warnings found."),
         "got stdout:\n{stdout}"
     );
 }

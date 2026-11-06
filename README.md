@@ -287,7 +287,7 @@ The contents of multi-line strings are data, so the formatter leaves them alone:
 
 Line endings are kept too, by `fmt` and `check --fix` alike. A file keeps the style most of its line breaks outside strings use, so a CRLF file stays CRLF. A string keeps its own line endings even when they differ from the rest of the file, because Godot keeps a `\r` inside a string as part of its value.
 
-A file that holds a merge conflict marker (a line starting with seven or more `<`, `=`, `>` or `|`, outside a string) is left untouched by `fmt`, `check --fix` and `check --unsafe-fix`: rewriting either side would make the conflict harder to resolve. `check` reports each marker as a `syntax/lex-error`, `fmt` exits `2`, and `--fix` / `--unsafe-fix` name the file in a warning when they hold fixes back.
+A script that holds a merge conflict marker (a line starting with seven or more `<`, `=`, `>` or `|`, outside a string) is left untouched by `fmt`, `check --fix` and `check --unsafe-fix`: rewriting either side would make the conflict harder to resolve. `check` reports each marker as a `syntax/lex-error`. When `fmt` meets such a script, or `--fix` / `--unsafe-fix` had something to fix in it or a rename made elsewhere needed to reach it, the run names the file in an error and exits `2`. Scenes are not lexed, so `--unsafe-fix` still updates the `[connection]` rows of a conflicted `.tscn` / `.tres` file.
 
 > **Note:** Line wrapping breaks at comma boundaries inside delimiters (parentheses, brackets, braces), `and`/`or` operators in `if`/`elif`/`while` conditions, and word boundaries in long comments. Lines without any breakable pattern (e.g., long strings, property chains, continuation lines without enclosing delimiters) are left alone.
 
@@ -640,7 +640,7 @@ gdstyle [COMMAND] [OPTIONS] [PATHS]...
 |------|---------|
 | `0` | Linting/formatting completed (warnings only, or no issues) |
 | `1` | Linting completed with errors, `--max-warnings` was exceeded, or `fmt --check` found changes |
-| `2` | Configuration error, or the run is incomplete: a path does not exist, a file or directory could not be read, a file could not be written, or `fmt` left a file untouched because it holds a merge conflict marker |
+| `2` | Configuration error, or the run is incomplete: a path does not exist, a file or directory could not be read, a file could not be written, or a script that holds a merge conflict marker kept `fmt`, `--fix` or `--unsafe-fix` from doing its work |
 
 Exit code `2` outranks `1`: when a path was skipped, the report does not cover the whole project. `check` and `fmt` print each failure as it happens and repeat the count as their last line on stderr.
 

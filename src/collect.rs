@@ -153,6 +153,8 @@ pub fn collect_gdscript_files_reporting(
     }
 
     files.sort();
+    // A file named twice, or named and also under a named directory.
+    files.dedup();
     files
 }
 
@@ -238,6 +240,8 @@ pub fn collect_scene_files(paths: &[PathBuf], filter: &PathFilter) -> Vec<PathBu
         }
     }
     files.sort();
+    // A file named twice, or named and also under a named directory.
+    files.dedup();
     files
 }
 
@@ -366,6 +370,22 @@ mod tests {
 
         let got = collect_gdscript_files(std::slice::from_ref(&hidden), &PathFilter::new(&[], &[]));
         assert_eq!(got, [hidden]);
+    }
+
+    #[test]
+    fn a_file_reachable_twice_is_collected_once() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        touch(root, "player.gd");
+        fs::write(root.join("main.tscn"), b"[gd_scene]\n").unwrap();
+        let player = root.join("player.gd");
+        let filter = PathFilter::new(&[], &[]);
+
+        let got = collect_gdscript_files(&[player.clone(), root.to_path_buf(), player], &filter);
+        assert_eq!(got, [root.join("player.gd")]);
+
+        let scenes = collect_scene_files(&[root.to_path_buf(), root.to_path_buf()], &filter);
+        assert_eq!(scenes, [root.join("main.tscn")]);
     }
 
     #[test]

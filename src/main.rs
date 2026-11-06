@@ -18,6 +18,10 @@ use std::process;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 
+/// Why `check --fix` and `fmt` refuse a file. See
+/// `gdstyle::lexer::has_conflict_marker`.
+const HOLDS_CONFLICT_MARKER: &str = "it holds a merge conflict marker";
+
 fn parse_members(source: &str) -> Vec<ClassMember> {
     let mut lexer = Lexer::new(source);
     let tokens = lexer.tokenize();
@@ -315,12 +319,13 @@ fn run_check(options: CheckOptions) {
         _ => OutputFormat::Text,
     };
 
-    // Paths, directories and files that could not be read or written. The
-    // report does not cover them, so one is enough for the run to exit 2. A
-    // set, because the `--unsafe-fix` passes come back to files the lint pass
+    // Paths the run could not finish its work on: a file or directory that
+    // could not be read, a file that could not be written, a conflicted file
+    // a fix had to stay out of. One is enough for the run to exit 2. A set,
+    // because the `--unsafe-fix` passes come back to files the lint pass
     // already failed on, and each path is reported once.
     let failed_paths: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
-    let report_io_failure = |action: &str, path: &Path, error: &std::io::Error| {
+    let report_failure = |action: &str, path: &Path, reason: &dyn std::fmt::Display| {
         // An insert cannot leave the set half-updated, so a lock poisoned by
         // a panic on another thread is still safe to use.
         let is_first_failure = failed_paths
@@ -333,7 +338,7 @@ fn run_check(options: CheckOptions) {
                 "error".red(),
                 action,
                 path.display(),
-                error
+                reason
             );
         }
     };
@@ -342,7 +347,7 @@ fn run_check(options: CheckOptions) {
     // be listed hides the scripts under it, so it counts as a failure too.
     let filter = PathFilter::new(&config.exclude, &config.include);
     let files = collect_gdscript_files_reporting(paths, &filter, &mut |path, error| {
-        report_io_failure("read", path, error);
+        report_failure("read", path, error);
     });
 
     let is_every_path_readable = failed_paths
@@ -382,9 +387,6 @@ fn run_check(options: CheckOptions) {
         was_fixed: bool,
         /// False when the file could not be read, so it was never linted.
         was_checked: bool,
-        /// True when the file has fixes that were held back because it
-        /// holds a conflict marker.
-        is_fix_held_back: bool,
     }
 
     let lint_results: Vec<LintFileResult> = files
@@ -395,12 +397,11 @@ fn run_check(options: CheckOptions) {
                 renames: Vec::new(),
                 was_fixed: false,
                 was_checked: false,
-                is_fix_held_back: false,
             };
             let source = match std::fs::read_to_string(file_path) {
                 Ok(s) => s,
                 Err(e) => {
-                    report_io_failure("read", file_path, &e);
+                    report_failure("read", file_path, &e);
                     return result;
                 }
             };
@@ -416,19 +417,21 @@ fn run_check(options: CheckOptions) {
             let fixed_source = fixer::apply_fixes(&source, &diagnostics, safe_only);
             if fixed_source == source {
                 // `apply_fixes` leaves a conflicted file as it is, the way
-                // `fmt` does. Say so when there was something to fix.
+                // `fmt` does. With something to fix, the run did not do what
+                // it was asked to, and fails as `fmt` fails on that file.
                 let has_fix_to_apply = diagnostics
                     .iter()
                     .any(|d| d.fix.as_ref().is_some_and(|fix| fix.is_safe || !safe_only));
-                result.is_fix_held_back =
-                    has_fix_to_apply && gdstyle::lexer::has_conflict_marker(&source);
+                if has_fix_to_apply && gdstyle::lexer::has_conflict_marker(&source) {
+                    report_failure("fix", file_path, &HOLDS_CONFLICT_MARKER);
+                }
                 result.diagnostics = diagnostics;
                 return result;
             }
             if let Err(e) = std::fs::write(file_path, &fixed_source) {
                 // The file on disk is unchanged: it keeps its diagnostics,
                 // and its renames must not reach the files that reference it.
-                report_io_failure("write", file_path, &e);
+                report_failure("write", file_path, &e);
                 result.diagnostics = diagnostics;
                 return result;
             }
@@ -448,8 +451,7 @@ fn run_check(options: CheckOptions) {
     let mut all_renames: Vec<fixer::AppliedRename> = Vec::new();
     let mut fixed_count = 0;
     let mut checked_count = 0;
-    // `lint_results` is in the order of `files`, so these warnings are too.
-    for (file_path, r) in files.iter().zip(lint_results) {
+    for r in lint_results {
         all_diagnostics.extend(r.diagnostics);
         all_renames.extend(r.renames);
         if r.was_fixed {
@@ -457,13 +459,6 @@ fn run_check(options: CheckOptions) {
         }
         if r.was_checked {
             checked_count += 1;
-        }
-        if r.is_fix_held_back {
-            eprintln!(
-                "{}: fixes not applied to {}: it holds a merge conflict marker",
-                "warning".yellow(),
-                file_path.display()
-            );
         }
     }
     // Sort diagnostics for deterministic output across runs (parallel
@@ -484,7 +479,7 @@ fn run_check(options: CheckOptions) {
             let source = match std::fs::read_to_string(file_path) {
                 Ok(s) => s,
                 Err(e) => {
-                    report_io_failure("read", file_path, &e);
+                    report_failure("read", file_path, &e);
                     return;
                 }
             };
@@ -493,13 +488,16 @@ fn run_check(options: CheckOptions) {
             if refs.is_empty() {
                 return;
             }
-            // A conflicted file is left as it is here too. Its references
-            // are then reported below as not updated.
-            if !gdstyle::lexer::has_conflict_marker(&source) {
+            if gdstyle::lexer::has_conflict_marker(&source) {
+                // A conflicted file is left as it is here too, so the rename
+                // stays half done: the run fails, and the references are
+                // named below as not updated.
+                report_failure("fix", file_path, &HOLDS_CONFLICT_MARKER);
+            } else {
                 let fixed = fixer::apply_cross_file_fixes(&source, &refs);
                 if fixed != source {
                     if let Err(e) = std::fs::write(file_path, &fixed) {
-                        report_io_failure("write", file_path, &e);
+                        report_failure("write", file_path, &e);
                     } else {
                         cross_ref_fixed.fetch_add(1, Ordering::Relaxed);
                     }
@@ -539,7 +537,7 @@ fn run_check(options: CheckOptions) {
                 Ok(s) => s,
                 Err(e) => {
                     // Its connections keep the old names, so say so.
-                    report_io_failure("read", scene_path, &e);
+                    report_failure("read", scene_path, &e);
                     continue;
                 }
             };
@@ -562,7 +560,7 @@ fn run_check(options: CheckOptions) {
                         );
                     }
                 }
-                Err(e) => report_io_failure("write", scene_path, &e),
+                Err(e) => report_failure("write", scene_path, &e),
             }
         }
     }
@@ -598,7 +596,7 @@ fn run_check(options: CheckOptions) {
         }
     }
 
-    // Exit code. A file that could not be read or written outranks the
+    // Exit code. A path the run could not finish its work on outranks the
     // diagnostics: the report above is incomplete. The per-file errors were
     // printed before the report, so repeat the reason here, on stderr so
     // `--format json` keeps stdout machine-readable.
@@ -608,7 +606,7 @@ fn run_check(options: CheckOptions) {
         .len();
     if failed_path_count > 0 {
         eprintln!(
-            "{}: {} path{} could not be read or written, see above",
+            "{}: {} path{} could not be processed, see above",
             "error".red(),
             failed_path_count,
             if failed_path_count == 1 { "" } else { "s" }
@@ -670,16 +668,19 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
     // A path that does not exist or a directory that cannot be listed hides
     // the scripts under it, so it counts as a failure like an unreadable file.
     let filter = PathFilter::new(&config.exclude, &config.include);
-    let mut unreadable_path_count = 0;
+    // A set: a path named twice is reported once.
+    let mut unreadable_paths = BTreeSet::new();
     let files = collect_gdscript_files_reporting(paths, &filter, &mut |path, error| {
-        eprintln!(
-            "{}: cannot read {}: {}",
-            "error".red(),
-            path.display(),
-            error
-        );
-        unreadable_path_count += 1;
+        if unreadable_paths.insert(path.to_path_buf()) {
+            eprintln!(
+                "{}: cannot read {}: {}",
+                "error".red(),
+                path.display(),
+                error
+            );
+        }
     });
+    let unreadable_path_count = unreadable_paths.len();
 
     if files.is_empty() && unreadable_path_count == 0 {
         eprintln!("{}: no .gd files found", "warning".yellow());
@@ -753,9 +754,10 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
         }
         if r.conflict {
             eprintln!(
-                "{}: cannot format {}: it holds a merge conflict marker",
+                "{}: cannot format {}: {}",
                 "error".red(),
-                r.path.display()
+                r.path.display(),
+                HOLDS_CONFLICT_MARKER
             );
             failed_file_count += 1;
             continue;
