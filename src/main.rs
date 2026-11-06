@@ -12,9 +12,11 @@ use gdstyle::reporter::{self, OutputFormat};
 use gdstyle::rules;
 use rayon::prelude::*;
 use similar::{ChangeTag, TextDiff};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, PoisonError};
 
 fn parse_members(source: &str) -> Vec<ClassMember> {
     let mut lexer = Lexer::new(source);
@@ -343,17 +345,26 @@ fn run_check(options: CheckOptions) {
     }
 
     // Files that could not be read or written. The report does not cover
-    // them, so one is enough for the run to exit 2.
-    let io_failure_count = AtomicUsize::new(0);
+    // them, so one is enough for the run to exit 2. A set, because the
+    // `--unsafe-fix` passes come back to files the lint pass already failed
+    // on, and each file is reported once.
+    let failed_paths: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
     let report_io_failure = |action: &str, path: &Path, error: &std::io::Error| {
-        eprintln!(
-            "{}: cannot {} {}: {}",
-            "error".red(),
-            action,
-            path.display(),
-            error
-        );
-        io_failure_count.fetch_add(1, Ordering::Relaxed);
+        // An insert cannot leave the set half-updated, so a lock poisoned by
+        // a panic on another thread is still safe to use.
+        let is_first_failure = failed_paths
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(path.to_path_buf());
+        if is_first_failure {
+            eprintln!(
+                "{}: cannot {} {}: {}",
+                "error".red(),
+                action,
+                path.display(),
+                error
+            );
+        }
     };
 
     // Lint (and optionally fix) all files. The per-file work is independent,
@@ -561,13 +572,16 @@ fn run_check(options: CheckOptions) {
     // diagnostics: the report above is incomplete. The per-file errors were
     // printed before the report, so repeat the reason here, on stderr so
     // `--format json` keeps stdout machine-readable.
-    let io_failure_count = io_failure_count.load(Ordering::Relaxed);
-    if io_failure_count > 0 {
+    let failed_file_count = failed_paths
+        .into_inner()
+        .unwrap_or_else(PoisonError::into_inner)
+        .len();
+    if failed_file_count > 0 {
         eprintln!(
-            "{}: {} read or write error{}, see above",
+            "{}: {} file{} could not be read or written, see above",
             "error".red(),
-            io_failure_count,
-            if io_failure_count == 1 { "" } else { "s" }
+            failed_file_count,
+            if failed_file_count == 1 { "" } else { "s" }
         );
         process::exit(2);
     }

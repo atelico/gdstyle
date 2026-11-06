@@ -888,7 +888,46 @@ fn check_ends_with_a_note_that_explains_exit_code_2() {
     assert!(
         stderr
             .trim_end()
-            .ends_with("error: 1 read or write error, see above"),
+            .ends_with("error: 1 file could not be read or written, see above"),
         "got stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn check_reports_a_failing_file_once() {
+    // `--unsafe-fix` comes back to every file to rewrite references, so a
+    // file the lint pass could not read was reported a second time.
+    let p = project("", DECLARES_DO_THING);
+    let caller = p.script.with_file_name("caller.gd");
+    std::fs::write(&caller, CALLS_DO_THING).expect("write script");
+    let unreadable = p.script.with_file_name("unreadable.gd");
+    std::fs::write(&unreadable, NOT_UTF8).expect("write script");
+
+    let output = check(
+        &p.config,
+        &p.script,
+        &[
+            "--unsafe-fix",
+            caller.to_str().expect("UTF-8 path"),
+            unreadable.to_str().expect("UTF-8 path"),
+        ],
+    );
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert_eq!(
+        stderr.matches("cannot read").count(),
+        1,
+        "got stderr:\n{stderr}"
+    );
+    assert!(
+        stderr
+            .trim_end()
+            .ends_with("error: 1 file could not be read or written, see above"),
+        "got stderr:\n{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&caller).unwrap(),
+        CALLS_DO_THING.replace("DoThing", "do_thing"),
+        "the rename still reaches the readable caller"
     );
 }
