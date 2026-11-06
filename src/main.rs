@@ -408,13 +408,13 @@ fn run_check(options: CheckOptions) {
 
             let fixed_source = fixer::apply_fixes(&source, &diagnostics, safe_only);
             if fixed_source == source {
-                result.diagnostics = diagnostics;
-                return result;
-            }
-            // Fixes would rewrite the code on both sides of a conflict, so a
-            // conflicted file is left as it is, the way `fmt` leaves it.
-            if gdstyle::lexer::has_conflict_marker(&source) {
-                result.is_fix_held_back = true;
+                // `apply_fixes` leaves a conflicted file as it is, the way
+                // `fmt` does. Say so when there was something to fix.
+                let has_fix_to_apply = diagnostics
+                    .iter()
+                    .any(|d| d.fix.as_ref().is_some_and(|fix| fix.is_safe || !safe_only));
+                result.is_fix_held_back =
+                    has_fix_to_apply && gdstyle::lexer::has_conflict_marker(&source);
                 result.diagnostics = diagnostics;
                 return result;
             }

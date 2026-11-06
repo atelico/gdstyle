@@ -8895,3 +8895,62 @@ fn format_source_returns_a_conflicted_file_unchanged() {
     let crlf = conflicted.replace('\n', "\r\n");
     assert_eq!(formatter::format_source(&crlf, &default_config()), crlf);
 }
+
+/// A conflict at the tail of a multi-line dictionary. Rules that read tokens
+/// see the `>>>>>>> topic` error token as the last element.
+const CONFLICT_IN_DICTIONARY: &str = "extends Node\n\nvar d := {\n\t\"a\": 1,\n<<<<<<< HEAD\n\t\"b\":2,\n=======\n\t\"b\":3,\n>>>>>>> topic\n}\n";
+
+#[test]
+fn only_the_marker_is_reported_on_a_conflict_marker_line() {
+    // `format/trailing-comma` asked for a comma after `>>>>>>> topic`.
+    let marker_lines = [5, 7, 9];
+    let diagnostics = linter::lint_source(CONFLICT_IN_DICTIONARY, "test.gd", &default_config());
+    let on_marker_lines: Vec<(usize, &str)> = diagnostics
+        .iter()
+        .filter(|d| marker_lines.contains(&d.span.line))
+        .map(|d| (d.span.line, d.rule.as_str()))
+        .collect();
+    assert_eq!(
+        on_marker_lines,
+        vec![
+            (5, "syntax/lex-error"),
+            (7, "syntax/lex-error"),
+            (9, "syntax/lex-error")
+        ]
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.rule == "format/colon-spacing" && d.span.line == 6),
+        "the code between the markers is still linted, got {diagnostics:?}"
+    );
+
+    // Turning the marker rule off does not bring the other rules back.
+    let config = config_with_rules_off(&["syntax/lex-error"]);
+    let diagnostics = linter::lint_source(CONFLICT_IN_DICTIONARY, "test.gd", &config);
+    assert!(
+        diagnostics
+            .iter()
+            .all(|d| !marker_lines.contains(&d.span.line)),
+        "got {diagnostics:?}"
+    );
+}
+
+#[test]
+fn apply_fixes_returns_a_conflicted_source_unchanged() {
+    // The fixes would space out both sides of the conflict. This is the
+    // path `check --fix` and the GDExtension's fix functions take.
+    for safe_only in [true, false] {
+        for source in [
+            CONFLICT_IN_DICTIONARY.to_string(),
+            CONFLICT_IN_DICTIONARY.replace('\n', "\r\n"),
+        ] {
+            let diagnostics = linter::lint_source(&source, "test.gd", &default_config());
+            assert!(
+                diagnostics.iter().any(|d| d.fix.is_some()),
+                "the source has something to fix, got {diagnostics:?}"
+            );
+            assert_eq!(fixer::apply_fixes(&source, &diagnostics, safe_only), source);
+        }
+    }
+}

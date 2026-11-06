@@ -14,6 +14,37 @@ fn is_conflict_marker_char(ch: char) -> bool {
     matches!(ch, '<' | '=' | '>' | '|')
 }
 
+/// True when `line_start`, the characters of a line from its first column,
+/// begins with a conflict marker: [`CONFLICT_MARKER_LEN`] or more of one
+/// marker character.
+fn starts_with_conflict_marker(mut line_start: impl Iterator<Item = char>) -> bool {
+    let Some(marker) = line_start.next() else {
+        return false;
+    };
+    let rest_of_run = CONFLICT_MARKER_LEN - 1;
+    is_conflict_marker_char(marker)
+        && line_start
+            .take(rest_of_run)
+            .filter(|&ch| ch == marker)
+            .count()
+            == rest_of_run
+}
+
+/// True when a line of `source` starts like a conflict marker. A line inside
+/// a string counts here too, so this can only rule a source out cheaply: the
+/// tokens decide (see [`is_conflict_marker`]).
+pub(crate) fn may_hold_conflict_marker(source: &str) -> bool {
+    source
+        .lines()
+        .any(|line| starts_with_conflict_marker(line.chars()))
+}
+
+/// True when `token` is a conflict marker line, the lex error that
+/// `Lexer::read_conflict_marker` builds.
+pub(crate) fn is_conflict_marker(token: &Token) -> bool {
+    matches!(&token.kind, TokenKind::Error(message) if message.starts_with(CONFLICT_MARKER_MESSAGE))
+}
+
 /// True when `source` holds a version-control conflict marker outside a
 /// string. The cheap line scan comes first, so a file without one is not
 /// lexed again.
@@ -24,16 +55,7 @@ fn is_conflict_marker_char(ch: char) -> bool {
 /// assert!(gdstyle::lexer::has_conflict_marker("var a = 1\n<<<<<<< HEAD\n"))
 /// ```
 pub fn has_conflict_marker(source: &str) -> bool {
-    let may_hold_one = source.lines().any(|line| {
-        let bytes = line.as_bytes();
-        bytes.len() >= CONFLICT_MARKER_LEN
-            && is_conflict_marker_char(char::from(bytes[0]))
-            && bytes[..CONFLICT_MARKER_LEN].iter().all(|&b| b == bytes[0])
-    });
-    may_hold_one
-        && Lexer::new(source).tokenize().iter().any(
-            |token| matches!(&token.kind, TokenKind::Error(m) if m.starts_with(CONFLICT_MARKER_MESSAGE)),
-        )
+    may_hold_conflict_marker(source) && Lexer::new(source).tokenize().iter().any(is_conflict_marker)
 }
 
 /// Tokenizes GDScript source code into a stream of tokens.
@@ -372,13 +394,10 @@ impl<'a> Lexer<'a> {
     /// what follows the run.
     fn read_conflict_marker(&mut self) -> Option<Token> {
         let rest = &self.chars[self.position..];
-        let marker = *rest.first()?;
-        if !is_conflict_marker_char(marker) || rest.len() < CONFLICT_MARKER_LEN {
+        if !starts_with_conflict_marker(rest.iter().copied()) {
             return None;
         }
-        if rest[..CONFLICT_MARKER_LEN].iter().any(|&ch| ch != marker) {
-            return None;
-        }
+        let marker = rest[0];
         let start_offset = self.byte_offset;
         let mut text = String::new();
         while !self.is_at_end() && !matches!(self.current_char(), '\n' | '\r') {

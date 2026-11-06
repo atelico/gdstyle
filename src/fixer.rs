@@ -75,6 +75,9 @@ pub struct CrossFileReference {
 /// position, collision detection) so that an identifier rename does not
 /// accidentally rewrite an unrelated declaration that happens to share a name.
 ///
+/// A source holding a version-control conflict marker is returned as it is,
+/// like [`crate::formatter::format_source`] returns it.
+///
 /// # Example
 ///
 /// ```
@@ -97,6 +100,11 @@ pub fn apply_fixes(source: &str, diagnostics: &[Diagnostic], safe_only: bool) ->
 
     // Single tokenize + parse pass for everything we need below.
     let tokens = crate::source_cache::tokens_of(source);
+    // Fixes would rewrite the code on both sides of a conflict, which makes
+    // it harder to resolve.
+    if tokens.iter().any(crate::lexer::is_conflict_marker) {
+        return original_source.to_string();
+    }
     let members = crate::source_cache::members_of(source, &tokens);
     let class_name = extract_class_name(&members);
     let existing_names = collect_existing_names(&members);

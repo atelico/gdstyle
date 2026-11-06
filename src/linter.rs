@@ -48,9 +48,23 @@ pub fn lint_source(source: &str, file_path: &str, config: &Config) -> Vec<Diagno
     // Run all rules.
     let mut diagnostics = rules::run_all_rules_with_source(&file, &tokens, config, Some(source));
 
+    // A conflict marker line is not code, so the marker is the only thing to
+    // report on it. Rules that read tokens take its error token for an
+    // element: `format/trailing-comma` asked for a comma after
+    // `>>>>>>> topic`. The lines come out in ascending order.
+    let marker_lines: Vec<usize> = tokens
+        .iter()
+        .filter(|token| crate::lexer::is_conflict_marker(token))
+        .map(|token| token.span.line)
+        .collect();
+    if !marker_lines.is_empty() {
+        diagnostics.retain(|d| marker_lines.binary_search(&d.span.line).is_err());
+    }
+
     // Surface lexer errors (unterminated strings, invalid numbers, unexpected
-    // characters). Without this, a syntactically broken file would be
-    // reported as clean: the worst failure mode for a linter.
+    // characters, merge conflict markers). Without this, a syntactically
+    // broken file would be reported as clean: the worst failure mode for a
+    // linter.
     if config.is_rule_enabled("syntax/lex-error") {
         for token in tokens.iter() {
             if let crate::token::TokenKind::Error(ref message) = token.kind {
