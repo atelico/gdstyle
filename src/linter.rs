@@ -48,27 +48,21 @@ pub fn lint_source(source: &str, file_path: &str, config: &Config) -> Vec<Diagno
     // Run all rules.
     let mut diagnostics = rules::run_all_rules_with_source(&file, &tokens, config, Some(source));
 
-    // A conflict marker line is not code, so the marker is the only thing to
-    // report on it. Rules that read tokens take its error token for an
-    // element: `format/trailing-comma` asked for a comma after
-    // `>>>>>>> topic`. The lines come out in ascending order.
-    let marker_lines: Vec<usize> = tokens
-        .iter()
-        .filter(|token| crate::lexer::is_conflict_marker(token))
-        .map(|token| token.span.line)
-        .collect();
-    if !marker_lines.is_empty() {
-        diagnostics.retain(|d| marker_lines.binary_search(&d.span.line).is_err());
-    }
-
     // Surface lexer errors (unterminated strings, invalid numbers, unexpected
     // characters, merge conflict markers). Without this, a syntactically
     // broken file would be reported as clean: the worst failure mode for a
     // linter.
-    if config.is_rule_enabled("syntax/lex-error") {
-        for token in tokens.iter() {
-            if let crate::token::TokenKind::Error(ref message) = token.kind {
-                diagnostics.push(Diagnostic::error(
+    let reports_lex_errors = config.is_rule_enabled("syntax/lex-error");
+    let mut lex_errors = Vec::new();
+    // Lines holding a conflict marker, in ascending order.
+    let mut marker_lines = Vec::new();
+    for token in tokens.iter() {
+        if let crate::token::TokenKind::Error(ref message) = token.kind {
+            if crate::lexer::is_conflict_marker(token) {
+                marker_lines.push(token.span.line);
+            }
+            if reports_lex_errors {
+                lex_errors.push(Diagnostic::error(
                     "syntax/lex-error",
                     message.clone(),
                     token.span,
@@ -77,6 +71,13 @@ pub fn lint_source(source: &str, file_path: &str, config: &Config) -> Vec<Diagno
             }
         }
     }
+    // A marker line is not code, so the marker is the only thing to report on
+    // it. Rules that read tokens take its error token for an element:
+    // `format/trailing-comma` asked for a comma after `>>>>>>> topic`.
+    if !marker_lines.is_empty() {
+        diagnostics.retain(|d| marker_lines.binary_search(&d.span.line).is_err());
+    }
+    diagnostics.extend(lex_errors);
 
     // Filter out suppressed diagnostics.
     diagnostics.retain(|d| !is_suppressed(d, &suppressed_lines));

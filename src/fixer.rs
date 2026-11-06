@@ -101,8 +101,11 @@ pub fn apply_fixes(source: &str, diagnostics: &[Diagnostic], safe_only: bool) ->
     // Single tokenize + parse pass for everything we need below.
     let tokens = crate::source_cache::tokens_of(source);
     // Fixes would rewrite the code on both sides of a conflict, which makes
-    // it harder to resolve.
-    if tokens.iter().any(crate::lexer::is_conflict_marker) {
+    // it harder to resolve. The line scan keeps the token walk off the
+    // common path.
+    if crate::lexer::may_hold_conflict_marker(source)
+        && tokens.iter().any(crate::lexer::is_conflict_marker)
+    {
         return original_source.to_string();
     }
     let members = crate::source_cache::members_of(source, &tokens);
