@@ -636,27 +636,31 @@ fn fmt_check_exits_2_on_an_unreadable_file() {
     );
 }
 
+/// Make `path` read-only and return the permissions to restore afterwards.
+/// `None` when this user can still write the file (root in a container):
+/// there is then no write failure to observe, and the caller skips the test.
+fn make_read_only(path: &Path) -> Option<std::fs::Permissions> {
+    let writable = std::fs::metadata(path)
+        .expect("file metadata")
+        .permissions();
+    let mut read_only = writable.clone();
+    read_only.set_readonly(true);
+    std::fs::set_permissions(path, read_only).expect("make the file read-only");
+    if std::fs::OpenOptions::new().write(true).open(path).is_ok() {
+        eprintln!("skipped: this user can write a read-only file");
+        return None;
+    }
+    Some(writable)
+}
+
 #[test]
 fn fmt_exits_2_when_a_file_cannot_be_written() {
     // `fmt` used to print the error and exit 0.
     let source = "extends Node\n\nvar x := 'a'\n";
     let p = project("", source);
-    let writable = std::fs::metadata(&p.script)
-        .expect("script metadata")
-        .permissions();
-    let mut read_only = writable.clone();
-    read_only.set_readonly(true);
-    std::fs::set_permissions(&p.script, read_only).expect("make the script read-only");
-    // A privileged user (root in a container) can still write the file, and
-    // then there is no write failure to observe.
-    if std::fs::OpenOptions::new()
-        .write(true)
-        .open(&p.script)
-        .is_ok()
-    {
-        eprintln!("skipped: this user can write a read-only file");
+    let Some(writable) = make_read_only(&p.script) else {
         return;
-    }
+    };
 
     let output = fmt(&p.config, &[&p.script], false);
     // Windows cannot delete a read-only file, so restore the permissions
@@ -670,4 +674,134 @@ fn fmt_exits_2_when_a_file_cannot_be_written() {
         "got stderr:\n{stderr}"
     );
     assert_eq!(std::fs::read_to_string(&p.script).unwrap(), source);
+}
+
+/// A class whose method name `--unsafe-fix` renames to `do_thing`.
+const DECLARES_DO_THING: &str =
+    "class_name Thing\nextends Node\n\n\nfunc DoThing() -> void:\n\tpass\n";
+
+#[test]
+fn check_exits_2_on_an_unreadable_file_and_still_reports_the_rest() {
+    // `check` used to print the error without the file name and exit by the
+    // diagnostics alone. Those would exit 1 here: the unreadable file
+    // outranks them.
+    let p = project("", "extends Node\n\n<<<<<<< HEAD\n");
+    let unreadable = p.script.with_file_name("unreadable.gd");
+    std::fs::write(&unreadable, NOT_UTF8).expect("write script");
+
+    let output = check(
+        &p.config,
+        &p.script,
+        &[unreadable.to_str().expect("UTF-8 path")],
+    );
+    let stdout = stdout_of(&output);
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("cannot read") && stderr.contains("unreadable.gd"),
+        "got stderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("3:1 error merge conflict marker '<<<<<<<'"),
+        "the readable file is still reported; got stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("1 file checked"),
+        "a file that was never read is not counted as checked; got stdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn check_fix_exits_2_when_a_file_cannot_be_written() {
+    // `check --fix` used to print the error and exit 0.
+    let source = "extends Node\n\nvar y=1\n";
+    let p = project("", source);
+    let Some(writable) = make_read_only(&p.script) else {
+        return;
+    };
+
+    let output = check(&p.config, &p.script, &["--fix"]);
+    // Windows cannot delete a read-only file, so restore the permissions
+    // before any assertion can fail and leave the temporary directory behind.
+    std::fs::set_permissions(&p.script, writable).expect("restore the permissions");
+
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("cannot write") && stderr.contains("bad_test.gd"),
+        "got stderr:\n{stderr}"
+    );
+    assert_eq!(std::fs::read_to_string(&p.script).unwrap(), source);
+}
+
+#[test]
+fn check_unsafe_fix_exits_2_when_a_reference_cannot_be_rewritten() {
+    // The rename lands in the declaring file, but the read-only file that
+    // calls the method keeps the old name. `check` used to exit 0.
+    let caller_source =
+        "extends Node\n\n\nfunc _ready() -> void:\n\tvar thing := Thing.new()\n\tthing.DoThing()\n";
+    let p = project("", DECLARES_DO_THING);
+    let caller = p.script.with_file_name("caller.gd");
+    std::fs::write(&caller, caller_source).expect("write script");
+    let Some(writable) = make_read_only(&caller) else {
+        return;
+    };
+
+    let output = check(
+        &p.config,
+        &p.script,
+        &["--unsafe-fix", caller.to_str().expect("UTF-8 path")],
+    );
+    std::fs::set_permissions(&caller, writable).expect("restore the permissions");
+
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("cannot write") && stderr.contains("caller.gd"),
+        "got stderr:\n{stderr}"
+    );
+    assert_eq!(std::fs::read_to_string(&caller).unwrap(), caller_source);
+}
+
+#[test]
+fn check_unsafe_fix_exits_2_on_an_unreadable_scene() {
+    // A scene that cannot be read keeps its connections to the old names.
+    // `check` used to skip it without a word.
+    let p = project("", DECLARES_DO_THING);
+    let scene = p.script.with_file_name("broken.tscn");
+    std::fs::write(&scene, NOT_UTF8).expect("write scene");
+    let project_dir = p.script.parent().expect("script directory");
+
+    let output = check(&p.config, project_dir, &["--unsafe-fix"]);
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("cannot read") && stderr.contains("broken.tscn"),
+        "got stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn check_unsafe_fix_exits_2_when_a_scene_cannot_be_written() {
+    // The method is renamed in the script, but the read-only scene keeps
+    // connecting to the old name. `check` used to exit 0.
+    let scene_source = "[gd_scene format=3]\n\n[connection signal=\"pressed\" from=\"Button\" to=\".\" method=\"DoThing\"]\n";
+    let p = project("", DECLARES_DO_THING);
+    let scene = p.script.with_file_name("main.tscn");
+    std::fs::write(&scene, scene_source).expect("write scene");
+    let project_dir = p.script.parent().expect("script directory");
+    let Some(writable) = make_read_only(&scene) else {
+        return;
+    };
+
+    let output = check(&p.config, project_dir, &["--unsafe-fix"]);
+    std::fs::set_permissions(&scene, writable).expect("restore the permissions");
+
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("cannot write") && stderr.contains("main.tscn"),
+        "got stderr:\n{stderr}"
+    );
+    assert_eq!(std::fs::read_to_string(&scene).unwrap(), scene_source);
 }

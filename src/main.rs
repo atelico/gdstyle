@@ -342,12 +342,28 @@ fn run_check(options: CheckOptions) {
         }
     }
 
+    // Files that could not be read or written. The report does not cover
+    // them, so one is enough for the run to exit 2.
+    let io_failure_count = AtomicUsize::new(0);
+    let report_io_failure = |action: &str, path: &Path, error: &std::io::Error| {
+        eprintln!(
+            "{}: cannot {} {}: {}",
+            "error".red(),
+            action,
+            path.display(),
+            error
+        );
+        io_failure_count.fetch_add(1, Ordering::Relaxed);
+    };
+
     // Lint (and optionally fix) all files. The per-file work is independent,
     // so we run it across rayon's thread pool and aggregate the results.
     struct LintFileResult {
         diagnostics: Vec<Diagnostic>,
         renames: Vec<fixer::AppliedRename>,
         was_fixed: bool,
+        /// False when the file could not be read, so it was never linted.
+        was_checked: bool,
     }
 
     let lint_results: Vec<LintFileResult> = files
@@ -357,14 +373,16 @@ fn run_check(options: CheckOptions) {
                 diagnostics: Vec::new(),
                 renames: Vec::new(),
                 was_fixed: false,
+                was_checked: false,
             };
             let source = match std::fs::read_to_string(file_path) {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("{}: {}", "error".red(), e);
+                    report_io_failure("read", file_path, &e);
                     return result;
                 }
             };
+            result.was_checked = true;
             let file_str = file_path.to_string_lossy().to_string();
             let diagnostics = linter::lint_source(&source, &file_str, &config);
 
@@ -379,12 +397,7 @@ fn run_check(options: CheckOptions) {
                 let fixed_source = fixer::apply_fixes(&source, &diagnostics, safe_only);
                 if fixed_source != source {
                     if let Err(e) = std::fs::write(file_path, &fixed_source) {
-                        eprintln!(
-                            "{}: cannot write {}: {}",
-                            "error".red(),
-                            file_path.display(),
-                            e
-                        );
+                        report_io_failure("write", file_path, &e);
                     } else {
                         result.was_fixed = true;
                     }
@@ -404,11 +417,15 @@ fn run_check(options: CheckOptions) {
     let mut all_diagnostics: Vec<Diagnostic> = Vec::new();
     let mut all_renames: Vec<fixer::AppliedRename> = Vec::new();
     let mut fixed_count = 0;
+    let mut checked_count = 0;
     for r in lint_results {
         all_diagnostics.extend(r.diagnostics);
         all_renames.extend(r.renames);
         if r.was_fixed {
             fixed_count += 1;
+        }
+        if r.was_checked {
+            checked_count += 1;
         }
     }
     // Sort diagnostics for deterministic output across runs (parallel
@@ -429,12 +446,7 @@ fn run_check(options: CheckOptions) {
             let source = match std::fs::read_to_string(file_path) {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!(
-                        "{}: cannot read {}: {}",
-                        "error".red(),
-                        file_path.display(),
-                        e
-                    );
+                    report_io_failure("read", file_path, &e);
                     return;
                 }
             };
@@ -446,12 +458,7 @@ fn run_check(options: CheckOptions) {
             let fixed = fixer::apply_cross_file_fixes(&source, &refs);
             if fixed != source {
                 if let Err(e) = std::fs::write(file_path, &fixed) {
-                    eprintln!(
-                        "{}: cannot write {}: {}",
-                        "error".red(),
-                        file_path.display(),
-                        e
-                    );
+                    report_io_failure("write", file_path, &e);
                 } else {
                     cross_ref_fixed.fetch_add(1, Ordering::Relaxed);
                 }
@@ -486,8 +493,13 @@ fn run_check(options: CheckOptions) {
         // runtime, so `--unsafe-fix` must touch `.tscn`/`.tres` too.
         let scene_files = collect_scene_files(paths, &filter);
         for scene_path in &scene_files {
-            let Ok(scene_source) = std::fs::read_to_string(scene_path) else {
-                continue;
+            let scene_source = match std::fs::read_to_string(scene_path) {
+                Ok(s) => s,
+                Err(e) => {
+                    // Its connections keep the old names, so say so.
+                    report_io_failure("read", scene_path, &e);
+                    continue;
+                }
             };
             let (rewritten, applied) = fixer::apply_scene_renames(&scene_source, &all_renames);
             if applied.is_empty() {
@@ -508,12 +520,7 @@ fn run_check(options: CheckOptions) {
                         );
                     }
                 }
-                Err(e) => eprintln!(
-                    "{}: cannot write {}: {}",
-                    "error".red(),
-                    scene_path.display(),
-                    e
-                ),
+                Err(e) => report_io_failure("write", scene_path, &e),
             }
         }
     }
@@ -526,7 +533,7 @@ fn run_check(options: CheckOptions) {
             }
             println!(
                 "{}",
-                reporter::format_summary(&all_diagnostics, files.len())
+                reporter::format_summary(&all_diagnostics, checked_count)
             );
             if do_fix && fixed_count > 0 {
                 println!(
@@ -545,7 +552,12 @@ fn run_check(options: CheckOptions) {
         }
     }
 
-    // Exit code.
+    // Exit code. A file that could not be read or written outranks the
+    // diagnostics: the report above is incomplete.
+    if io_failure_count.load(Ordering::Relaxed) > 0 {
+        process::exit(2);
+    }
+
     let has_errors = all_diagnostics
         .iter()
         .any(|d| d.severity == Severity::Error);
