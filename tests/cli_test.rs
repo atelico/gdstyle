@@ -888,7 +888,7 @@ fn check_ends_with_a_note_that_explains_exit_code_2() {
     assert!(
         stderr
             .trim_end()
-            .ends_with("error: 1 file could not be read or written, see above"),
+            .ends_with("error: 1 path could not be read or written, see above"),
         "got stderr:\n{stderr}"
     );
 }
@@ -922,7 +922,7 @@ fn check_reports_a_failing_file_once() {
     assert!(
         stderr
             .trim_end()
-            .ends_with("error: 1 file could not be read or written, see above"),
+            .ends_with("error: 1 path could not be read or written, see above"),
         "got stderr:\n{stderr}"
     );
     assert_eq!(
@@ -1006,7 +1006,7 @@ fn fmt_ends_with_a_note_that_explains_exit_code_2() {
         assert!(
             stderr
                 .trim_end()
-                .ends_with("error: 1 file could not be formatted, see above"),
+                .ends_with("error: 1 path could not be formatted, see above"),
             "check_only={check_only}; got stderr:\n{stderr}"
         );
     }
@@ -1038,4 +1038,146 @@ fn check_json_stays_parsable_when_a_file_cannot_be_read() {
         Some(2),
         "the two violations of the readable file; got:\n{report}"
     );
+}
+
+#[test]
+fn check_exits_2_on_a_path_that_does_not_exist() {
+    // A missing path was dropped without a word: `check src tests` passed
+    // with `tests` gone, and a run with no other path said "no .gd files
+    // found" and exited 0.
+    let p = project("", "extends Node\n");
+    let missing = p.script.with_file_name("missing.gd");
+    let missing_arg = missing.to_str().expect("UTF-8 path");
+
+    let output = check(&p.config, &p.script, &[missing_arg]);
+    let stdout = stdout_of(&output);
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("cannot read") && stderr.contains("missing.gd"),
+        "got stderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("1 file checked"),
+        "the path that exists is still checked; got stdout:\n{stdout}"
+    );
+
+    let output = check(&p.config, &missing, &[]);
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("cannot read") && !stderr.contains("no .gd files found"),
+        "got stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn fmt_exits_2_on_a_path_that_does_not_exist() {
+    let p = project("", "extends Node\n\nvar x := 'a'\n");
+    let missing = p.script.with_file_name("missing.gd");
+
+    let output = fmt(&p.config, &[&missing, &p.script], false);
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("cannot read") && stderr.contains("missing.gd"),
+        "got stderr:\n{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&p.script).unwrap(),
+        "extends Node\n\nvar x := \"a\"\n",
+        "the path that exists is still formatted"
+    );
+
+    let output = fmt(&p.config, &[&missing], true);
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(
+        !stderr.contains("no .gd files found"),
+        "got stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn a_hidden_file_does_not_fail_the_run() {
+    // An editor lock file such as `.#player.gd` ends in `.gd` and is not a
+    // script. Once an unreadable file meant exit 2, it failed every run.
+    let p = project("", "extends Node\n");
+    std::fs::write(p.script.with_file_name(".#bad_test.gd"), NOT_UTF8).expect("write lock file");
+    let project_dir = p.script.parent().expect("script directory");
+
+    let output = check(&p.config, project_dir, &[]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr:\n{}",
+        stderr_of(&output)
+    );
+    assert!(
+        stdout_of(&output).contains("1 file checked"),
+        "got stdout:\n{}",
+        stdout_of(&output)
+    );
+
+    let output = fmt(&p.config, &[project_dir], true);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr:\n{}",
+        stderr_of(&output)
+    );
+}
+
+#[test]
+fn the_closing_note_counts_every_failure() {
+    let p = project("", "extends Node\n");
+    let first = p.script.with_file_name("first_unreadable.gd");
+    let second = p.script.with_file_name("second_unreadable.gd");
+    std::fs::write(&first, NOT_UTF8).expect("write script");
+    std::fs::write(&second, NOT_UTF8).expect("write script");
+
+    let output = check(
+        &p.config,
+        &p.script,
+        &[
+            first.to_str().expect("UTF-8 path"),
+            second.to_str().expect("UTF-8 path"),
+        ],
+    );
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(
+        stderr
+            .trim_end()
+            .ends_with("error: 2 paths could not be read or written, see above"),
+        "got stderr:\n{stderr}"
+    );
+
+    let output = fmt(&p.config, &[&p.script, &first, &second], false);
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(
+        stderr
+            .trim_end()
+            .ends_with("error: 2 paths could not be formatted, see above"),
+        "got stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn fmt_prints_no_summary_when_no_file_could_be_formatted() {
+    // "Formatted 0 files." in green read as a pass.
+    let p = project("", "extends Node\n\n<<<<<<< HEAD\n");
+    let unreadable = p.script.with_file_name("unreadable.gd");
+    std::fs::write(&unreadable, NOT_UTF8).expect("write script");
+
+    let output = fmt(&p.config, &[&p.script, &unreadable], false);
+    let stdout = stdout_of(&output);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stderr:\n{}",
+        stderr_of(&output)
+    );
+    assert!(stdout.trim().is_empty(), "got stdout:\n{stdout}");
 }

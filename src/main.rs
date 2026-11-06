@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use gdstyle::ast::ClassMember;
-use gdstyle::collect::{collect_gdscript_files, collect_scene_files, PathFilter};
+use gdstyle::collect::{collect_gdscript_files_reporting, collect_scene_files, PathFilter};
 use gdstyle::config::Config;
 use gdstyle::diagnostic::{Diagnostic, Severity};
 use gdstyle::fixer;
@@ -315,11 +315,41 @@ fn run_check(options: CheckOptions) {
         _ => OutputFormat::Text,
     };
 
-    // Collect files.
-    let filter = PathFilter::new(&config.exclude, &config.include);
-    let files = collect_gdscript_files(paths, &filter);
+    // Paths, directories and files that could not be read or written. The
+    // report does not cover them, so one is enough for the run to exit 2. A
+    // set, because the `--unsafe-fix` passes come back to files the lint pass
+    // already failed on, and each path is reported once.
+    let failed_paths: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+    let report_io_failure = |action: &str, path: &Path, error: &std::io::Error| {
+        // An insert cannot leave the set half-updated, so a lock poisoned by
+        // a panic on another thread is still safe to use.
+        let is_first_failure = failed_paths
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(path.to_path_buf());
+        if is_first_failure {
+            eprintln!(
+                "{}: cannot {} {}: {}",
+                "error".red(),
+                action,
+                path.display(),
+                error
+            );
+        }
+    };
 
-    if files.is_empty() {
+    // Collect files. A path that does not exist or a directory that cannot
+    // be listed hides the scripts under it, so it counts as a failure too.
+    let filter = PathFilter::new(&config.exclude, &config.include);
+    let files = collect_gdscript_files_reporting(paths, &filter, &mut |path, error| {
+        report_io_failure("read", path, error);
+    });
+
+    let is_every_path_readable = failed_paths
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .is_empty();
+    if files.is_empty() && is_every_path_readable {
         eprintln!("{}: no .gd files found", "warning".yellow());
         process::exit(0);
     }
@@ -343,29 +373,6 @@ fn run_check(options: CheckOptions) {
             );
         }
     }
-
-    // Files that could not be read or written. The report does not cover
-    // them, so one is enough for the run to exit 2. A set, because the
-    // `--unsafe-fix` passes come back to files the lint pass already failed
-    // on, and each file is reported once.
-    let failed_paths: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
-    let report_io_failure = |action: &str, path: &Path, error: &std::io::Error| {
-        // An insert cannot leave the set half-updated, so a lock poisoned by
-        // a panic on another thread is still safe to use.
-        let is_first_failure = failed_paths
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(path.to_path_buf());
-        if is_first_failure {
-            eprintln!(
-                "{}: cannot {} {}: {}",
-                "error".red(),
-                action,
-                path.display(),
-                error
-            );
-        }
-    };
 
     // Lint (and optionally fix) all files. The per-file work is independent,
     // so we run it across rayon's thread pool and aggregate the results.
@@ -595,16 +602,16 @@ fn run_check(options: CheckOptions) {
     // diagnostics: the report above is incomplete. The per-file errors were
     // printed before the report, so repeat the reason here, on stderr so
     // `--format json` keeps stdout machine-readable.
-    let failed_file_count = failed_paths
+    let failed_path_count = failed_paths
         .into_inner()
         .unwrap_or_else(PoisonError::into_inner)
         .len();
-    if failed_file_count > 0 {
+    if failed_path_count > 0 {
         eprintln!(
-            "{}: {} file{} could not be read or written, see above",
+            "{}: {} path{} could not be read or written, see above",
             "error".red(),
-            failed_file_count,
-            if failed_file_count == 1 { "" } else { "s" }
+            failed_path_count,
+            if failed_path_count == 1 { "" } else { "s" }
         );
         process::exit(2);
     }
@@ -660,10 +667,21 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
     // changes what gets formatted just as it changes what gets reported.
     warn_unknown_rules(&config);
 
+    // A path that does not exist or a directory that cannot be listed hides
+    // the scripts under it, so it counts as a failure like an unreadable file.
     let filter = PathFilter::new(&config.exclude, &config.include);
-    let files = collect_gdscript_files(paths, &filter);
+    let mut unreadable_path_count = 0;
+    let files = collect_gdscript_files_reporting(paths, &filter, &mut |path, error| {
+        eprintln!(
+            "{}: cannot read {}: {}",
+            "error".red(),
+            path.display(),
+            error
+        );
+        unreadable_path_count += 1;
+    });
 
-    if files.is_empty() {
+    if files.is_empty() && unreadable_path_count == 0 {
         eprintln!("{}: no .gd files found", "warning".yellow());
         process::exit(0);
     }
@@ -724,11 +742,11 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
     let mut formatted_count = 0;
     // Files `fmt` could not process: unreadable, unwritable, or holding a
     // conflict marker. One is enough for the run to exit 2.
-    let mut failed_count = 0;
+    let mut failed_file_count = 0;
     for r in &format_results {
         if let Some(e) = &r.read_error {
             eprintln!("{}: cannot read {}: {}", "error".red(), r.path.display(), e);
-            failed_count += 1;
+            failed_file_count += 1;
             continue;
         }
         if r.conflict {
@@ -737,7 +755,7 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
                 "error".red(),
                 r.path.display()
             );
-            failed_count += 1;
+            failed_file_count += 1;
             continue;
         }
         if let Some(e) = &r.write_error {
@@ -747,7 +765,7 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
                 r.path.display(),
                 e
             );
-            failed_count += 1;
+            failed_file_count += 1;
             continue;
         }
         if !r.changed {
@@ -766,6 +784,7 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
         }
     }
 
+    let failed_count = failed_file_count + unreadable_path_count;
     if check || diff {
         if changed_count > 0 {
             println!(
@@ -788,7 +807,9 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
                 .green()
             );
         }
-    } else {
+    } else if failed_file_count < files.len() {
+        // At least one file was processed. With none, a green "Formatted 0
+        // files." would read as a pass.
         println!(
             "{}",
             format!(
@@ -800,12 +821,12 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
         );
     }
 
-    // Exit code. A file that could not be formatted outranks "would be
+    // Exit code. A path that could not be formatted outranks "would be
     // reformatted". Its error is among the lines for the other files, so
     // repeat the reason at the end, the way `check` does.
     if failed_count > 0 {
         eprintln!(
-            "{}: {} file{} could not be formatted, see above",
+            "{}: {} path{} could not be formatted, see above",
             "error".red(),
             failed_count,
             if failed_count == 1 { "" } else { "s" }

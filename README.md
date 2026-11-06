@@ -400,6 +400,8 @@ When no config file is found, gdstyle uses these defaults:
 | `exclude` | `[".godot", "addons"]` |
 | `include` | `[]` |
 
+Hidden files and directories (a name starting with `.`, such as `.godot` or an editor lock file like `.#player.gd`) are always skipped when a directory is walked, whatever `exclude` and `include` say. A path named on the command line is used as given.
+
 Most rules are enabled by default with `warn` severity. Three advisory rules (`quality/type-hint`, `quality/empty-function`, `quality/no-debug-print`) are off by default and must be explicitly enabled.
 
 Severity is the CI knob: `check` exits `1` as soon as one diagnostic has
@@ -638,7 +640,9 @@ gdstyle [COMMAND] [OPTIONS] [PATHS]...
 |------|---------|
 | `0` | Linting/formatting completed (warnings only, or no issues) |
 | `1` | Linting completed with errors, `--max-warnings` was exceeded, or `fmt --check` found changes |
-| `2` | Configuration error, or a file could not be processed: `check` or `fmt` could not read or write it, or `fmt` left it untouched because it holds a merge conflict marker |
+| `2` | Configuration error, or the run is incomplete: a path does not exist, a file or directory could not be read, a file could not be written, or `fmt` left a file untouched because it holds a merge conflict marker |
+
+Exit code `2` outranks `1`: when a path was skipped, the report does not cover the whole project. `check` and `fmt` print each failure as it happens and repeat the count as their last line on stderr.
 
 There are two ways to make warnings fail a build. Set the rules you care
 about to `"error"` in `[rules]` to fail on those specifically, or pass
