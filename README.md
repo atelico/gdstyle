@@ -232,7 +232,7 @@ gdstyle check --unsafe-fix
 
 Safe fixes preserve behavior. Unsafe fixes can change semantics (renaming signals, variables, and other identifiers), so review the diff before committing.
 
-When `--unsafe-fix` renames an identifier, gdstyle follows the rename across every `.gd` file in the project and into the `.tscn`/`.tres` scene files that wire signals or methods to that name. Anything it can't safely rewrite is reported as a warning so you can fix it by hand.
+When `--unsafe-fix` renames an identifier, gdstyle follows the rename across every `.gd` file in the project and into the `.tscn`/`.tres` scene files that wire signals or methods to that name. A reference it can't safely rewrite is reported as a warning so you can fix it by hand. A file it could not write, or a script it left alone because it holds a merge conflict marker, is reported as an error and the run exits `2`, so a half-applied rename never passes unnoticed.
 
 ## Formatter
 
@@ -685,7 +685,7 @@ Add the following to your project's `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/atelico/gdstyle
-    rev: v0.6.0   # pin to a released tag; bump with `pre-commit autoupdate`
+    rev: v0.6.1   # pin to a released tag; bump with `pre-commit autoupdate`
     hooks:
       - id: gdstyle          # lint (fails the commit on diagnostics)
       - id: gdstyle-fmt      # format in place
@@ -759,6 +759,15 @@ fn main() {
     let source = "var x = 'hello'\n";
     let formatted = formatter::format_source(source, &config);
     assert!(formatted.contains("\"hello\""));
+
+    // `format_source` returns a file that holds a merge conflict marker as
+    // it is; `try_format_source` tells that apart from an already formatted
+    // file.
+    let conflicted = "var x = 1\n<<<<<<< HEAD\n";
+    assert_eq!(
+        formatter::try_format_source(conflicted, &config),
+        Err(formatter::ConflictMarkerError)
+    );
 }
 ```
 
@@ -876,7 +885,8 @@ for d in diagnostics:
     if d["has_fix"]:
         print("  (auto-fixable, safe=%s)" % d["is_safe_fix"])
 
-# Format a source string.
+# Format a source string. A source that holds a merge conflict marker comes
+# back unchanged, from fix_source too.
 var formatted = style.format_source(source_code)
 
 # Auto-fix violations.
