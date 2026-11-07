@@ -49,8 +49,9 @@ pub fn lint_source(source: &str, file_path: &str, config: &Config) -> Vec<Diagno
     let mut diagnostics = rules::run_all_rules_with_source(&file, &tokens, config, Some(source));
 
     // Surface lexer errors (unterminated strings, invalid numbers, unexpected
-    // characters). Without this, a syntactically broken file would be
-    // reported as clean: the worst failure mode for a linter.
+    // characters, merge conflict markers). Without this, a syntactically
+    // broken file would be reported as clean: the worst failure mode for a
+    // linter.
     if config.is_rule_enabled("syntax/lex-error") {
         for token in tokens.iter() {
             if let crate::token::TokenKind::Error(ref message) = token.kind {

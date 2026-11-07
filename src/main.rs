@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use gdstyle::ast::ClassMember;
-use gdstyle::collect::{collect_gdscript_files, collect_scene_files, PathFilter};
+use gdstyle::collect::{collect_gdscript_files_reporting, collect_scene_files, PathFilter};
 use gdstyle::config::Config;
 use gdstyle::diagnostic::{Diagnostic, Severity};
 use gdstyle::fixer;
@@ -12,9 +12,15 @@ use gdstyle::reporter::{self, OutputFormat};
 use gdstyle::rules;
 use rayon::prelude::*;
 use similar::{ChangeTag, TextDiff};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, PoisonError};
+
+/// Why `check --fix` and `fmt` refuse a file. See
+/// `gdstyle::lexer::has_conflict_marker`.
+const HOLDS_CONFLICT_MARKER: &str = "it holds a merge conflict marker";
 
 fn parse_members(source: &str) -> Vec<ClassMember> {
     let mut lexer = Lexer::new(source);
@@ -313,11 +319,42 @@ fn run_check(options: CheckOptions) {
         _ => OutputFormat::Text,
     };
 
-    // Collect files.
-    let filter = PathFilter::new(&config.exclude, &config.include);
-    let files = collect_gdscript_files(paths, &filter);
+    // Paths the run could not finish its work on: a file or directory that
+    // could not be read, a file that could not be written, a conflicted file
+    // a fix had to stay out of. One is enough for the run to exit 2. A set,
+    // because the `--unsafe-fix` passes come back to files the lint pass
+    // already failed on, and each path is reported once.
+    let failed_paths: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+    let report_failure = |action: &str, path: &Path, reason: &dyn std::fmt::Display| {
+        // An insert cannot leave the set half-updated, so a lock poisoned by
+        // a panic on another thread is still safe to use.
+        let is_first_failure = failed_paths
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(path.to_path_buf());
+        if is_first_failure {
+            eprintln!(
+                "{}: cannot {} {}: {}",
+                "error".red(),
+                action,
+                path.display(),
+                reason
+            );
+        }
+    };
 
-    if files.is_empty() {
+    // Collect files. A path that does not exist or a directory that cannot
+    // be listed hides the scripts under it, so it counts as a failure too.
+    let filter = PathFilter::new(&config.exclude, &config.include);
+    let files = collect_gdscript_files_reporting(paths, &filter, &mut |path, error| {
+        report_failure("read", path, error);
+    });
+
+    let is_every_path_readable = failed_paths
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .is_empty();
+    if files.is_empty() && is_every_path_readable {
         eprintln!("{}: no .gd files found", "warning".yellow());
         process::exit(0);
     }
@@ -348,6 +385,8 @@ fn run_check(options: CheckOptions) {
         diagnostics: Vec<Diagnostic>,
         renames: Vec<fixer::AppliedRename>,
         was_fixed: bool,
+        /// False when the file could not be read, so it was never linted.
+        was_checked: bool,
     }
 
     let lint_results: Vec<LintFileResult> = files
@@ -357,46 +396,53 @@ fn run_check(options: CheckOptions) {
                 diagnostics: Vec::new(),
                 renames: Vec::new(),
                 was_fixed: false,
+                was_checked: false,
             };
             let source = match std::fs::read_to_string(file_path) {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("{}: {}", "error".red(), e);
+                    report_failure("read", file_path, &e);
                     return result;
                 }
             };
+            result.was_checked = true;
             let file_str = file_path.to_string_lossy().to_string();
             let diagnostics = linter::lint_source(&source, &file_str, &config);
 
-            if do_fix {
-                // Track renames for cross-file reference updates.
-                if unsafe_fix {
-                    let members = parse_members(&source);
-                    result.renames =
-                        fixer::extract_renames(&source, &diagnostics, &file_str, &members);
-                }
-
-                let fixed_source = fixer::apply_fixes(&source, &diagnostics, safe_only);
-                if fixed_source != source {
-                    if let Err(e) = std::fs::write(file_path, &fixed_source) {
-                        eprintln!(
-                            "{}: cannot write {}: {}",
-                            "error".red(),
-                            file_path.display(),
-                            e
-                        );
-                    } else {
-                        result.was_fixed = true;
-                    }
-                    // Re-lint to report remaining issues.
-                    result.diagnostics = linter::lint_source(&fixed_source, &file_str, &config);
-                } else {
-                    result.diagnostics = diagnostics;
-                }
-            } else {
+            if !do_fix {
                 result.diagnostics = diagnostics;
+                return result;
             }
 
+            let fixed_source = fixer::apply_fixes(&source, &diagnostics, safe_only);
+            if fixed_source == source {
+                // `apply_fixes` leaves a conflicted file as it is, the way
+                // `fmt` does. With something to fix, the run did not do what
+                // it was asked to, and fails as `fmt` fails on that file.
+                let has_fix_to_apply = diagnostics
+                    .iter()
+                    .any(|d| d.fix.as_ref().is_some_and(|fix| fix.is_safe || !safe_only));
+                if has_fix_to_apply && gdstyle::lexer::has_conflict_marker(&source) {
+                    report_failure("fix", file_path, &HOLDS_CONFLICT_MARKER);
+                }
+                result.diagnostics = diagnostics;
+                return result;
+            }
+            if let Err(e) = std::fs::write(file_path, &fixed_source) {
+                // The file on disk is unchanged: it keeps its diagnostics,
+                // and its renames must not reach the files that reference it.
+                report_failure("write", file_path, &e);
+                result.diagnostics = diagnostics;
+                return result;
+            }
+            result.was_fixed = true;
+            // Track renames for cross-file reference updates.
+            if unsafe_fix {
+                let members = parse_members(&source);
+                result.renames = fixer::extract_renames(&source, &diagnostics, &file_str, &members);
+            }
+            // Re-lint to report remaining issues.
+            result.diagnostics = linter::lint_source(&fixed_source, &file_str, &config);
             result
         })
         .collect();
@@ -404,11 +450,15 @@ fn run_check(options: CheckOptions) {
     let mut all_diagnostics: Vec<Diagnostic> = Vec::new();
     let mut all_renames: Vec<fixer::AppliedRename> = Vec::new();
     let mut fixed_count = 0;
+    let mut checked_count = 0;
     for r in lint_results {
         all_diagnostics.extend(r.diagnostics);
         all_renames.extend(r.renames);
         if r.was_fixed {
             fixed_count += 1;
+        }
+        if r.was_checked {
+            checked_count += 1;
         }
     }
     // Sort diagnostics for deterministic output across runs (parallel
@@ -429,12 +479,7 @@ fn run_check(options: CheckOptions) {
             let source = match std::fs::read_to_string(file_path) {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!(
-                        "{}: cannot read {}: {}",
-                        "error".red(),
-                        file_path.display(),
-                        e
-                    );
+                    report_failure("read", file_path, &e);
                     return;
                 }
             };
@@ -443,17 +488,19 @@ fn run_check(options: CheckOptions) {
             if refs.is_empty() {
                 return;
             }
-            let fixed = fixer::apply_cross_file_fixes(&source, &refs);
-            if fixed != source {
-                if let Err(e) = std::fs::write(file_path, &fixed) {
-                    eprintln!(
-                        "{}: cannot write {}: {}",
-                        "error".red(),
-                        file_path.display(),
-                        e
-                    );
-                } else {
-                    cross_ref_fixed.fetch_add(1, Ordering::Relaxed);
+            if gdstyle::lexer::has_conflict_marker(&source) {
+                // A conflicted file is left as it is here too, so the rename
+                // stays half done: the run fails, and the references are
+                // named below as not updated.
+                report_failure("fix", file_path, &HOLDS_CONFLICT_MARKER);
+            } else {
+                let fixed = fixer::apply_cross_file_fixes(&source, &refs);
+                if fixed != source {
+                    if let Err(e) = std::fs::write(file_path, &fixed) {
+                        report_failure("write", file_path, &e);
+                    } else {
+                        cross_ref_fixed.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
 
@@ -486,8 +533,13 @@ fn run_check(options: CheckOptions) {
         // runtime, so `--unsafe-fix` must touch `.tscn`/`.tres` too.
         let scene_files = collect_scene_files(paths, &filter);
         for scene_path in &scene_files {
-            let Ok(scene_source) = std::fs::read_to_string(scene_path) else {
-                continue;
+            let scene_source = match std::fs::read_to_string(scene_path) {
+                Ok(s) => s,
+                Err(e) => {
+                    // Its connections keep the old names, so say so.
+                    report_failure("read", scene_path, &e);
+                    continue;
+                }
             };
             let (rewritten, applied) = fixer::apply_scene_renames(&scene_source, &all_renames);
             if applied.is_empty() {
@@ -508,12 +560,7 @@ fn run_check(options: CheckOptions) {
                         );
                     }
                 }
-                Err(e) => eprintln!(
-                    "{}: cannot write {}: {}",
-                    "error".red(),
-                    scene_path.display(),
-                    e
-                ),
+                Err(e) => report_failure("write", scene_path, &e),
             }
         }
     }
@@ -524,10 +571,14 @@ fn run_check(options: CheckOptions) {
             if !all_diagnostics.is_empty() {
                 print!("{}", reporter::format_text(&all_diagnostics));
             }
-            println!(
-                "{}",
-                reporter::format_summary(&all_diagnostics, files.len())
-            );
+            // No file was read: "0 files checked, no issues found" would
+            // read as a pass.
+            if checked_count > 0 {
+                println!(
+                    "{}",
+                    reporter::format_summary(&all_diagnostics, checked_count)
+                );
+            }
             if do_fix && fixed_count > 0 {
                 println!(
                     "{}",
@@ -545,7 +596,24 @@ fn run_check(options: CheckOptions) {
         }
     }
 
-    // Exit code.
+    // Exit code. A path the run could not finish its work on outranks the
+    // diagnostics: the report above is incomplete. The per-file errors were
+    // printed before the report, so repeat the reason here, on stderr so
+    // `--format json` keeps stdout machine-readable.
+    let failed_path_count = failed_paths
+        .into_inner()
+        .unwrap_or_else(PoisonError::into_inner)
+        .len();
+    if failed_path_count > 0 {
+        eprintln!(
+            "{}: {} path{} could not be processed, see above",
+            "error".red(),
+            failed_path_count,
+            if failed_path_count == 1 { "" } else { "s" }
+        );
+        process::exit(2);
+    }
+
     let has_errors = all_diagnostics
         .iter()
         .any(|d| d.severity == Severity::Error);
@@ -597,10 +665,24 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
     // changes what gets formatted just as it changes what gets reported.
     warn_unknown_rules(&config);
 
+    // A path that does not exist or a directory that cannot be listed hides
+    // the scripts under it, so it counts as a failure like an unreadable file.
     let filter = PathFilter::new(&config.exclude, &config.include);
-    let files = collect_gdscript_files(paths, &filter);
+    // A set: a path named twice is reported once.
+    let mut unreadable_paths = BTreeSet::new();
+    let files = collect_gdscript_files_reporting(paths, &filter, &mut |path, error| {
+        if unreadable_paths.insert(path.to_path_buf()) {
+            eprintln!(
+                "{}: cannot read {}: {}",
+                "error".red(),
+                path.display(),
+                error
+            );
+        }
+    });
+    let unreadable_path_count = unreadable_paths.len();
 
-    if files.is_empty() {
+    if files.is_empty() && unreadable_path_count == 0 {
         eprintln!("{}: no .gd files found", "warning".yellow());
         process::exit(0);
     }
@@ -636,11 +718,13 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
                     return r;
                 }
             };
-            if gdstyle::lexer::has_conflict_marker(&source) {
-                r.conflict = true;
-                return r;
-            }
-            let formatted = gdstyle::formatter::format_source(&source, &config);
+            let formatted = match gdstyle::formatter::try_format_source(&source, &config) {
+                Ok(formatted) => formatted,
+                Err(gdstyle::formatter::ConflictMarkerError) => {
+                    r.conflict = true;
+                    return r;
+                }
+            };
             if formatted == source {
                 return r;
             }
@@ -661,20 +745,21 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
     let mut formatted_count = 0;
     // Files `fmt` could not process: unreadable, unwritable, or holding a
     // conflict marker. One is enough for the run to exit 2.
-    let mut failed_count = 0;
+    let mut failed_file_count = 0;
     for r in &format_results {
         if let Some(e) = &r.read_error {
             eprintln!("{}: cannot read {}: {}", "error".red(), r.path.display(), e);
-            failed_count += 1;
+            failed_file_count += 1;
             continue;
         }
         if r.conflict {
             eprintln!(
-                "{}: cannot format {}: it holds a merge conflict marker",
+                "{}: cannot format {}: {}",
                 "error".red(),
-                r.path.display()
+                r.path.display(),
+                HOLDS_CONFLICT_MARKER
             );
-            failed_count += 1;
+            failed_file_count += 1;
             continue;
         }
         if let Some(e) = &r.write_error {
@@ -684,7 +769,7 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
                 r.path.display(),
                 e
             );
-            failed_count += 1;
+            failed_file_count += 1;
             continue;
         }
         if !r.changed {
@@ -703,6 +788,7 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
         }
     }
 
+    let failed_count = failed_file_count + unreadable_path_count;
     if check || diff {
         if changed_count > 0 {
             println!(
@@ -714,7 +800,6 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
                 )
                 .yellow()
             );
-            process::exit(if failed_count > 0 { 2 } else { 1 });
         } else if failed_count == 0 {
             println!(
                 "{}",
@@ -726,7 +811,9 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
                 .green()
             );
         }
-    } else {
+    } else if failed_file_count < files.len() {
+        // At least one file was processed. With none, a green "Formatted 0
+        // files." would read as a pass.
         println!(
             "{}",
             format!(
@@ -738,8 +825,20 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
         );
     }
 
+    // Exit code. A path that could not be formatted outranks "would be
+    // reformatted". Its error is among the lines for the other files, so
+    // repeat the reason at the end, the way `check` does.
     if failed_count > 0 {
+        eprintln!(
+            "{}: {} path{} could not be formatted, see above",
+            "error".red(),
+            failed_count,
+            if failed_count == 1 { "" } else { "s" }
+        );
         process::exit(2);
+    }
+    if (check || diff) && changed_count > 0 {
+        process::exit(1);
     }
 }
 

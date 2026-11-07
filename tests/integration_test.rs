@@ -8880,3 +8880,110 @@ func f(arr):
         vec!["function 'f' has 2 return statements (max 1)".to_string()]
     );
 }
+
+#[test]
+fn format_source_returns_a_conflicted_file_unchanged() {
+    // The reorder pass would sort `const A` above `var b` and so carry it
+    // from one side of the conflict to the other. This is the path the
+    // GDExtension takes; the CLI refuses the file before it gets here.
+    let conflicted = "extends Node\n\nconst B: int = 2\n<<<<<<< HEAD\nvar b: int = 2\n||||||| base\nvar b: int = 0\n=======\nconst A: int = 1\n>>>>>>> topic\n\n\nfunc f() -> void:\n\tpass\n";
+    assert_eq!(
+        formatter::format_source(conflicted, &default_config()),
+        conflicted
+    );
+
+    let crlf = conflicted.replace('\n', "\r\n");
+    assert_eq!(formatter::format_source(&crlf, &default_config()), crlf);
+
+    // The caller that needs to know why nothing changed.
+    for source in [conflicted, crlf.as_str()] {
+        assert_eq!(
+            formatter::try_format_source(source, &default_config()),
+            Err(formatter::ConflictMarkerError)
+        );
+    }
+    // A marker-looking line inside a string is data, not a marker.
+    let banner_in_string = "var s := \"\"\"\n=======\n\"\"\"\nvar y=1\n";
+    assert_eq!(
+        formatter::try_format_source(banner_in_string, &default_config()),
+        Ok("var s := \"\"\"\n=======\n\"\"\"\nvar y = 1\n".to_string())
+    );
+}
+
+/// A conflict at the tail of a multi-line dictionary. Rules that read tokens
+/// see the `>>>>>>> topic` error token as the last element.
+const CONFLICT_IN_DICTIONARY: &str = "extends Node\n\nvar d := {\n\t\"a\": 1,\n<<<<<<< HEAD\n\t\"b\":2,\n=======\n\t\"b\":3,\n>>>>>>> topic\n}\n";
+
+#[test]
+fn trailing_comma_does_not_take_a_lex_error_for_the_last_element() {
+    // The rule asked for a comma after `>>>>>>> topic`, the last token
+    // before the closing brace.
+    let diagnostics = linter::lint_source(CONFLICT_IN_DICTIONARY, "test.gd", &default_config());
+    assert!(
+        diagnostics
+            .iter()
+            .all(|d| d.rule != "format/trailing-comma"),
+        "got {diagnostics:?}"
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.rule == "format/colon-spacing" && d.span.line == 6),
+        "the code between the markers is still linted, got {diagnostics:?}"
+    );
+
+    // Any lex error, not only a marker.
+    let unexpected_character = "var a := [\n\t1,\n\t2 `\n]\n";
+    let diagnostics = linter::lint_source(unexpected_character, "test.gd", &default_config());
+    assert!(
+        diagnostics.iter().any(|d| d.rule == "syntax/lex-error"),
+        "the source has a lex error before the closing bracket, got {diagnostics:?}"
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .all(|d| d.rule != "format/trailing-comma"),
+        "got {diagnostics:?}"
+    );
+}
+
+#[test]
+fn a_conflict_marker_does_not_hide_the_other_diagnostics_on_its_line() {
+    // File-level rules report at 1:1 and `format/trailing-newline` on the
+    // last line. A marker on that line must not swallow them.
+    let config = Config {
+        max_file_length: 5,
+        ..Config::default()
+    };
+    let source =
+        "<<<<<<< HEAD\nextends Node\n=======\nextends Node2D\n\n\nvar a: int = 1\n>>>>>>> topic";
+    let rules: Vec<String> = linter::lint_source(source, "test.gd", &config)
+        .into_iter()
+        .map(|d| d.rule)
+        .collect();
+    for expected in ["quality/max-file-length", "format/trailing-newline"] {
+        assert!(
+            rules.iter().any(|rule| rule == expected),
+            "{expected} is missing from {rules:?}"
+        );
+    }
+}
+
+#[test]
+fn apply_fixes_returns_a_conflicted_source_unchanged() {
+    // The fixes would space out both sides of the conflict. This is the
+    // path `check --fix` and the GDExtension's fix functions take.
+    for safe_only in [true, false] {
+        for source in [
+            CONFLICT_IN_DICTIONARY.to_string(),
+            CONFLICT_IN_DICTIONARY.replace('\n', "\r\n"),
+        ] {
+            let diagnostics = linter::lint_source(&source, "test.gd", &default_config());
+            assert!(
+                diagnostics.iter().any(|d| d.fix.is_some()),
+                "the source has something to fix, got {diagnostics:?}"
+            );
+            assert_eq!(fixer::apply_fixes(&source, &diagnostics, safe_only), source);
+        }
+    }
+}

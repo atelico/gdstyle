@@ -248,6 +248,15 @@ fn fmt_check_counts_only_the_files_that_would_change() {
         stdout.contains("1 file would be reformatted."),
         "two files checked, one needs changes; got stdout:\n{stdout}"
     );
+    assert_eq!(output.status.code(), Some(1), "stdout:\n{stdout}");
+
+    let output = fmt(&p.config, &[&formatted], true);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a formatted file passes; stdout:\n{}",
+        stdout_of(&output)
+    );
 }
 
 #[test]
@@ -557,7 +566,6 @@ fn fmt_check_exits_2_when_the_only_file_is_conflicted() {
         "stderr:\n{}",
         stderr_of(&output)
     );
-    assert_eq!(std::fs::read_to_string(&p.script).unwrap(), source);
 }
 
 #[test]
@@ -636,27 +644,31 @@ fn fmt_check_exits_2_on_an_unreadable_file() {
     );
 }
 
+/// Make `path` read-only and return the permissions to restore afterwards.
+/// `None` when this user can still write the file (root in a container):
+/// there is then no write failure to observe, and the caller skips the test.
+fn make_read_only(path: &Path) -> Option<std::fs::Permissions> {
+    let writable = std::fs::metadata(path)
+        .expect("file metadata")
+        .permissions();
+    let mut read_only = writable.clone();
+    read_only.set_readonly(true);
+    std::fs::set_permissions(path, read_only).expect("make the file read-only");
+    if std::fs::OpenOptions::new().write(true).open(path).is_ok() {
+        eprintln!("skipped: this user can write a read-only file");
+        return None;
+    }
+    Some(writable)
+}
+
 #[test]
 fn fmt_exits_2_when_a_file_cannot_be_written() {
     // `fmt` used to print the error and exit 0.
     let source = "extends Node\n\nvar x := 'a'\n";
     let p = project("", source);
-    let writable = std::fs::metadata(&p.script)
-        .expect("script metadata")
-        .permissions();
-    let mut read_only = writable.clone();
-    read_only.set_readonly(true);
-    std::fs::set_permissions(&p.script, read_only).expect("make the script read-only");
-    // A privileged user (root in a container) can still write the file, and
-    // then there is no write failure to observe.
-    if std::fs::OpenOptions::new()
-        .write(true)
-        .open(&p.script)
-        .is_ok()
-    {
-        eprintln!("skipped: this user can write a read-only file");
+    let Some(writable) = make_read_only(&p.script) else {
         return;
-    }
+    };
 
     let output = fmt(&p.config, &[&p.script], false);
     // Windows cannot delete a read-only file, so restore the permissions
@@ -670,4 +682,629 @@ fn fmt_exits_2_when_a_file_cannot_be_written() {
         "got stderr:\n{stderr}"
     );
     assert_eq!(std::fs::read_to_string(&p.script).unwrap(), source);
+}
+
+/// A class whose method name `--unsafe-fix` renames to `do_thing`.
+const DECLARES_DO_THING: &str =
+    "class_name Thing\nextends Node\n\n\nfunc DoThing() -> void:\n\tpass\n";
+
+/// A script that calls the method `DECLARES_DO_THING` declares.
+const CALLS_DO_THING: &str =
+    "extends Node\n\n\nfunc _ready() -> void:\n\tvar thing := Thing.new()\n\tthing.DoThing()\n";
+
+#[test]
+fn check_exits_2_on_an_unreadable_file_and_still_reports_the_rest() {
+    // `check` used to print the error without the file name and exit by the
+    // diagnostics alone. Those would exit 1 here: the unreadable file
+    // outranks them.
+    let p = project("", "extends Node\n\n<<<<<<< HEAD\n");
+    let unreadable = p.script.with_file_name("unreadable.gd");
+    std::fs::write(&unreadable, NOT_UTF8).expect("write script");
+
+    let output = check(
+        &p.config,
+        &p.script,
+        &[unreadable.to_str().expect("UTF-8 path")],
+    );
+    let stdout = stdout_of(&output);
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("cannot read") && stderr.contains("unreadable.gd"),
+        "got stderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("3:1 error merge conflict marker '<<<<<<<'"),
+        "the readable file is still reported; got stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("1 file checked"),
+        "a file that was never read is not counted as checked; got stdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn check_fix_exits_2_when_a_file_cannot_be_written() {
+    // `check --fix` used to print the error and exit 0.
+    let source = "extends Node\n\nvar y=1\n";
+    let p = project("", source);
+    let Some(writable) = make_read_only(&p.script) else {
+        return;
+    };
+
+    let output = check(&p.config, &p.script, &["--fix"]);
+    // Windows cannot delete a read-only file, so restore the permissions
+    // before any assertion can fail and leave the temporary directory behind.
+    std::fs::set_permissions(&p.script, writable).expect("restore the permissions");
+
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("cannot write") && stderr.contains("bad_test.gd"),
+        "got stderr:\n{stderr}"
+    );
+    assert_eq!(std::fs::read_to_string(&p.script).unwrap(), source);
+}
+
+#[test]
+fn check_unsafe_fix_exits_2_when_a_reference_cannot_be_rewritten() {
+    // The rename lands in the declaring file, but the read-only file that
+    // calls the method keeps the old name. `check` used to exit 0.
+    let p = project("", DECLARES_DO_THING);
+    let caller = p.script.with_file_name("caller.gd");
+    std::fs::write(&caller, CALLS_DO_THING).expect("write script");
+    let Some(writable) = make_read_only(&caller) else {
+        return;
+    };
+
+    let output = check(
+        &p.config,
+        &p.script,
+        &["--unsafe-fix", caller.to_str().expect("UTF-8 path")],
+    );
+    std::fs::set_permissions(&caller, writable).expect("restore the permissions");
+
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("cannot write") && stderr.contains("caller.gd"),
+        "got stderr:\n{stderr}"
+    );
+    assert_eq!(std::fs::read_to_string(&caller).unwrap(), CALLS_DO_THING);
+}
+
+#[test]
+fn check_unsafe_fix_exits_2_on_an_unreadable_scene() {
+    // A scene that cannot be read keeps its connections to the old names.
+    // `check` used to skip it without a word.
+    let p = project("", DECLARES_DO_THING);
+    let scene = p.script.with_file_name("broken.tscn");
+    std::fs::write(&scene, NOT_UTF8).expect("write scene");
+    let project_dir = p.script.parent().expect("script directory");
+
+    let output = check(&p.config, project_dir, &["--unsafe-fix"]);
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("cannot read") && stderr.contains("broken.tscn"),
+        "got stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn check_unsafe_fix_exits_2_when_a_scene_cannot_be_written() {
+    // The method is renamed in the script, but the read-only scene keeps
+    // connecting to the old name. `check` used to exit 0.
+    let scene_source = "[gd_scene format=3]\n\n[connection signal=\"pressed\" from=\"Button\" to=\".\" method=\"DoThing\"]\n";
+    let p = project("", DECLARES_DO_THING);
+    let scene = p.script.with_file_name("main.tscn");
+    std::fs::write(&scene, scene_source).expect("write scene");
+    let project_dir = p.script.parent().expect("script directory");
+    let Some(writable) = make_read_only(&scene) else {
+        return;
+    };
+
+    let output = check(&p.config, project_dir, &["--unsafe-fix"]);
+    std::fs::set_permissions(&scene, writable).expect("restore the permissions");
+
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("cannot write") && stderr.contains("main.tscn"),
+        "got stderr:\n{stderr}"
+    );
+    assert_eq!(std::fs::read_to_string(&scene).unwrap(), scene_source);
+}
+
+#[test]
+fn check_unsafe_fix_keeps_references_when_the_declaration_cannot_be_written() {
+    // The rename never reached the read-only declaring file. `check` still
+    // renamed the call in the other file, which then named a method that
+    // does not exist, and reported the declaring file as fixed.
+    let p = project("", DECLARES_DO_THING);
+    let caller = p.script.with_file_name("caller.gd");
+    std::fs::write(&caller, CALLS_DO_THING).expect("write script");
+    let Some(writable) = make_read_only(&p.script) else {
+        return;
+    };
+
+    let output = check(
+        &p.config,
+        &p.script,
+        &["--unsafe-fix", caller.to_str().expect("UTF-8 path")],
+    );
+    std::fs::set_permissions(&p.script, writable).expect("restore the permissions");
+
+    let stdout = stdout_of(&output);
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("cannot write") && stderr.contains("bad_test.gd"),
+        "got stderr:\n{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&p.script).unwrap(),
+        DECLARES_DO_THING
+    );
+    assert_eq!(
+        std::fs::read_to_string(&caller).unwrap(),
+        CALLS_DO_THING,
+        "the call keeps the name the declaration still has"
+    );
+    assert!(
+        stdout.contains("function name 'DoThing' should use snake_case"),
+        "the declaring file is unchanged, so its diagnostic is still reported; got stdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn check_prints_no_summary_when_no_file_could_be_read() {
+    // `check` used to print "0 files checked, no issues found." with a
+    // green tick next to the read error.
+    let p = project("", "");
+    std::fs::write(&p.script, NOT_UTF8).expect("write script");
+
+    let output = check(&p.config, &p.script, &[]);
+    let stdout = stdout_of(&output);
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(
+        stdout.trim().is_empty(),
+        "nothing was checked, so there is nothing to summarize; got stdout:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("cannot read") && stderr.contains("bad_test.gd"),
+        "got stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn check_ends_with_a_note_that_explains_exit_code_2() {
+    // The per-file errors are printed before the report, so on a large
+    // project they scroll far away from the end of the output.
+    let p = project("", TWO_VIOLATIONS);
+    let unreadable = p.script.with_file_name("unreadable.gd");
+    std::fs::write(&unreadable, NOT_UTF8).expect("write script");
+
+    let output = check(
+        &p.config,
+        &p.script,
+        &[unreadable.to_str().expect("UTF-8 path")],
+    );
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(
+        stderr
+            .trim_end()
+            .ends_with("error: 1 path could not be processed, see above"),
+        "got stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn check_reports_a_failing_file_once() {
+    // `--unsafe-fix` comes back to every file to rewrite references, so a
+    // file the lint pass could not read was reported a second time.
+    let p = project("", DECLARES_DO_THING);
+    let caller = p.script.with_file_name("caller.gd");
+    std::fs::write(&caller, CALLS_DO_THING).expect("write script");
+    let unreadable = p.script.with_file_name("unreadable.gd");
+    std::fs::write(&unreadable, NOT_UTF8).expect("write script");
+
+    let output = check(
+        &p.config,
+        &p.script,
+        &[
+            "--unsafe-fix",
+            caller.to_str().expect("UTF-8 path"),
+            unreadable.to_str().expect("UTF-8 path"),
+        ],
+    );
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert_eq!(
+        stderr.matches("cannot read").count(),
+        1,
+        "got stderr:\n{stderr}"
+    );
+    assert!(
+        stderr
+            .trim_end()
+            .ends_with("error: 1 path could not be processed, see above"),
+        "got stderr:\n{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&caller).unwrap(),
+        CALLS_DO_THING.replace("DoThing", "do_thing"),
+        "the rename still reaches the readable caller"
+    );
+}
+
+#[test]
+fn check_fix_leaves_a_conflicted_file_untouched() {
+    // `fmt` refuses a conflicted file, but `check --fix` still spaced out
+    // the code on both sides, and the `%%%%%%%` line of a Jujutsu conflict.
+    for conflicted in [
+        "extends Node\n\n<<<<<<< HEAD\nvar y=1\n=======\nvar y=2\n>>>>>>> topic\n",
+        "extends Node\n\n<<<<<<< Conflict 1 of 1\n%%%%%%% Changes from base to side #1\n-var y=0\n+var y=1\n+++++++ Contents of side #2\nvar y=2\n>>>>>>> Conflict 1 of 1 ends\n",
+    ] {
+        let p = project("", conflicted);
+
+        let output = check(&p.config, &p.script, &["--fix"]);
+        let stdout = stdout_of(&output);
+        let stderr = stderr_of(&output);
+        // Exit 2, as `fmt` exits on the same file: the fix was not made.
+        assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+        assert_eq!(std::fs::read_to_string(&p.script).unwrap(), conflicted);
+        assert!(
+            stderr.contains("cannot fix")
+                && stderr.contains("bad_test.gd")
+                && stderr.contains("merge conflict marker"),
+            "got stderr:\n{stderr}"
+        );
+        assert!(
+            stdout.contains("[format/operator-spacing]"),
+            "the file is unchanged, so its fixable diagnostics are still reported; got stdout:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn check_unsafe_fix_exits_2_when_a_reference_sits_in_a_conflicted_file() {
+    // The rename lands in the declaring file. The conflicted caller is left
+    // as it is, so the rename is half done: each stale reference is named
+    // and the run fails, as it does for a caller that cannot be written.
+    // Without the marker errors (`--select naming`) it used to exit 0.
+    let conflicted_caller = "extends Node\n\n\nfunc _ready() -> void:\n\tvar thing := Thing.new()\n<<<<<<< HEAD\n\tthing.DoThing()\n=======\n\tthing.DoThing()\n\tprint(thing)\n>>>>>>> topic\n";
+    for selection in [&[][..], &["--select", "naming"][..]] {
+        let p = project("", DECLARES_DO_THING);
+        let caller = p.script.with_file_name("caller.gd");
+        std::fs::write(&caller, conflicted_caller).expect("write script");
+
+        let mut arguments = vec!["--unsafe-fix", caller.to_str().expect("UTF-8 path")];
+        arguments.extend_from_slice(selection);
+        let output = check(&p.config, &p.script, &arguments);
+        let stderr = stderr_of(&output);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "selection={selection:?}; stderr:\n{stderr}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&p.script).unwrap(),
+            DECLARES_DO_THING.replace("DoThing", "do_thing")
+        );
+        assert_eq!(std::fs::read_to_string(&caller).unwrap(), conflicted_caller);
+        assert!(
+            stderr.contains("cannot fix") && stderr.contains("caller.gd"),
+            "got stderr:\n{stderr}"
+        );
+        assert_eq!(
+            stderr
+                .matches("reference to 'DoThing' (renamed to 'do_thing'")
+                .count(),
+            2,
+            "both stale references are named; got stderr:\n{stderr}"
+        );
+    }
+}
+
+#[test]
+fn fmt_ends_with_a_note_that_explains_exit_code_2() {
+    // `check` closes with the reason for exit 2. `fmt` only had the
+    // per-file error, somewhere among the lines for the other files.
+    let conflicted = "extends Node\n\n<<<<<<< HEAD\n";
+    for check_only in [false, true] {
+        let p = project("", conflicted);
+        let unformatted = p.script.with_file_name("unformatted.gd");
+        std::fs::write(&unformatted, "extends Node\n\nvar y=1\n").expect("write script");
+
+        let output = fmt(&p.config, &[&p.script, &unformatted], check_only);
+        let stderr = stderr_of(&output);
+        assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+        assert!(
+            stderr
+                .trim_end()
+                .ends_with("error: 1 path could not be formatted, see above"),
+            "check_only={check_only}; got stderr:\n{stderr}"
+        );
+    }
+}
+
+#[test]
+fn check_json_stays_parsable_when_a_file_cannot_be_read() {
+    // The errors and the closing note go to stderr, so stdout is still the
+    // JSON report of the files that were read.
+    let p = project("", TWO_VIOLATIONS);
+    let unreadable = p.script.with_file_name("unreadable.gd");
+    std::fs::write(&unreadable, NOT_UTF8).expect("write script");
+
+    let output = check(
+        &p.config,
+        &p.script,
+        &["--format", "json", unreadable.to_str().expect("UTF-8 path")],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stderr:\n{}",
+        stderr_of(&output)
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout is valid JSON");
+    assert_eq!(
+        report.as_array().map(Vec::len),
+        Some(2),
+        "the two violations of the readable file; got:\n{report}"
+    );
+}
+
+#[test]
+fn check_exits_2_on_a_path_that_does_not_exist() {
+    // A missing path was dropped without a word: `check src tests` passed
+    // with `tests` gone, and a run with no other path said "no .gd files
+    // found" and exited 0.
+    let p = project("", "extends Node\n");
+    let missing = p.script.with_file_name("missing.gd");
+    let missing_arg = missing.to_str().expect("UTF-8 path");
+
+    let output = check(&p.config, &p.script, &[missing_arg]);
+    let stdout = stdout_of(&output);
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("cannot read") && stderr.contains("missing.gd"),
+        "got stderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("1 file checked"),
+        "the path that exists is still checked; got stdout:\n{stdout}"
+    );
+
+    let output = check(&p.config, &missing, &[]);
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("cannot read") && !stderr.contains("no .gd files found"),
+        "got stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn fmt_exits_2_on_a_path_that_does_not_exist() {
+    let p = project("", "extends Node\n\nvar x := 'a'\n");
+    let missing = p.script.with_file_name("missing.gd");
+
+    let output = fmt(&p.config, &[&missing, &p.script], false);
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("cannot read") && stderr.contains("missing.gd"),
+        "got stderr:\n{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&p.script).unwrap(),
+        "extends Node\n\nvar x := \"a\"\n",
+        "the path that exists is still formatted"
+    );
+
+    let output = fmt(&p.config, &[&missing], true);
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(
+        !stderr.contains("no .gd files found"),
+        "got stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn a_hidden_file_does_not_fail_the_run() {
+    // An editor lock file such as `.#player.gd` ends in `.gd` and is not a
+    // script. Once an unreadable file meant exit 2, it failed every run.
+    let p = project("", "extends Node\n");
+    std::fs::write(p.script.with_file_name(".#bad_test.gd"), NOT_UTF8).expect("write lock file");
+    let project_dir = p.script.parent().expect("script directory");
+
+    let output = check(&p.config, project_dir, &[]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr:\n{}",
+        stderr_of(&output)
+    );
+    assert!(
+        stdout_of(&output).contains("1 file checked"),
+        "got stdout:\n{}",
+        stdout_of(&output)
+    );
+
+    let output = fmt(&p.config, &[project_dir], true);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr:\n{}",
+        stderr_of(&output)
+    );
+}
+
+#[test]
+fn the_closing_note_counts_every_failure() {
+    let p = project("", "extends Node\n");
+    let first = p.script.with_file_name("first_unreadable.gd");
+    let second = p.script.with_file_name("second_unreadable.gd");
+    std::fs::write(&first, NOT_UTF8).expect("write script");
+    std::fs::write(&second, NOT_UTF8).expect("write script");
+
+    let output = check(
+        &p.config,
+        &p.script,
+        &[
+            first.to_str().expect("UTF-8 path"),
+            second.to_str().expect("UTF-8 path"),
+        ],
+    );
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(
+        stderr
+            .trim_end()
+            .ends_with("error: 2 paths could not be processed, see above"),
+        "got stderr:\n{stderr}"
+    );
+
+    let output = fmt(&p.config, &[&p.script, &first, &second], false);
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(
+        stderr
+            .trim_end()
+            .ends_with("error: 2 paths could not be formatted, see above"),
+        "got stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn fmt_prints_no_summary_when_no_file_could_be_formatted() {
+    // "Formatted 0 files." in green read as a pass.
+    let p = project("", "extends Node\n\n<<<<<<< HEAD\n");
+    let unreadable = p.script.with_file_name("unreadable.gd");
+    std::fs::write(&unreadable, NOT_UTF8).expect("write script");
+
+    let output = fmt(&p.config, &[&p.script, &unreadable], false);
+    let stdout = stdout_of(&output);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stderr:\n{}",
+        stderr_of(&output)
+    );
+    assert!(stdout.trim().is_empty(), "got stdout:\n{stdout}");
+}
+
+#[test]
+fn check_fix_reports_what_is_left_after_the_fix() {
+    // The spacing is fixed. The name needs `--unsafe-fix`, so it stays and
+    // is the only diagnostic left to report.
+    let p = project("", "extends Node\n\nvar BadName=1\n");
+
+    let output = check(&p.config, &p.script, &["--fix"]);
+    let stdout = stdout_of(&output);
+    assert_eq!(output.status.code(), Some(0), "stdout:\n{stdout}");
+    assert_eq!(
+        std::fs::read_to_string(&p.script).unwrap(),
+        "extends Node\n\nvar BadName = 1\n"
+    );
+    assert!(
+        !stdout.contains("[format/operator-spacing]"),
+        "a fixed diagnostic is not reported; got stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("[naming/variable-name-snake-case]")
+            && stdout.contains("1 file checked, 1 warning found.")
+            && stdout.contains("Fixed 1 file."),
+        "got stdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn check_fix_on_a_conflicted_file_with_nothing_to_fix_is_not_a_failure() {
+    // The markers are errors, so the run exits 1. It exits 2 only when a
+    // fix had to be held back.
+    let p = project(
+        "",
+        "extends Node\n\n<<<<<<< HEAD\nvar y = 1\n=======\nvar y = 2\n>>>>>>> topic\n",
+    );
+
+    let output = check(&p.config, &p.script, &["--fix"]);
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(1), "stderr:\n{stderr}");
+    assert!(!stderr.contains("cannot fix"), "got stderr:\n{stderr}");
+}
+
+#[test]
+fn check_unsafe_fix_still_updates_connections_in_a_conflicted_scene() {
+    // A scene is not lexed, so a line that looks like a marker cannot be
+    // told from text inside a string. The rename only touches the
+    // `[connection]` rows, on both sides of the conflict.
+    let scene_source = "[gd_scene format=3]\n\n<<<<<<< HEAD\n[connection signal=\"pressed\" from=\"A\" to=\".\" method=\"DoThing\"]\n=======\n[connection signal=\"pressed\" from=\"B\" to=\".\" method=\"DoThing\"]\n>>>>>>> topic\n";
+    let p = project("", DECLARES_DO_THING);
+    let scene = p.script.with_file_name("main.tscn");
+    std::fs::write(&scene, scene_source).expect("write scene");
+    let project_dir = p.script.parent().expect("script directory");
+
+    let output = check(&p.config, project_dir, &["--unsafe-fix"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr:\n{}",
+        stderr_of(&output)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&scene).unwrap(),
+        scene_source.replace("DoThing", "do_thing")
+    );
+}
+
+#[test]
+fn a_path_given_twice_is_processed_and_reported_once() {
+    // `fmt` listed a missing path once per mention, and a script named
+    // twice was linted and formatted twice.
+    let p = project("", TWO_VIOLATIONS);
+    let missing = p.script.with_file_name("missing.gd");
+    let other_missing = p.script.with_file_name("other_missing.gd");
+
+    let output = fmt(&p.config, &[&missing, &missing], true);
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert_eq!(
+        stderr.matches("cannot read").count(),
+        1,
+        "got stderr:\n{stderr}"
+    );
+    assert!(
+        stderr
+            .trim_end()
+            .ends_with("error: 1 path could not be formatted, see above"),
+        "got stderr:\n{stderr}"
+    );
+
+    let output = fmt(&p.config, &[&missing, &other_missing], true);
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr
+            .trim_end()
+            .ends_with("error: 2 paths could not be formatted, see above"),
+        "got stderr:\n{stderr}"
+    );
+
+    let output = check(
+        &p.config,
+        &p.script,
+        &[p.script.to_str().expect("UTF-8 path")],
+    );
+    let stdout = stdout_of(&output);
+    assert!(
+        stdout.contains("1 file checked, 2 warnings found."),
+        "got stdout:\n{stdout}"
+    );
 }

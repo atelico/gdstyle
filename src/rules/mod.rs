@@ -235,7 +235,7 @@ pub fn all_rules() -> &'static [(&'static str, &'static str)] {
     &[
         (
             "syntax/lex-error",
-            "Report lexer errors (unterminated strings, invalid numbers, bad characters)",
+            "Report lexer errors (unterminated strings, invalid numbers, bad characters, merge conflict markers)",
         ),
         (
             "syntax/reserved-identifier",

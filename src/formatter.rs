@@ -24,6 +24,8 @@ mod comments;
 /// [`crate::linter::restore_line_endings`].
 ///
 /// A file holding a version-control conflict marker is returned as it is.
+/// [`try_format_source`] tells that case apart from a file that was already
+/// formatted.
 ///
 /// # Example
 ///
@@ -35,17 +37,61 @@ mod comments;
 /// assert_eq!(formatted, "var x = 1\n");
 /// ```
 pub fn format_source(source: &str, config: &Config) -> String {
-    // The passes read a marker's characters as operators and rewrite them.
-    if crate::lexer::has_conflict_marker(source) {
-        return source.to_string();
+    try_format_source(source, config).unwrap_or_else(|ConflictMarkerError| source.to_string())
+}
+
+/// Why [`try_format_source`] refuses a source: it holds a version-control
+/// conflict marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConflictMarkerError;
+
+impl std::fmt::Display for ConflictMarkerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("source holds a merge conflict marker")
     }
+}
+
+impl std::error::Error for ConflictMarkerError {}
+
+/// Format `source` like [`format_source`], or refuse it with a
+/// [`ConflictMarkerError`] when it holds a version-control conflict marker
+/// (see [`crate::lexer::has_conflict_marker`]).
+///
+/// # Example
+///
+/// ```
+/// use gdstyle::{config::Config, formatter};
+///
+/// let config = Config::default();
+/// assert_eq!(
+///     formatter::try_format_source("var x = 1   \n", &config),
+///     Ok("var x = 1\n".to_string())
+/// );
+/// assert_eq!(
+///     formatter::try_format_source("var x = 1\n<<<<<<< HEAD\n", &config),
+///     Err(formatter::ConflictMarkerError)
+/// );
+/// ```
+pub fn try_format_source(source: &str, config: &Config) -> Result<String, ConflictMarkerError> {
     // Normalize line endings up front so byte-offset computations don't
     // disagree across passes. See `linter::normalize_line_endings` for the
     // full motivation. Idempotent on LF-only input.
     let mut result = crate::linter::normalize_line_endings(source);
 
-    // Multi-pass: apply formatting until stable (idempotent).
     crate::source_cache::with_source_cache(|| {
+        // A marker line is not a member, so the layout passes would treat it
+        // as part of one: reordering then carries code from one side of the
+        // conflict to the other. The first pass needs these tokens anyway,
+        // so looking through the cache costs no second lex.
+        if crate::lexer::may_hold_conflict_marker(&result)
+            && tokens_of(&result)
+                .iter()
+                .any(crate::lexer::is_conflict_marker)
+        {
+            return Err(ConflictMarkerError);
+        }
+
+        // Multi-pass: apply formatting until stable (idempotent).
         for _ in 0..5 {
             let formatted = format_pass(&result, config);
             if formatted == result {
@@ -53,9 +99,10 @@ pub fn format_source(source: &str, config: &Config) -> String {
             }
             result = formatted;
         }
-    });
+        Ok(())
+    })?;
 
-    crate::linter::restore_line_endings(source, &result)
+    Ok(crate::linter::restore_line_endings(source, &result))
 }
 
 fn format_pass(source: &str, config: &Config) -> String {

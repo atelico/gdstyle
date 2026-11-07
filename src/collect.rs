@@ -36,7 +36,8 @@ fn build_glob_patterns(patterns: &[String]) -> Vec<globset::GlobMatcher> {
 /// configured, they instead keep descending into excluded (non-hidden)
 /// directories, carrying an inherited-exclusion flag so only force-included
 /// paths beneath survive and their excluded siblings don't leak back in.
-/// Hidden directories (`.godot`, `.git`, …) are always pruned regardless.
+/// Hidden directories (`.godot`, `.git`, …) and hidden files are always
+/// skipped regardless.
 pub struct PathFilter {
     exclude: Vec<globset::GlobMatcher>,
     include: Vec<globset::GlobMatcher>,
@@ -77,8 +78,14 @@ impl PathFilter {
 }
 
 /// Collect every `.gd` file reachable from `paths`, applying `filter`. Explicit
-/// file paths are always kept; directories are walked recursively. The result
-/// is sorted for deterministic output.
+/// file paths are always kept; directories are walked recursively. Hidden
+/// files and directories (a name starting with `.`) are skipped inside a
+/// directory, as Godot skips them: editor lock files such as `.#player.gd`
+/// end in `.gd` too. The result is sorted for deterministic output.
+///
+/// A path that cannot be read (one of `paths` that does not exist, or a
+/// directory that cannot be listed) is skipped with a warning on stderr. Use
+/// [`collect_gdscript_files_reporting`] to be told about those instead.
 ///
 /// # Example
 /// ```no_run
@@ -90,20 +97,70 @@ impl PathFilter {
 /// # let _ = files;
 /// ```
 pub fn collect_gdscript_files(paths: &[PathBuf], filter: &PathFilter) -> Vec<PathBuf> {
+    collect_gdscript_files_reporting(paths, filter, &mut |path, error| {
+        // Otherwise a permission error reads as "no .gd files found".
+        eprintln!(
+            "{}: cannot read {}: {}",
+            "warning".yellow(),
+            path.display(),
+            error
+        );
+    })
+}
+
+/// [`collect_gdscript_files`], but every path that cannot be read is handed
+/// to `on_unreadable` with its error, and nothing is printed. The files under
+/// such a path are missing from the result, so a caller that must not pass
+/// over them in silence can count the calls.
+///
+/// # Example
+/// ```
+/// use gdstyle::collect::{collect_gdscript_files_reporting, PathFilter};
+/// use std::path::PathBuf;
+///
+/// let mut unreadable = Vec::new();
+/// let files = collect_gdscript_files_reporting(
+///     &[PathBuf::from("no-such-directory")],
+///     &PathFilter::new(&[], &[]),
+///     &mut |path, _error| unreadable.push(path.to_path_buf()),
+/// );
+/// assert!(files.is_empty());
+/// assert_eq!(unreadable, [PathBuf::from("no-such-directory")]);
+/// ```
+pub fn collect_gdscript_files_reporting(
+    paths: &[PathBuf],
+    filter: &PathFilter,
+    on_unreadable: &mut dyn FnMut(&Path, &std::io::Error),
+) -> Vec<PathBuf> {
     let mut files = Vec::new();
 
     for path in paths {
-        if path.is_file() {
+        // Follows symlinks, as `is_file` / `is_dir` do.
+        let metadata = match std::fs::metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                on_unreadable(path, &error);
+                continue;
+            }
+        };
+        if metadata.is_file() {
             if path.extension().is_some_and(|ext| ext == "gd") {
                 files.push(path.clone());
             }
-        } else if path.is_dir() {
-            collect_from_directory(path, filter, false, &mut files);
+        } else if metadata.is_dir() {
+            collect_from_directory(path, filter, false, &mut files, on_unreadable);
         }
     }
 
     files.sort();
+    // A file named twice, or named and also under a named directory.
+    files.dedup();
     files
+}
+
+/// True for an entry Godot treats as hidden: its name starts with `.`.
+fn is_hidden(entry: &std::fs::DirEntry) -> bool {
+    entry.file_name().to_string_lossy().starts_with('.')
 }
 
 fn collect_from_directory(
@@ -111,39 +168,34 @@ fn collect_from_directory(
     filter: &PathFilter,
     subtree_excluded: bool,
     files: &mut Vec<PathBuf>,
+    on_unreadable: &mut dyn FnMut(&Path, &std::io::Error),
 ) {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
-        Err(e) => {
-            // Surface unreadable directories instead of silently skipping.
-            // Otherwise a permission error reads as "no .gd files found".
-            eprintln!(
-                "{}: cannot read directory {}: {}",
-                "warning".yellow(),
-                dir.display(),
-                e
-            );
+        Err(error) => {
+            on_unreadable(dir, &error);
             return;
         }
     };
 
     for entry in entries.flatten() {
+        // Hidden directories (.godot, .git, …) and hidden files (editor lock
+        // files, macOS `._name` companions) are skipped unconditionally.
+        if is_hidden(&entry) {
+            continue;
+        }
         let path = entry.path();
         let path_str = path.to_string_lossy();
         let excluded = filter.resolve_excluded(path_str.as_ref(), subtree_excluded);
 
         if path.is_dir() {
-            // Skip hidden directories (.godot, .git, …) unconditionally.
-            if entry.file_name().to_string_lossy().starts_with('.') {
-                continue;
-            }
             // Prune an excluded directory, unless an include is configured that
             // might live beneath it — then descend, keeping the subtree
             // excluded-by-default so only the carve-out survives.
             if excluded && !filter.has_includes() {
                 continue;
             }
-            collect_from_directory(&path, filter, excluded, files);
+            collect_from_directory(&path, filter, excluded, files, on_unreadable);
         } else if !excluded && path.extension().is_some_and(|ext| ext == "gd") {
             files.push(path);
         }
@@ -160,13 +212,13 @@ pub fn collect_scene_files(paths: &[PathBuf], filter: &PathFilter) -> Vec<PathBu
             return;
         };
         for entry in entries.flatten() {
+            if is_hidden(&entry) {
+                continue;
+            }
             let path = entry.path();
             let path_str = path.to_string_lossy();
             let excluded = filter.resolve_excluded(path_str.as_ref(), subtree_excluded);
             if path.is_dir() {
-                if entry.file_name().to_string_lossy().starts_with('.') {
-                    continue;
-                }
                 if excluded && !filter.has_includes() {
                     continue;
                 }
@@ -188,6 +240,8 @@ pub fn collect_scene_files(paths: &[PathBuf], filter: &PathFilter) -> Vec<PathBu
         }
     }
     files.sort();
+    // A file named twice, or named and also under a named directory.
+    files.dedup();
     files
 }
 
@@ -282,5 +336,104 @@ mod tests {
         let got = collected(root, &["gen"], &["gen/keep.gd"]);
         assert!(got.contains("gen/keep.gd"), "{:?}", got);
         assert!(!got.contains("gen/skip.gd"), "{:?}", got);
+    }
+
+    #[test]
+    fn hidden_files_are_skipped() {
+        // Emacs writes a lock file `.#player.gd` next to `player.gd`, and
+        // macOS a `._player.gd` companion. Neither is a script.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        touch(root, "player.gd");
+        touch(root, ".#player.gd");
+        touch(root, "scenes/._enemy.gd");
+        touch(root, "scenes/enemy.gd");
+        fs::write(root.join("scenes/main.tscn"), b"[gd_scene]\n").unwrap();
+        fs::write(root.join("scenes/._main.tscn"), b"\0").unwrap();
+
+        let got = collected(root, &[], &[]);
+        let expected: BTreeSet<String> = ["player.gd", "scenes/enemy.gd"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(got, expected);
+
+        let scenes = collect_scene_files(&[root.to_path_buf()], &PathFilter::new(&[], &[]));
+        assert_eq!(scenes, [root.join("scenes/main.tscn")]);
+    }
+
+    #[test]
+    fn a_hidden_file_named_explicitly_is_kept() {
+        let tmp = TempDir::new().unwrap();
+        touch(tmp.path(), ".hidden.gd");
+        let hidden = tmp.path().join(".hidden.gd");
+
+        let got = collect_gdscript_files(std::slice::from_ref(&hidden), &PathFilter::new(&[], &[]));
+        assert_eq!(got, [hidden]);
+    }
+
+    #[test]
+    fn a_file_reachable_twice_is_collected_once() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        touch(root, "player.gd");
+        fs::write(root.join("main.tscn"), b"[gd_scene]\n").unwrap();
+        let player = root.join("player.gd");
+        let filter = PathFilter::new(&[], &[]);
+
+        let got = collect_gdscript_files(&[player.clone(), root.to_path_buf(), player], &filter);
+        assert_eq!(got, [root.join("player.gd")]);
+
+        let scenes = collect_scene_files(&[root.to_path_buf(), root.to_path_buf()], &filter);
+        assert_eq!(scenes, [root.join("main.tscn")]);
+    }
+
+    #[test]
+    fn a_missing_path_is_reported_and_the_rest_is_collected() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        touch(root, "player.gd");
+        let missing = root.join("missing.gd");
+
+        let mut unreadable = Vec::new();
+        let got = collect_gdscript_files_reporting(
+            &[missing.clone(), root.join("player.gd")],
+            &PathFilter::new(&[], &[]),
+            &mut |path, error| unreadable.push((path.to_path_buf(), error.kind())),
+        );
+        assert_eq!(got, [root.join("player.gd")]);
+        assert_eq!(unreadable, [(missing, std::io::ErrorKind::NotFound)]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_that_cannot_be_listed_is_reported() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        touch(root, "player.gd");
+        touch(root, "locked/enemy.gd");
+        let locked = root.join("locked");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        // A privileged user (root in a container) can list it anyway, and
+        // then there is nothing to report.
+        let is_listable = fs::read_dir(&locked).is_ok();
+
+        let mut unreadable = Vec::new();
+        let got = collect_gdscript_files_reporting(
+            &[root.to_path_buf()],
+            &PathFilter::new(&[], &[]),
+            &mut |path, _error| unreadable.push(path.to_path_buf()),
+        );
+        // Listable again, so the temporary directory can be removed.
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        if is_listable {
+            eprintln!("skipped: this user can list a directory without permissions");
+            return;
+        }
+
+        assert_eq!(got, [root.join("player.gd")]);
+        assert_eq!(unreadable, [locked]);
     }
 }
