@@ -4,6 +4,22 @@ A short summary of every gdstyle release, newest first. The full notes for
 each version are on its
 [GitHub release](https://github.com/atelico/gdstyle/releases).
 
+## 0.6.1 (2026-11-06)
+
+- Added: merge conflict markers are a `syntax/lex-error`, and `fmt`, `--fix`
+  and `--unsafe-fix` leave a conflicted script untouched (#97, #98).
+- Changed: `check` and `fmt` exit `2` when a path does not exist or a file
+  could not be read, written or fixed, with a closing note on stderr (#98).
+- Changed: hidden files (`.#player.gd`, `._player.gd`) are skipped (#98).
+- Fixed: a rename is not applied to referencing files when the declaring file
+  could not be written, and a stale reference fails the run (#98).
+- Fixed: `format/trailing-comma` after a lex error, a path named twice, and
+  empty summaries (#98).
+- Library: `formatter::try_format_source`,
+  `collect::collect_gdscript_files_reporting` and
+  `lexer::has_conflict_marker` are new; `apply_fixes` and `format_source`
+  leave a conflicted source alone (#97, #98).
+
 ## 0.6.0 (2026-10-31)
 
 - Changed: `fmt` is about 2x faster than 0.5.0 on small files and up to 4x on
