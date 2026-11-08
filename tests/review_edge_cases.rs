@@ -130,3 +130,22 @@ fn keyword_targets_and_colliding_rename_candidates_are_skipped() {
     assert_eq!(renames.len(), 1);
     assert_eq!(renames[0].new_name, "other_value");
 }
+
+#[test]
+fn decimal_signed_minimum_is_a_token_and_can_be_grouped() {
+    let source = "var edge = -9223372036854775808\n";
+    let tokens = Lexer::new(source).tokenize();
+    assert!(tokens
+        .iter()
+        .any(|t| t.kind == TokenKind::Integer(i64::MIN)));
+    assert_eq!(
+        formatter::format_source(source, &Config::default()),
+        "var edge = -9_223_372_036_854_775_808\n"
+    );
+    for invalid in ["9223372036854775809", "0x8000000000000000"] {
+        assert!(Lexer::new(invalid)
+            .tokenize()
+            .iter()
+            .any(|t| matches!(t.kind, TokenKind::Error(_))));
+    }
+}
