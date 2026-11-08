@@ -1476,3 +1476,27 @@ fn conflicting_cross_file_rename_proposals_do_not_pick_a_target_arbitrarily() {
         "node.sent.emit()",
     );
 }
+
+#[test]
+fn invalid_cli_options_do_not_silently_pass() {
+    let p = project("", TWO_VIOLATIONS);
+    for options in [
+        ["--select", "nmaing"],
+        ["--select", ", ,"],
+        ["--select", "naming, not-a-rule"],
+        ["--ignore", "naming"],
+        ["--format", "jsno"],
+    ] {
+        let output = check(&p.config, &p.script, &options);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{options:?}: {}",
+            stderr_of(&output)
+        );
+        assert!(stdout_of(&output).is_empty());
+    }
+    let output = check(&p.config, &p.script, &["--select", " naming, format "]);
+    assert!(output.status.success(), "{}", stderr_of(&output));
+    assert!(stdout_of(&output).contains("naming/variable-name-snake-case"));
+}

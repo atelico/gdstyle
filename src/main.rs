@@ -42,7 +42,7 @@ struct Cli {
     paths: Vec<PathBuf>,
 
     /// Output format: text or json.
-    #[arg(long, default_value = "text")]
+    #[arg(long, default_value = "text", value_parser = ["text", "json"])]
     format: String,
 
     /// Path to configuration file.
@@ -95,7 +95,7 @@ enum Commands {
         unsafe_fix: bool,
 
         /// Output format: text or json.
-        #[arg(long, default_value = "text")]
+        #[arg(long, default_value = "text", value_parser = ["text", "json"])]
         format: String,
 
         /// Path to configuration file.
@@ -280,6 +280,30 @@ fn warn_unknown_rules(config: &Config) {
     eprintln!("         run `gdstyle rules` to see the available rules");
 }
 
+fn validate_rule_filter<'a>(
+    flag: &str,
+    value: &'a str,
+    known_rules: &[&str],
+    matches: impl Fn(&str, &str) -> bool,
+) -> Vec<&'a str> {
+    let queries: Vec<_> = value
+        .split(',')
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+        .collect();
+    if queries.is_empty() {
+        eprintln!("error: {flag} requires at least one rule");
+        process::exit(2);
+    }
+    for query in &queries {
+        if !known_rules.iter().any(|rule| matches(rule, query)) {
+            eprintln!("error: {flag} matches no rule for {query:?}");
+            process::exit(2);
+        }
+    }
+    queries
+}
+
 fn run_check(options: CheckOptions) {
     let CheckOptions {
         paths,
@@ -320,10 +344,18 @@ fn run_check(options: CheckOptions) {
         config.max_line_length = max_len;
     }
 
-    // Apply --select and --ignore.
+    // Validate every filter before applying it. A typo in --select would
+    // otherwise disable the entire lint suite and report a clean run.
+    let known_rules = if select.is_some() || ignore.is_some() {
+        rules::all_rule_names()
+    } else {
+        Vec::new()
+    };
     if let Some(select) = select {
-        let selected: Vec<&str> = select.split(',').map(|s| s.trim()).collect();
-        for rule in rules::all_rule_names() {
+        let selected = validate_rule_filter("--select", select, &known_rules, |rule, query| {
+            rule.contains(query)
+        });
+        for rule in &known_rules {
             if !selected.iter().any(|s| rule.contains(s)) {
                 config
                     .rules
@@ -332,7 +364,9 @@ fn run_check(options: CheckOptions) {
         }
     }
     if let Some(ignore) = ignore {
-        for rule in ignore.split(',').map(|s| s.trim()) {
+        for rule in validate_rule_filter("--ignore", ignore, &known_rules, |rule, query| {
+            rule == query
+        }) {
             config
                 .rules
                 .insert(rule.to_string(), gdstyle::config::RuleSeverityConfig::Off);
