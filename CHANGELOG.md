@@ -4,6 +4,22 @@ A short summary of every gdstyle release, newest first. The full notes for
 each version are on its
 [GitHub release](https://github.com/atelico/gdstyle/releases).
 
+## 0.7.0 (2026-11-08)
+
+- Added: `fix-at` applies one rule's fix at a selected line. The Godot
+  editor uses it for right-click fixes in CLI mode (#101).
+- Fixed: formatter wrapping around comments and mismatched delimiters, and
+  lexer handling of BOMs, combining marks, CRLF blank lines, long runs of
+  skipped layout, and the minimum signed decimal integer (#100, #101).
+- Fixed: unsafe renames skip reserved targets and conflicting proposals.
+  Scene connection updates require a directly attached declaring script,
+  and unresolved references exit `2` (#100, #101).
+- Changed: directory walks skip symlinks and special files, and explicit
+  aliases are deduplicated. Invalid output formats and rule filters exit
+  `2` (#101).
+- Library: added `apply_fix_at_line`, `apply_scoped_scene_renames`, and
+  `collect_scene_files_reporting` (#101).
+
 ## 0.6.1 (2026-11-06)
 
 - Added: merge conflict markers are a `syntax/lex-error`, and `fmt`, `--fix`
