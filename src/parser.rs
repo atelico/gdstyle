@@ -921,21 +921,31 @@ impl<'t> Parser<'t> {
     /// The token at the cursor. Borrowed from the token slice rather than
     /// from the parser, so it stays usable across `advance`.
     fn current_token(&self) -> &'t Token {
-        &self.tokens[self.position]
+        static EOF: Token = Token {
+            kind: TokenKind::Eof,
+            span: Span {
+                line: 0,
+                column: 0,
+                offset: 0,
+                length: 0,
+            },
+            text: String::new(),
+        };
+        self.tokens.get(self.position).unwrap_or(&EOF)
     }
 
     fn current_kind(&self) -> &TokenKind {
-        &self.tokens[self.position].kind
+        &self.current_token().kind
     }
 
     fn advance(&mut self) {
-        if self.position < self.tokens.len() - 1 {
+        if self.position < self.tokens.len() {
             self.position += 1;
         }
     }
 
     fn is_at_end(&self) -> bool {
-        self.position >= self.tokens.len() || self.tokens[self.position].kind == TokenKind::Eof
+        *self.current_kind() == TokenKind::Eof
     }
 }
 

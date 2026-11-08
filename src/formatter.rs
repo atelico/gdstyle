@@ -73,6 +73,11 @@ impl std::error::Error for ConflictMarkerError {}
 /// );
 /// ```
 pub fn try_format_source(source: &str, config: &Config) -> Result<String, ConflictMarkerError> {
+    // The BOM is file metadata, not part of the first line's layout.
+    let (bom, source) = match source.strip_prefix('\u{feff}') {
+        Some(body) => ("\u{feff}", body),
+        None => ("", source),
+    };
     // Normalize line endings up front so byte-offset computations don't
     // disagree across passes. See `linter::normalize_line_endings` for the
     // full motivation. Idempotent on LF-only input.
@@ -102,7 +107,12 @@ pub fn try_format_source(source: &str, config: &Config) -> Result<String, Confli
         Ok(())
     })?;
 
-    Ok(crate::linter::restore_line_endings(source, &result))
+    let restored = crate::linter::restore_line_endings(source, &result);
+    if bom.is_empty() {
+        Ok(restored)
+    } else {
+        Ok(bom.to_owned() + &restored)
+    }
 }
 
 fn format_pass(source: &str, config: &Config) -> String {
@@ -1124,7 +1134,7 @@ fn try_break_line(line: &str, config: &Config) -> Option<Vec<String>> {
     let (open_byte, open_ch, close_ch) = find_first_delimiter(content)?;
 
     // Find its matching close.
-    let close_byte = find_matching_close(content, open_byte, open_ch, close_ch)?;
+    let close_byte = find_matching_close(content, open_byte, close_ch)?;
 
     // Get inner content and split by top-level commas.
     let inner = &content[open_byte + 1..close_byte];
@@ -1149,7 +1159,7 @@ fn try_break_line(line: &str, config: &Config) -> Option<Vec<String>> {
             .chars()
             .rev()
             .find(|c| !c.is_whitespace());
-        if matches!(prior, Some(c) if c.is_ascii_alphanumeric() || c == '_' || c == ']' || c == ')')
+        if matches!(prior, Some(c) if crate::lexer::is_identifier_continue(c) || c == ']' || c == ')')
         {
             return None;
         }
@@ -1288,22 +1298,29 @@ fn find_first_delimiter(content: &str) -> Option<(usize, char, char)> {
 }
 
 /// Find the byte position of the matching close delimiter.
-fn find_matching_close(content: &str, open_pos: usize, open: char, close: char) -> Option<usize> {
-    let mut depth = 1;
+fn find_matching_close(content: &str, open_pos: usize, close: char) -> Option<usize> {
+    let mut expected = vec![close];
     let mut scanner = StringScanner::new();
 
     for (i, ch) in content[open_pos + 1..].char_indices() {
-        let abs_pos = open_pos + 1 + i;
         if scanner.step(ch) {
             continue;
         }
-        if ch == open {
-            depth += 1;
-        } else if ch == close {
-            depth -= 1;
-            if depth == 0 {
-                return Some(abs_pos);
+        match ch {
+            // A delimiter mentioned in a comment does not close the code.
+            '#' => return None,
+            '(' => expected.push(')'),
+            '[' => expected.push(']'),
+            '{' => expected.push('}'),
+            ')' | ']' | '}' => {
+                if expected.pop() != Some(ch) {
+                    return None;
+                }
+                if expected.is_empty() {
+                    return Some(open_pos + 1 + i);
+                }
             }
+            _ => {}
         }
     }
     None

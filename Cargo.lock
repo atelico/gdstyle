@@ -230,6 +230,7 @@ dependencies = [
  "similar",
  "tempfile",
  "toml",
+ "unicode-ident",
 ]
 
 [[package]]

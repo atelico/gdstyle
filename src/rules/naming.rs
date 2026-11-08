@@ -11,16 +11,20 @@ fn is_keyword_name(name: &str) -> bool {
 }
 
 /// The diagnostic `diagnostic` with a rename fix to `new_text` over `span`,
-/// unless `name` is a keyword name (see [`is_keyword_name`]). Every rename
-/// fix in this file goes through here, so no rule renames a `match` or
-/// `when` declaration and leaves its references behind.
+/// unless either name is a keyword or the replacement would be reserved.
+/// Every naming fix goes through here.
 fn with_rename_fix(
     diagnostic: Diagnostic,
     name: &str,
     span: crate::token::Span,
     new_text: String,
 ) -> Diagnostic {
-    if is_keyword_name(name) {
+    if is_keyword_name(name)
+        || is_keyword_name(&new_text)
+        || crate::rules::syntax::is_reserved_word(&new_text)
+        || !new_text.starts_with(|ch: char| ch == '_' || unicode_ident::is_xid_start(ch))
+        || !new_text.chars().all(crate::lexer::is_identifier_continue)
+    {
         return diagnostic;
     }
     diagnostic.with_fix(Fix {
