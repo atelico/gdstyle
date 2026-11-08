@@ -1,7 +1,9 @@
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use gdstyle::ast::ClassMember;
-use gdstyle::collect::{collect_gdscript_files_reporting, collect_scene_files, PathFilter};
+use gdstyle::collect::{
+    collect_gdscript_files_reporting, collect_scene_files_reporting, PathFilter,
+};
 use gdstyle::config::Config;
 use gdstyle::diagnostic::{Diagnostic, Severity};
 use gdstyle::fixer;
@@ -15,7 +17,6 @@ use similar::{ChangeTag, TextDiff};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 /// Why `check --fix` and `fmt` refuse a file. See
@@ -41,7 +42,7 @@ struct Cli {
     paths: Vec<PathBuf>,
 
     /// Output format: text or json.
-    #[arg(long, default_value = "text")]
+    #[arg(long, default_value = "text", value_parser = ["text", "json"])]
     format: String,
 
     /// Path to configuration file.
@@ -94,7 +95,7 @@ enum Commands {
         unsafe_fix: bool,
 
         /// Output format: text or json.
-        #[arg(long, default_value = "text")]
+        #[arg(long, default_value = "text", value_parser = ["text", "json"])]
         format: String,
 
         /// Path to configuration file.
@@ -142,6 +143,19 @@ enum Commands {
         /// Disable colored output.
         #[arg(long)]
         no_color: bool,
+    },
+    /// Apply one rule's fix at a line in a single file.
+    FixAt {
+        path: PathBuf,
+        /// 1-based diagnostic line.
+        #[arg(long)]
+        line: std::num::NonZeroUsize,
+        /// Exact rule name.
+        #[arg(long)]
+        rule: String,
+        /// Path to configuration file.
+        #[arg(long, short)]
+        config: Option<PathBuf>,
     },
     /// List all available lint rules.
     Rules {
@@ -194,6 +208,17 @@ fn main() {
             no_color,
         }) => {
             run_fmt(&paths, check, diff, config.as_deref(), no_color);
+        }
+        Some(Commands::FixAt {
+            path,
+            line,
+            rule,
+            config,
+        }) => {
+            if let Err(error) = run_fix_at(&path, line.get(), &rule, config.as_deref()) {
+                eprintln!("error: {error}");
+                process::exit(2);
+            }
         }
         Some(Commands::Rules { no_color }) => {
             if no_color {
@@ -255,6 +280,30 @@ fn warn_unknown_rules(config: &Config) {
     eprintln!("         run `gdstyle rules` to see the available rules");
 }
 
+fn validate_rule_filter<'a>(
+    flag: &str,
+    value: &'a str,
+    known_rules: &[&str],
+    matches: impl Fn(&str, &str) -> bool,
+) -> Vec<&'a str> {
+    let queries: Vec<_> = value
+        .split(',')
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+        .collect();
+    if queries.is_empty() {
+        eprintln!("error: {flag} requires at least one rule");
+        process::exit(2);
+    }
+    for query in &queries {
+        if !known_rules.iter().any(|rule| matches(rule, query)) {
+            eprintln!("error: {flag} matches no rule for {query:?}");
+            process::exit(2);
+        }
+    }
+    queries
+}
+
 fn run_check(options: CheckOptions) {
     let CheckOptions {
         paths,
@@ -295,10 +344,18 @@ fn run_check(options: CheckOptions) {
         config.max_line_length = max_len;
     }
 
-    // Apply --select and --ignore.
+    // Validate every filter before applying it. A typo in --select would
+    // otherwise disable the entire lint suite and report a clean run.
+    let known_rules = if select.is_some() || ignore.is_some() {
+        rules::all_rule_names()
+    } else {
+        Vec::new()
+    };
     if let Some(select) = select {
-        let selected: Vec<&str> = select.split(',').map(|s| s.trim()).collect();
-        for rule in rules::all_rule_names() {
+        let selected = validate_rule_filter("--select", select, &known_rules, |rule, query| {
+            rule.contains(query)
+        });
+        for rule in &known_rules {
             if !selected.iter().any(|s| rule.contains(s)) {
                 config
                     .rules
@@ -307,7 +364,9 @@ fn run_check(options: CheckOptions) {
         }
     }
     if let Some(ignore) = ignore {
-        for rule in ignore.split(',').map(|s| s.trim()) {
+        for rule in validate_rule_filter("--ignore", ignore, &known_rules, |rule, query| {
+            rule == query
+        }) {
             config
                 .rules
                 .insert(rule.to_string(), gdstyle::config::RuleSeverityConfig::Off);
@@ -389,7 +448,7 @@ fn run_check(options: CheckOptions) {
         was_checked: bool,
     }
 
-    let lint_results: Vec<LintFileResult> = files
+    let mut lint_results: Vec<LintFileResult> = files
         .par_iter()
         .map(|file_path| {
             let mut result = LintFileResult {
@@ -447,91 +506,77 @@ fn run_check(options: CheckOptions) {
         })
         .collect();
 
-    let mut all_diagnostics: Vec<Diagnostic> = Vec::new();
-    let mut all_renames: Vec<fixer::AppliedRename> = Vec::new();
-    let mut fixed_count = 0;
-    let mut checked_count = 0;
-    for r in lint_results {
-        all_diagnostics.extend(r.diagnostics);
-        all_renames.extend(r.renames);
-        if r.was_fixed {
-            fixed_count += 1;
-        }
-        if r.was_checked {
-            checked_count += 1;
-        }
-    }
-    // Sort diagnostics for deterministic output across runs (parallel
-    // iteration produces them in non-deterministic order).
-    all_diagnostics.sort_by(|a, b| {
-        a.file
-            .cmp(&b.file)
-            .then_with(|| a.span.line.cmp(&b.span.line))
-            .then_with(|| a.span.column.cmp(&b.span.column))
-    });
+    let all_renames: Vec<_> = lint_results
+        .iter_mut()
+        .flat_map(|result| std::mem::take(&mut result.renames))
+        .collect();
+    let mut scene_fixed_count = 0;
 
     // Cross-file reference updates for --unsafe-fix. Each file's refs are
     // independent now that `all_renames` is fully gathered, so this fans out
     // across the thread pool too.
     if unsafe_fix && !all_renames.is_empty() {
-        let cross_ref_fixed = AtomicUsize::new(0);
-        files.par_iter().for_each(|file_path| {
-            let source = match std::fs::read_to_string(file_path) {
-                Ok(s) => s,
-                Err(e) => {
-                    report_failure("read", file_path, &e);
+        files
+            .par_iter()
+            .zip(&mut lint_results)
+            .for_each(|(file_path, result)| {
+                let source = match std::fs::read_to_string(file_path) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        report_failure("read", file_path, &e);
+                        return;
+                    }
+                };
+                let file_str = file_path.to_string_lossy().to_string();
+                let refs = fixer::find_cross_file_references(&source, &file_str, &all_renames);
+                if refs.is_empty() {
                     return;
                 }
-            };
-            let file_str = file_path.to_string_lossy().to_string();
-            let refs = fixer::find_cross_file_references(&source, &file_str, &all_renames);
-            if refs.is_empty() {
-                return;
-            }
-            if gdstyle::lexer::has_conflict_marker(&source) {
-                // A conflicted file is left as it is here too, so the rename
-                // stays half done: the run fails, and the references are
-                // named below as not updated.
-                report_failure("fix", file_path, &HOLDS_CONFLICT_MARKER);
-            } else {
-                let fixed = fixer::apply_cross_file_fixes(&source, &refs);
-                if fixed != source {
-                    if let Err(e) = std::fs::write(file_path, &fixed) {
-                        report_failure("write", file_path, &e);
-                    } else {
-                        cross_ref_fixed.fetch_add(1, Ordering::Relaxed);
+                let mut remaining_refs = refs;
+                if gdstyle::lexer::has_conflict_marker(&source) {
+                    report_failure("fix", file_path, &HOLDS_CONFLICT_MARKER);
+                } else {
+                    let fixed = fixer::apply_cross_file_fixes(&source, &remaining_refs);
+                    if fixed != source {
+                        if let Err(e) = std::fs::write(file_path, &fixed) {
+                            report_failure("write", file_path, &e);
+                        } else {
+                            result.was_fixed = true;
+                            result.diagnostics = linter::lint_source(&fixed, &file_str, &config);
+                            remaining_refs =
+                                fixer::find_cross_file_references(&fixed, &file_str, &all_renames);
+                        }
                     }
                 }
-            }
 
-            // Report any remaining references that couldn't be fixed.
-            let remaining_source =
-                std::fs::read_to_string(file_path).unwrap_or_else(|_| source.clone());
-            let remaining_refs =
-                fixer::find_cross_file_references(&remaining_source, &file_str, &all_renames);
-            for r in &remaining_refs {
-                eprintln!(
-                    "{}: {}:{}:{} reference to '{}' (renamed to '{}' in {}) was not updated",
-                    "warning".yellow(),
-                    r.file,
-                    r.line,
-                    r.column,
-                    r.old_name,
-                    r.new_name,
-                    r.source_file,
-                );
-            }
-        });
-        let cross_ref_fixed_count = cross_ref_fixed.load(Ordering::Relaxed);
-        if cross_ref_fixed_count > 0 {
-            fixed_count += cross_ref_fixed_count;
-        }
+                if !remaining_refs.is_empty() {
+                    report_failure(
+                        "fully update",
+                        file_path,
+                        &"one or more references were not updated",
+                    );
+                }
+                for r in &remaining_refs {
+                    eprintln!(
+                        "{}: {}:{}:{} reference to '{}' (renamed to '{}' in {}) was not updated",
+                        "warning".yellow(),
+                        r.file,
+                        r.line,
+                        r.column,
+                        r.old_name,
+                        r.new_name,
+                        r.source_file,
+                    );
+                }
+            });
 
         // Rewrite editor-wired signal/method connections in scene files.
         // A `.gd`-only signal/function rename leaves `[connection signal="…"
         // method="…"]` rows stale, and the connection fails silently at
         // runtime, so `--unsafe-fix` must touch `.tscn`/`.tres` too.
-        let scene_files = collect_scene_files(paths, &filter);
+        let scene_files = collect_scene_files_reporting(paths, &filter, &mut |path, error| {
+            report_failure("read", path, error);
+        });
         for scene_path in &scene_files {
             let scene_source = match std::fs::read_to_string(scene_path) {
                 Ok(s) => s,
@@ -541,14 +586,31 @@ fn run_check(options: CheckOptions) {
                     continue;
                 }
             };
-            let (rewritten, applied) = fixer::apply_scene_renames(&scene_source, &all_renames);
-            if applied.is_empty() {
+            let result = fixer::apply_scoped_scene_renames(&scene_source, scene_path, &all_renames);
+            if !result.unresolved.is_empty() {
+                let reason = if result.conflicted {
+                    HOLDS_CONFLICT_MARKER
+                } else {
+                    "one or more connection endpoints could not be resolved to the declaring script"
+                };
+                report_failure("fully update", scene_path, &reason);
+                for reference in &result.unresolved {
+                    eprintln!(
+                        "warning: {}:{} scene {} connection '{}' was not updated",
+                        scene_path.display(),
+                        reference.line,
+                        reference.attribute,
+                        reference.old_name,
+                    );
+                }
+            }
+            if result.applied.is_empty() {
                 continue;
             }
-            match std::fs::write(scene_path, &rewritten) {
+            match std::fs::write(scene_path, &result.source) {
                 Ok(()) => {
-                    fixed_count += 1;
-                    for r in &applied {
+                    scene_fixed_count += 1;
+                    for r in &result.applied {
                         eprintln!(
                             "{}: {}:{} scene {} connection '{}' updated to '{}'",
                             "fixed".green(),
@@ -564,6 +626,27 @@ fn run_check(options: CheckOptions) {
             }
         }
     }
+
+    let mut all_diagnostics: Vec<Diagnostic> = Vec::new();
+    let mut fixed_count = scene_fixed_count;
+    let mut checked_count = 0;
+    for r in lint_results {
+        all_diagnostics.extend(r.diagnostics);
+        if r.was_fixed {
+            fixed_count += 1;
+        }
+        if r.was_checked {
+            checked_count += 1;
+        }
+    }
+    // Sort diagnostics for deterministic output across runs (parallel
+    // iteration produces them in non-deterministic order).
+    all_diagnostics.sort_by(|a, b| {
+        a.file
+            .cmp(&b.file)
+            .then_with(|| a.span.line.cmp(&b.span.line))
+            .then_with(|| a.span.column.cmp(&b.span.column))
+    });
 
     // Output results.
     match output_format {
@@ -640,6 +723,31 @@ fn run_check(options: CheckOptions) {
             process::exit(1);
         }
     }
+}
+
+fn run_fix_at(path: &Path, line: usize, rule: &str, config: Option<&Path>) -> Result<(), String> {
+    let config = match config {
+        Some(path) => Config::from_file(path).map_err(|err| err.to_string())?,
+        None => Config::find_and_load(&std::env::current_dir().map_err(|err| err.to_string())?),
+    };
+    if !rules::all_rule_names().contains(&rule) {
+        return Err(format!("unknown rule {rule:?}"));
+    }
+    warn_unknown_rules(&config);
+    let file = path.display().to_string();
+    if !path.is_file() {
+        return Err(format!("cannot read {file}: not a regular file"));
+    }
+    let source =
+        std::fs::read_to_string(path).map_err(|err| format!("cannot read {file}: {err}"))?;
+    if gdstyle::lexer::has_conflict_marker(&source) {
+        return Err(format!("cannot fix {file}: {HOLDS_CONFLICT_MARKER}"));
+    }
+    let fixed = fixer::apply_fix_at_line(&source, &file, &config, line, rule);
+    if fixed != source {
+        std::fs::write(path, fixed).map_err(|err| format!("cannot write {file}: {err}"))?;
+    }
+    Ok(())
 }
 
 fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path>, no_color: bool) {

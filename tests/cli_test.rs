@@ -795,11 +795,18 @@ fn check_unsafe_fix_exits_2_on_an_unreadable_scene() {
 fn check_unsafe_fix_exits_2_when_a_scene_cannot_be_written() {
     // The method is renamed in the script, but the read-only scene keeps
     // connecting to the old name. `check` used to exit 0.
-    let scene_source = "[gd_scene format=3]\n\n[connection signal=\"pressed\" from=\"Button\" to=\".\" method=\"DoThing\"]\n";
+    let scene_source = concat!(
+        "[gd_scene format=3]\n",
+        "[ext_resource type=\"Script\" path=\"res://bad_test.gd\" id=\"1_a\"]\n",
+        "[node name=\"Main\" type=\"Node\"]\n",
+        "script = ExtResource(\"1_a\")\n",
+        "[connection signal=\"pressed\" from=\"Button\" to=\".\" method=\"DoThing\"]\n",
+    );
     let p = project("", DECLARES_DO_THING);
     let scene = p.script.with_file_name("main.tscn");
     std::fs::write(&scene, scene_source).expect("write scene");
     let project_dir = p.script.parent().expect("script directory");
+    std::fs::write(project_dir.join("project.godot"), "config_version=5\n").unwrap();
     let Some(writable) = make_read_only(&scene) else {
         return;
     };
@@ -1242,10 +1249,7 @@ fn check_fix_on_a_conflicted_file_with_nothing_to_fix_is_not_a_failure() {
 }
 
 #[test]
-fn check_unsafe_fix_still_updates_connections_in_a_conflicted_scene() {
-    // A scene is not lexed, so a line that looks like a marker cannot be
-    // told from text inside a string. The rename only touches the
-    // `[connection]` rows, on both sides of the conflict.
+fn check_unsafe_fix_leaves_a_conflicted_scene_unchanged() {
     let scene_source = "[gd_scene format=3]\n\n<<<<<<< HEAD\n[connection signal=\"pressed\" from=\"A\" to=\".\" method=\"DoThing\"]\n=======\n[connection signal=\"pressed\" from=\"B\" to=\".\" method=\"DoThing\"]\n>>>>>>> topic\n";
     let p = project("", DECLARES_DO_THING);
     let scene = p.script.with_file_name("main.tscn");
@@ -1253,16 +1257,14 @@ fn check_unsafe_fix_still_updates_connections_in_a_conflicted_scene() {
     let project_dir = p.script.parent().expect("script directory");
 
     let output = check(&p.config, project_dir, &["--unsafe-fix"]);
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "stderr:\n{}",
-        stderr_of(&output)
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("merge conflict marker"), "{stderr}");
+    assert!(
+        stderr.contains("scene method connection 'DoThing' was not updated"),
+        "{stderr}"
     );
-    assert_eq!(
-        std::fs::read_to_string(&scene).unwrap(),
-        scene_source.replace("DoThing", "do_thing")
-    );
+    assert_eq!(std::fs::read_to_string(&scene).unwrap(), scene_source);
 }
 
 #[test]
@@ -1307,4 +1309,194 @@ fn a_path_given_twice_is_processed_and_reported_once() {
         stdout.contains("1 file checked, 2 warnings found."),
         "got stdout:\n{stdout}"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn project_walk_skips_symlinks_and_special_files_but_explicit_aliases_are_deduped() {
+    use std::os::unix::fs::symlink;
+
+    let p = project("", "var x=1\n");
+    let root = p.script.parent().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let other = outside.path().join("outside.gd");
+    std::fs::write(&other, "var y=2\n").unwrap();
+    symlink(root, root.join("cycle")).unwrap();
+    symlink(outside.path(), root.join("external")).unwrap();
+    symlink(&other, root.join("linked.gd")).unwrap();
+    let alias = root.join("alias.gd");
+    symlink(&p.script, &alias).unwrap();
+    let fifo_path = root.join("fifo.gd");
+    assert!(Command::new("mkfifo")
+        .arg(&fifo_path)
+        .status()
+        .unwrap()
+        .success());
+
+    let output = check(&p.config, root, &["--fix", alias.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr_of(&output));
+    assert!(stdout_of(&output).contains("1 file checked"));
+    assert_eq!(std::fs::read_to_string(&p.script).unwrap(), "var x = 1\n");
+    assert_eq!(std::fs::read_to_string(other).unwrap(), "var y=2\n");
+
+    let output = check(&p.config, &fifo_path, &[]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr_of(&output));
+    assert!(stderr_of(&output).contains("not a regular file"));
+}
+
+#[test]
+fn fix_at_applies_only_the_selected_line_and_rule_with_utf8_and_crlf() {
+    let source = "# 日本語\r\nvar x=1  \r\nvar y=2  \r\n";
+    let p = project("", source);
+    let output = Command::new(env!("CARGO_BIN_EXE_gdstyle"))
+        .arg("fix-at")
+        .arg(&p.script)
+        .arg("--config")
+        .arg(&p.config)
+        .args(["--line", "2", "--rule", "format/trailing-whitespace"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr_of(&output));
+    assert_eq!(
+        std::fs::read_to_string(p.script).unwrap(),
+        "# 日本語\r\nvar x=1\r\nvar y=2  \r\n"
+    );
+}
+
+#[test]
+fn scene_renames_only_touch_connections_to_the_declaring_script() {
+    let p = project("", DECLARES_DO_THING);
+    let root = p.script.parent().unwrap();
+    std::fs::write(root.join("project.godot"), "config_version=5\n").unwrap();
+    std::fs::write(
+        root.join("other.gd"),
+        DECLARES_DO_THING.replace("Thing", "Other"),
+    )
+    .unwrap();
+    let scene = root.join("main.tscn");
+    let source = concat!(
+        "[gd_scene format=3]\r\n",
+        "[ext_resource type=\"Script\" path=\"res://bad_test.gd\" id=\"1_a\"]\r\n",
+        "[ext_resource type=\"Script\" path=\"res://other.gd\" id=\"2_b\"]\r\n",
+        "[node name=\"Main\" type=\"Node\"]\r\n",
+        "script = ExtResource(\"1_a\")\r\n",
+        "metadata/method=\"DoThing\"\r\n",
+        "metadata/note = \"a string with scene-like lines\r\n",
+        "<<<<<<< this is inside the string\r\n",
+        "[connection signal=\\\"pressed\\\" from=\\\".\\\" to=\\\".\\\" method=\\\"DoThing\\\"]\r\n",
+        "end of string\"\r\n",
+        "[node name=\"Other\" type=\"Node\" parent=\".\"]\r\n",
+        "script = ExtResource(\"2_b\")\r\n",
+        "[connection signal=\"pressed\" from=\"Other\" to=\".\" method = \"DoThing\" binds=[\"DoThing\"]]\r\n",
+        "[connection signal=\"pressed\" from=\".\" to=\"Other\" method=\"DoThing\"]",
+    );
+    std::fs::write(&scene, source).unwrap();
+
+    let output = check(
+        &p.config,
+        &p.script,
+        &["--unsafe-fix", scene.to_str().unwrap()],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr_of(&output));
+    assert_eq!(
+        std::fs::read_to_string(scene).unwrap(),
+        source.replace("method = \"DoThing\"", "method = \"do_thing\"")
+    );
+}
+
+#[test]
+fn scene_rename_reports_unresolved_endpoints_without_rewriting_them() {
+    let p = project("", DECLARES_DO_THING);
+    let scene = p.script.with_file_name("unresolved.tscn");
+    let source = "[connection signal=\"pressed\" from=\".\" to=\"Instanced\" method=\"DoThing\"]\n";
+    std::fs::write(&scene, source).unwrap();
+    let output = check(
+        &p.config,
+        &p.script,
+        &["--unsafe-fix", scene.to_str().unwrap()],
+    );
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.contains("could not be resolved to the declaring script"),
+        "{stderr}"
+    );
+    assert_eq!(std::fs::read_to_string(scene).unwrap(), source);
+}
+
+#[test]
+fn cross_file_fix_reports_the_final_diagnostics_and_counts_each_script_once() {
+    // The call fits before the rename; the extra underscore makes it too long.
+    let p = project("max_line_length = 19", DECLARES_DO_THING);
+    let caller = p.script.with_file_name("caller.gd");
+    std::fs::write(
+        &caller,
+        "extends Node\n\n\nfunc _ready() -> void:\n\tvar thing := Thing.new()\n\tthing.DoThing()\n\tvar x=1\n",
+    ).unwrap();
+    let root = p.script.parent().unwrap();
+
+    let output = check(&p.config, root, &["--unsafe-fix"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr_of(&output));
+    assert!(
+        stdout_of(&output).contains("Fixed 2 files."),
+        "{}",
+        stdout_of(&output)
+    );
+    assert!(
+        stdout_of(&output).contains("6:20 warning"),
+        "{}",
+        stdout_of(&output)
+    );
+    assert!(std::fs::read_to_string(caller)
+        .unwrap()
+        .contains("thing.do_thing()"));
+}
+
+#[test]
+fn conflicting_cross_file_rename_proposals_do_not_pick_a_target_arbitrarily() {
+    use gdstyle::fixer::{apply_cross_file_fixes, CrossFileReference};
+
+    let source = "node.event.emit()";
+    let reference = |name: &str| CrossFileReference {
+        file: "caller.gd".into(),
+        line: 1,
+        column: 6,
+        old_name: "event".into(),
+        new_name: name.into(),
+        source_file: format!("{name}.gd"),
+        offset: 5,
+        length: 5,
+    };
+    assert_eq!(
+        apply_cross_file_fixes(source, &[reference("sent"), reference("received")]),
+        source,
+    );
+    assert_eq!(
+        apply_cross_file_fixes(source, &[reference("sent"), reference("sent")]),
+        "node.sent.emit()",
+    );
+}
+
+#[test]
+fn invalid_cli_options_do_not_silently_pass() {
+    let p = project("", TWO_VIOLATIONS);
+    for options in [
+        ["--select", "nmaing"],
+        ["--select", ", ,"],
+        ["--select", "naming, not-a-rule"],
+        ["--ignore", "naming"],
+        ["--format", "jsno"],
+    ] {
+        let output = check(&p.config, &p.script, &options);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{options:?}: {}",
+            stderr_of(&output)
+        );
+        assert!(stdout_of(&output).is_empty());
+    }
+    let output = check(&p.config, &p.script, &["--select", " naming, format "]);
+    assert!(output.status.success(), "{}", stderr_of(&output));
+    assert!(stdout_of(&output).contains("naming/variable-name-snake-case"));
 }

@@ -739,6 +739,11 @@ impl<'a> Lexer<'a> {
         } else {
             match clean.parse::<i64>() {
                 Ok(val) => Token::new(TokenKind::Integer(val), span, text),
+                // Godot accepts decimal 2^63 as the signed minimum, so
+                // both that spelling and its negation produce INT64_MIN.
+                Err(_) if clean.trim_start_matches('0') == "9223372036854775808" => {
+                    Token::new(TokenKind::Integer(i64::MIN), span, text)
+                }
                 Err(_) => Token::new(
                     TokenKind::Error(format!("invalid integer: {}", text)),
                     span,

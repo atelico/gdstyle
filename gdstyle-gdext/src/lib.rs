@@ -280,18 +280,13 @@ impl GdStyle {
         line: i64,
         rule: GString,
     ) -> GString {
-        let src = source.to_string();
-        let diagnostics = linter::lint_source(&src, &file_path.to_string(), &self.config);
-        let rule_str = rule.to_string();
-        let line_usize = line as usize;
-        let matching: Vec<_> = diagnostics
-            .into_iter()
-            .filter(|d| d.span.line == line_usize && d.rule == rule_str && d.fix.is_some())
-            .collect();
-        if matching.is_empty() {
-            return source;
-        }
-        let fixed = fixer::apply_fixes(&src, &matching, false);
+        let fixed = fixer::apply_fix_at_line(
+            &source.to_string(),
+            &file_path.to_string(),
+            &self.config,
+            usize::try_from(line).unwrap_or_default(),
+            &rule.to_string(),
+        );
         GString::from(&fixed)
     }
 
@@ -313,21 +308,13 @@ impl GdStyle {
             }
         };
 
-        let diagnostics = linter::lint_source(&source, &path_str, &self.config);
-        let rule_str = rule.to_string();
-        let line_usize = line as usize;
-
-        // Filter to only the matching diagnostic.
-        let matching: Vec<_> = diagnostics
-            .into_iter()
-            .filter(|d| d.span.line == line_usize && d.rule == rule_str && d.fix.is_some())
-            .collect();
-
-        if matching.is_empty() {
-            return false;
-        }
-
-        let fixed = fixer::apply_fixes(&source, &matching, false);
+        let fixed = fixer::apply_fix_at_line(
+            &source,
+            &path_str,
+            &self.config,
+            usize::try_from(line).unwrap_or_default(),
+            &rule.to_string(),
+        );
         if fixed == source {
             return false;
         }

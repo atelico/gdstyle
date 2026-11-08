@@ -46,6 +46,7 @@ var _native_linter: RefCounted = null
 # Config file whose unknown rule names we've already reported. Warning is
 # one-shot per config because _load_nearest_config() runs on every lint,
 # and repeating it on each save would bury the output log.
+var _lint_incomplete := false
 var _rules_warned_for_config: String = ""
 
 
@@ -237,22 +238,6 @@ func _get_editor_text() -> String:
 	return ""
 
 
-## Collapse runs of 3+ blank lines down to 2.
-func _collapse_blank_lines(text: String) -> String:
-	var lines := text.split("\n")
-	var result: PackedStringArray = []
-	var consecutive_empty := 0
-	for line in lines:
-		if line.strip_edges().is_empty():
-			consecutive_empty += 1
-			if consecutive_empty <= 2:
-				result.append(line)
-		else:
-			consecutive_empty = 0
-			result.append(line)
-	return "\n".join(result)
-
-
 ## Replace the editor text, preserving caret and scroll position.
 func _set_editor_text(new_text: String) -> void:
 	var code_edit := _get_code_edit()
@@ -267,38 +252,43 @@ func _set_editor_text(new_text: String) -> void:
 	code_edit.scroll_vertical = saved_scroll
 
 
-## Write source text to a temp file, run a callback, then clean up.
-## Returns the CLI stdout text.
-func _with_temp_file(source: String, file_name: String, args: Array) -> String:
-	var tmp_dir := OS.get_cache_dir()
-	var tmp_path := tmp_dir.path_join("gdstyle_tmp_" + file_name)
+## Run the CLI on a copy of the open buffer with its original basename.
+## JSON callers leave stderr separate so warnings cannot corrupt the response.
+func _run_on_buffer(source: String, res_path: String, args: Array, json_output: bool = false) -> Dictionary:
+	var tmp_dir := OS.get_cache_dir().path_join(
+		"gdstyle-%s-%s-%s" % [OS.get_process_id(), get_instance_id(), Time.get_ticks_usec()]
+	)
+	if DirAccess.make_dir_absolute(tmp_dir) != OK:
+		_set_status("Failed to create temporary directory")
+		return {}
+	var tmp_path := tmp_dir.path_join(res_path.get_file())
 	var file := FileAccess.open(tmp_path, FileAccess.WRITE)
 	if not file:
-		return ""
+		DirAccess.remove_absolute(tmp_dir)
+		_set_status("Failed to create temporary file")
+		return {}
 	file.store_string(source)
 	file.close()
 
 	var full_args: Array = args.duplicate()
+	_add_cli_config(full_args, res_path)
 	full_args.append(tmp_path)
 	var output: Array = []
-	OS.execute(_gdstyle_path, full_args, output, true)
-
-	# Read back (for fmt which modifies in place).
-	var result_text := ""
-	var result_file := FileAccess.open(tmp_path, FileAccess.READ)
-	if result_file:
-		result_text = result_file.get_as_text()
-		result_file.close()
-
+	var status := OS.execute(_gdstyle_path, full_args, output, not json_output)
+	var text := FileAccess.get_file_as_string(tmp_path)
+	var read_error := FileAccess.get_open_error()
 	DirAccess.remove_absolute(tmp_path)
-
-	# Also return stdout for JSON parsing.
-	var stdout_text := ""
-	for line in output:
-		stdout_text += str(line)
-	# Store stdout in a way the caller can access: pack both into a dict.
-	# Actually, just return stdout. Caller reads result_text from temp if needed.
-	return stdout_text
+	DirAccess.remove_absolute(tmp_dir)
+	if read_error != OK:
+		_set_status("Failed to read temporary file")
+		return {}
+	if status == -1:
+		_set_status("Binary not found. Click Download or set the path.")
+		return {}
+	if status != 0 and not json_output:
+		_set_status("gdstyle failed (exit %d)" % status)
+		return {}
+	return {"status": status, "output": "".join(output), "text": text}
 
 
 # --- Public API ---
@@ -322,6 +312,7 @@ func lint_current_file() -> void:
 
 	_load_nearest_config(path)
 
+	_lint_incomplete = false
 	_set_status("Linting...")
 	_diagnostics.clear()
 	_tree.clear()
@@ -331,32 +322,11 @@ func lint_current_file() -> void:
 		for d in results:
 			_diagnostics.append(d)
 	else:
-		# Write buffer to temp file, lint it, parse JSON results.
-		var tmp_dir := OS.get_cache_dir()
-		var tmp_path := tmp_dir.path_join("gdstyle_tmp_" + path.get_file())
-		var file := FileAccess.open(tmp_path, FileAccess.WRITE)
-		if not file:
-			_set_status("Failed to create temp file")
+		var result := _run_on_buffer(source, path, ["check", "--format", "json"], true)
+		if result.is_empty():
 			return
-		file.store_string(source)
-		file.close()
-
-		var output: Array = []
-		var exit_code := OS.execute(_gdstyle_path, ["check", "--format", "json", tmp_path], output, true)
-		DirAccess.remove_absolute(tmp_path)
-
-		if exit_code == -1:
-			_set_status("Binary not found. Click Download or set the path.")
+		if not _read_cli_diagnostics(result["output"], result["status"]):
 			return
-
-		var stdout_text := ""
-		for line in output:
-			stdout_text += str(line)
-
-		if not stdout_text.strip_edges().is_empty():
-			var json := JSON.new()
-			if json.parse(stdout_text) == OK and json.data is Array:
-				_diagnostics.assign(json.data)
 
 	# Patch file paths: diagnostics reference the temp file or bare filename,
 	# replace with the real res:// path so go-to-line and fix work.
@@ -364,7 +334,8 @@ func lint_current_file() -> void:
 		d["file"] = path
 
 	_populate_tree()
-	_update_status_counts()
+	if not _lint_incomplete:
+		_update_status_counts()
 
 
 func fix_current_file() -> void:
@@ -383,23 +354,14 @@ func fix_current_file() -> void:
 	if _use_gdextension:
 		fixed_source = _native_linter.fix_source_unsafe(source, path.get_file())
 	else:
-		# Write to temp, run --unsafe-fix, read back.
-		var tmp_dir := OS.get_cache_dir()
-		var tmp_path := tmp_dir.path_join("gdstyle_tmp_" + path.get_file())
-		var file := FileAccess.open(tmp_path, FileAccess.WRITE)
-		if not file:
-			_set_status("Failed to create temp file")
+		# The CLI can exit 1 for remaining lint errors after a successful fix.
+		var result := _run_on_buffer(source, path, ["check", "--unsafe-fix", "--format", "json"], true)
+		if result.is_empty():
 			return
-		file.store_string(source)
-		file.close()
-
-		OS.execute(_gdstyle_path, ["check", "--unsafe-fix", tmp_path], [], true)
-
-		var result_file := FileAccess.open(tmp_path, FileAccess.READ)
-		if result_file:
-			fixed_source = result_file.get_as_text()
-			result_file.close()
-		DirAccess.remove_absolute(tmp_path)
+		if result["status"] not in [0, 1]:
+			_set_status("Fix incomplete (exit %d)" % result["status"])
+			return
+		fixed_source = result["text"]
 
 	if not fixed_source.is_empty() and fixed_source != source:
 		_set_editor_text(fixed_source)
@@ -412,11 +374,20 @@ func fix_current_file() -> void:
 
 func format_project() -> void:
 	_set_status("Formatting...")
+	if not _use_gdextension:
+		var args := ["fmt", ProjectSettings.globalize_path("res://")]
+		_add_cli_config(args, "res://")
+		var status := OS.execute(_gdstyle_path, args)
+		if status == 0:
+			_set_status("Formatted project")
+		else:
+			_set_status("Project format incomplete (exit %d)" % status)
+		return
 	_load_nearest_config("res://")
 	var gd_files := _collect_project_gd_files()
 	var changed_count := 0
 	for file_path in gd_files:
-		if _format_single_file(file_path):
+		if _native_linter.format_res_file(file_path):
 			changed_count += 1
 	_set_status("Formatted %d file%s" % [changed_count, "s" if changed_count != 1 else ""])
 
@@ -437,23 +408,10 @@ func format_current_file() -> void:
 	if _use_gdextension:
 		formatted = _native_linter.format_source(source)
 	else:
-		# Write to temp, run fmt, read back.
-		var tmp_dir := OS.get_cache_dir()
-		var tmp_path := tmp_dir.path_join("gdstyle_tmp_" + path.get_file())
-		var file := FileAccess.open(tmp_path, FileAccess.WRITE)
-		if not file:
-			_set_status("Failed to create temp file")
+		var result := _run_on_buffer(source, path, ["fmt"])
+		if result.is_empty():
 			return
-		file.store_string(source)
-		file.close()
-
-		OS.execute(_gdstyle_path, ["fmt", tmp_path], [], true)
-
-		var result_file := FileAccess.open(tmp_path, FileAccess.READ)
-		if result_file:
-			formatted = result_file.get_as_text()
-			result_file.close()
-		DirAccess.remove_absolute(tmp_path)
+		formatted = result["text"]
 
 	if not formatted.is_empty() and formatted != source:
 		_set_editor_text(formatted)
@@ -464,11 +422,16 @@ func format_current_file() -> void:
 
 ## Format on save operates on disk (Godot already wrote the file).
 func format_file_on_disk(res_path: String) -> void:
+	_load_nearest_config(res_path)
 	if _use_gdextension:
-		_native_linter.format_res_file(res_path)
+		if not _native_linter.format_res_file(res_path):
+			return
 	else:
-		var fs_path := ProjectSettings.globalize_path(res_path)
-		OS.execute(_gdstyle_path, ["fmt", fs_path], [], true)
+		var args := ["fmt", ProjectSettings.globalize_path(res_path)]
+		_add_cli_config(args, res_path)
+		if OS.execute(_gdstyle_path, args) != 0:
+			_set_status("Could not format %s" % res_path.get_file())
+			return
 
 	# The formatter rewrote the file on disk, but if it is the script
 	# currently open in the editor the in-memory buffer is now stale.
@@ -514,17 +477,6 @@ func _get_current_gd_path() -> String:
 	return path
 
 
-## Format a file on disk (for project-wide formatting).
-func _format_single_file(res_path: String) -> bool:
-	if _use_gdextension:
-		return _native_linter.format_res_file(res_path)
-	else:
-		var fs_path := ProjectSettings.globalize_path(res_path)
-		var output: Array = []
-		OS.execute(_gdstyle_path, ["fmt", fs_path], output, true)
-		return true
-
-
 # --- GDExtension backend ---
 
 
@@ -544,40 +496,8 @@ func _lint_project_native() -> void:
 	_update_status_counts()
 
 
-## Collect the project's `.gd` files to lint or format. With the GDExtension
-## backend this delegates to the native collector, so the config's
-## `exclude`/`include` are honored exactly like the CLI. The CLI backend keeps
-## the local walk below (the `gdstyle` binary applies the config itself when it
-## runs over the project root).
-func _collect_project_gd_files() -> Array:
-	if _use_gdextension and _native_linter:
-		var out: Array = []
-		for res_path in _native_linter.collect_project_gd_files():
-			out.append(res_path)
-		return out
-	return _find_gd_files("res://")
-
-
-## Local fallback walk for the CLI backend. Honors only the built-in skips
-## (hidden dirs and `addons`); config-driven `exclude`/`include` is applied by
-## the CLI binary itself, and by `_collect_project_gd_files` on the native path.
-func _find_gd_files(dir_path: String) -> Array[String]:
-	var files: Array[String] = []
-	var dir := DirAccess.open(dir_path)
-	if not dir:
-		return files
-	dir.list_dir_begin()
-	var file_name := dir.get_next()
-	while file_name != "":
-		var full_path := dir_path.path_join(file_name)
-		if dir.current_is_dir():
-			# Skip hidden dirs, .godot, and addons.
-			if not file_name.begins_with(".") and file_name != "addons":
-				files.append_array(_find_gd_files(full_path))
-		elif file_name.ends_with(".gd"):
-			files.append(full_path)
-		file_name = dir.get_next()
-	return files
+func _collect_project_gd_files() -> PackedStringArray:
+	return _native_linter.collect_project_gd_files()
 
 
 # --- CLI backend ---
@@ -591,36 +511,33 @@ func _run_gdstyle_cli(args: Array) -> void:
 	var full_args: Array = ["check", "--format", "json"]
 	full_args.append_array(args)
 
+	_add_cli_config(full_args, "res://")
 	var output: Array = []
-	var exit_code := OS.execute(_gdstyle_path, full_args, output, true)
+	var exit_code := OS.execute(_gdstyle_path, full_args, output, false)
+	if _read_cli_diagnostics("".join(output), exit_code):
+		_populate_tree()
+		if not _lint_incomplete:
+			_update_status_counts()
 
+
+func _read_cli_diagnostics(stdout_text: String, exit_code: int) -> bool:
+	_lint_incomplete = exit_code == 2
 	if exit_code == -1:
 		_set_status("Binary not found. Click Download or set the path.")
-		push_error("gdstyle: Could not execute '%s'. Is it installed?" % _gdstyle_path)
-		return
-
-	var stdout_text: String = ""
-	for line in output:
-		stdout_text += str(line)
-
+		return false
+	if exit_code not in [0, 1, 2]:
+		_set_status("Lint failed (exit %d)" % exit_code)
+		return false
+	if _lint_incomplete:
+		_set_status("Lint incomplete; some paths could not be checked")
 	if stdout_text.strip_edges().is_empty():
-		_set_status("No issues found")
-		return
-
+		return exit_code == 0
 	var json := JSON.new()
-	if json.parse(stdout_text) != OK:
-		_set_status("Failed to parse gdstyle output")
-		push_error("gdstyle: JSON parse error: %s" % json.get_error_message())
-		return
-
-	var parsed = json.data
-	if not parsed is Array:
-		_set_status("Unexpected gdstyle output format")
-		return
-
-	_diagnostics.assign(parsed)
-	_populate_tree()
-	_update_status_counts()
+	if json.parse(stdout_text) != OK or not json.data is Array:
+		_set_status("Failed to parse gdstyle diagnostics")
+		return false
+	_diagnostics.assign(json.data)
+	return true
 
 
 # --- Auto-download ---
@@ -686,16 +603,21 @@ func _download_binary() -> void:
 
 			# Use tar/7z to extract.
 			var extract_output: Array = []
-			OS.execute(extract_args[0], extract_args.slice(1), extract_output, true)
+			var extract_status := OS.execute(extract_args[0], extract_args.slice(1), extract_output, true)
 
 			# Clean up the archive.
 			DirAccess.remove_absolute(download_path)
 
 			# Update the binary path.
 			var final_path := bin_dir.path_join(binary_name)
-			if os_name != "windows":
-				# Make executable.
-				OS.execute("chmod", ["+x", final_path], [], true)
+			if extract_status != 0 or not FileAccess.file_exists(final_path):
+				_set_status("Could not extract gdstyle")
+				_download_button.disabled = false
+				return
+			if os_name != "windows" and OS.execute("chmod", ["+x", final_path]) != 0:
+				_set_status("Could not make gdstyle executable")
+				_download_button.disabled = false
+				return
 
 			_gdstyle_path = final_path
 			_binary_path_edit.text = _gdstyle_path
@@ -827,87 +749,35 @@ func _fix_selected_item(item: TreeItem) -> void:
 	var file_path: String = item.get_metadata(0)
 	var line_num: int = item.get_metadata(1)
 	var rule: String = item.get_metadata(2)
-
-	if file_path.is_empty():
+	var res_path := ProjectSettings.localize_path(file_path)
+	if res_path.is_empty() or not res_path.begins_with("res://"):
+		_set_status("Cannot resolve the diagnostic's script")
+		return
+	if res_path != _open_script_path():
+		# Project results can point at any script. Never apply one to a
+		# different editor buffer that happens to have the same line and rule.
+		_set_status("Open %s before applying this fix" % res_path.get_file())
 		return
 
 	var source := _get_editor_text()
 	if source.is_empty():
 		return
-
-	var res_path := file_path
-	if not res_path.begins_with("res://"):
-		var project_dir := ProjectSettings.globalize_path("res://")
-		if file_path.begins_with(project_dir):
-			res_path = "res://" + file_path.substr(project_dir.length())
-		else:
-			push_warning("gdstyle: Cannot resolve '%s' to a res:// path" % file_path)
-			return
-
 	_load_nearest_config(res_path)
 
 	var fixed := ""
-
 	if _use_gdextension:
-		# Native single-fix: lints in memory, applies the matching diagnostic's
-		# replacements, returns the patched source. No temp file, no CLI hop.
 		fixed = _native_linter.fix_one_in_source(source, res_path.get_file(), line_num, rule)
 	else:
-		# CLI fallback: write source to a temp file, lint with --select, parse
-		# the JSON, apply the replacements in memory.
-		var tmp_dir := OS.get_cache_dir()
-		var tmp_path := tmp_dir.path_join("gdstyle_tmp_" + res_path.get_file())
-		var file := FileAccess.open(tmp_path, FileAccess.WRITE)
-		if not file:
-			_set_status("Fix failed: cannot create temp file")
+		var result := _run_on_buffer(source, res_path, ["fix-at", "--line", str(line_num), "--rule", rule])
+		if result.is_empty():
 			return
-		file.store_string(source)
-		file.close()
+		fixed = result["text"]
 
-		var output: Array = []
-		OS.execute(_gdstyle_path, ["check", "--format", "json", "--select", rule, tmp_path], output, true)
-		DirAccess.remove_absolute(tmp_path)
-
-		var stdout_text := ""
-		for line in output:
-			stdout_text += str(line)
-
-		var json := JSON.new()
-		if json.parse(stdout_text) != OK or not json.data is Array:
-			_set_status("Fix failed: could not parse diagnostics")
-			return
-
-		var match_diag: Dictionary = {}
-		for d: Dictionary in json.data:
-			var d_line: int = d.get("line", 0)
-			if d.has("span") and d["span"] is Dictionary:
-				d_line = d["span"].get("line", 0)
-			if d_line == line_num and d.get("rule", "") == rule and d.has("fix"):
-				match_diag = d
-				break
-
-		if match_diag.is_empty():
-			_set_status("No fixable match at line %d" % line_num)
-			return
-
-		var fix_data: Dictionary = match_diag["fix"]
-		var replacements: Array = fix_data.get("replacements", [])
-		replacements.sort_custom(func(a, b): return a["offset"] > b["offset"])
-
-		fixed = source
-		for repl: Dictionary in replacements:
-			var offset: int = repl["offset"]
-			var length: int = repl["length"]
-			var new_text: String = repl["new_text"]
-			fixed = fixed.substr(0, offset) + new_text + fixed.substr(offset + length)
-
-	if fixed.is_empty() or fixed == source:
+	if fixed == source:
 		_set_status("No fixable match at line %d" % line_num)
 		return
 
 	_set_editor_text(fixed)
-	_set_status("Fixed: %s at line %d" % [rule, line_num])
-
 	lint_current_file()
 
 
@@ -964,30 +834,35 @@ func _set_status(text: String) -> void:
 		_status_label.text = text
 
 
-## Find the nearest `gdstyle.toml` / `.gdstyle.toml` by walking up from the
-## file's directory, and load it into the native linter. Falls back to
-## defaults when none is found. The CLI applies the same search itself; this
-## method just makes the GDExtension backend consistent with it so subfolder
-## overrides (e.g. inside a vendored addon) are respected.
+## Load the nearest config for the native backend, clearing any previous state.
 func _load_nearest_config(res_path: String) -> void:
 	if not _use_gdextension or _native_linter == null:
 		return
-	var dir := res_path.get_base_dir()
-	while not dir.is_empty():
+	_native_linter.reset_config()
+	var path := _nearest_config(res_path)
+	if not path.is_empty() and _native_linter.load_config_res(path):
+		_warn_unknown_rules(path)
+	else:
+		_rules_warned_for_config = ""
+
+
+func _nearest_config(res_path: String) -> String:
+	var dir := "res://" if res_path == "res://" else res_path.get_base_dir()
+	while dir.begins_with("res://"):
 		for name in ["gdstyle.toml", ".gdstyle.toml"]:
 			var candidate := dir.path_join(name)
 			if FileAccess.file_exists(candidate):
-				_native_linter.load_config_res(candidate)
-				_warn_unknown_rules(candidate)
-				return
+				return candidate
 		if dir == "res://":
 			break
-		var parent := dir.get_base_dir()
-		if parent == dir:
-			break
-		dir = parent
-	_native_linter.reset_config()
-	_rules_warned_for_config = ""
+		dir = dir.get_base_dir()
+	return ""
+
+
+func _add_cli_config(args: Array, res_path: String) -> void:
+	var path := _nearest_config(res_path)
+	if not path.is_empty():
+		args.append_array(["--config", ProjectSettings.globalize_path(path)])
 
 
 ## Report [rules] keys in [param config_path] that name no known rule.
