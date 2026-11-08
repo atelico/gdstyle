@@ -232,7 +232,7 @@ gdstyle check --unsafe-fix
 
 Safe fixes preserve behavior. Unsafe fixes can change semantics (renaming signals, variables, and other identifiers), so review the diff before committing.
 
-When `--unsafe-fix` renames an identifier, gdstyle follows the rename across every `.gd` file in the project and into the `.tscn`/`.tres` scene files that wire signals or methods to that name. A reference it can't safely rewrite is reported as a warning so you can fix it by hand. A file it could not write, or a script it left alone because it holds a merge conflict marker, is reported as an error and the run exits `2`, so a half-applied rename never passes unnoticed.
+When `--unsafe-fix` renames an identifier, gdstyle looks for references in the selected scripts and scene files. It updates a scene's signal or method only if the corresponding connection endpoint has the declaring script attached directly. Connections through instanced or inherited nodes, built-in scripts, or missing project context may need manual updates. A matching scene endpoint that cannot be resolved, or a file that cannot be read or written, makes the run exit `2`.
 
 ## Formatter
 
@@ -287,7 +287,7 @@ The contents of multi-line strings are data, so the formatter leaves them alone:
 
 Line endings are kept too, by `fmt` and `check --fix` alike. A file keeps the style most of its line breaks outside strings use, so a CRLF file stays CRLF. A string keeps its own line endings even when they differ from the rest of the file, because Godot keeps a `\r` inside a string as part of its value.
 
-A script that holds a merge conflict marker (a line starting with seven or more `<`, `=`, `>` or `|`, outside a string) is left untouched by `fmt`, `check --fix` and `check --unsafe-fix`: rewriting either side would make the conflict harder to resolve. `check` reports each marker as a `syntax/lex-error`. When `fmt` meets such a script, or `--fix` / `--unsafe-fix` had something to fix in it or a rename made elsewhere needed to reach it, the run names the file in an error and exits `2`. Scenes are not lexed, so `--unsafe-fix` still updates the `[connection]` rows of a conflicted `.tscn` / `.tres` file.
+A script that holds a merge conflict marker (a line starting with seven or more `<`, `=`, `>` or `|`, outside a string) is left untouched by `fmt`, `check --fix` and `check --unsafe-fix`: rewriting either side would make the conflict harder to resolve. `check` reports each marker as a `syntax/lex-error`. When `fmt` meets such a script, or `--fix` / `--unsafe-fix` had something to fix in it or a rename made elsewhere needed to reach it, the run names the file in an error and exits `2`. If a conflicted scene needs a connection update, `--unsafe-fix` also leaves it unchanged and exits `2`.
 
 > **Note:** Line wrapping breaks at comma boundaries inside delimiters (parentheses, brackets, braces), `and`/`or` operators in `if`/`elif`/`while` conditions, and word boundaries in long comments. Lines without any breakable pattern (e.g., long strings, property chains, continuation lines without enclosing delimiters) are left alone.
 
@@ -400,7 +400,7 @@ When no config file is found, gdstyle uses these defaults:
 | `exclude` | `[".godot", "addons"]` |
 | `include` | `[]` |
 
-Hidden files and directories (a name starting with `.`, such as `.godot` or an editor lock file like `.#player.gd`) are always skipped when a directory is walked, whatever `exclude` and `include` say. A path named on the command line is used as given.
+Hidden files and directories (a name starting with `.`, such as `.godot` or an editor lock file like `.#player.gd`) are always skipped when a directory is walked, whatever `exclude` and `include` say. Directory walks also skip symbolic links and non-regular files. An explicitly named path may be hidden or a symbolic link.
 
 Most rules are enabled by default with `warn` severity. Three advisory rules (`quality/type-hint`, `quality/empty-function`, `quality/no-debug-print`) are off by default and must be explicitly enabled.
 
@@ -861,9 +861,9 @@ You can switch between backends at any time from the mode dropdown in the toolba
 - **Format Project / Format File.** Same split for the formatter (also config-aware for project runs).
 - **Lint on Save.** Lint after every save (on by default).
 - **Format on Save.** Format before linting on save.
-- **Right-click Fix.** Right-click any diagnostic with an auto-fix to apply it in place.
+- **Right-click Fix.** Open the diagnostic's script, then right-click the diagnostic to apply its fix. The CLI backend requires a binary with the `fix-at` command.
 - **Click to navigate.** Double-click a diagnostic to jump to the source line.
-- **In-memory editing.** Lint, fix, and format work directly on the editor buffer, no disk I/O.
+- **In-memory editing.** Lint, fix, and format use the current editor buffer. The CLI backend uses a temporary copy, so unsaved changes are included without writing to the original script.
 
 ### Installation (pre-built plugin)
 

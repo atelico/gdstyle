@@ -1,3 +1,7 @@
+mod scene;
+
+pub use scene::{apply_scoped_scene_renames, ScopedSceneRenames};
+
 use crate::ast::ClassMember;
 use crate::diagnostic::{Diagnostic, Replacement};
 use crate::lexer::Lexer;
@@ -165,6 +169,25 @@ pub fn apply_fixes(source: &str, diagnostics: &[Diagnostic], safe_only: bool) ->
     };
 
     crate::linter::restore_line_endings(original_source, &fixed)
+}
+
+/// Re-lint and apply fixes for exactly `rule` at the 1-based `line`.
+/// Uses the same byte offsets, conflict protection and reference updates as
+/// [`apply_fixes`]. Returns the original text if no applicable fix remains.
+pub fn apply_fix_at_line(
+    source: &str,
+    file_path: &str,
+    config: &crate::config::Config,
+    line: usize,
+    rule: &str,
+) -> String {
+    let mut diagnostics = crate::linter::lint_source(source, file_path, config);
+    diagnostics.retain(|d| d.span.line == line && d.rule == rule && d.fix.is_some());
+    if diagnostics.is_empty() {
+        source.to_owned()
+    } else {
+        apply_fixes(source, &diagnostics, false)
+    }
 }
 
 /// Extract per-file rename records for cross-file reference tracking.
@@ -424,15 +447,29 @@ pub fn find_cross_file_references(
 
 /// Apply cross-file reference fixes to a source string.
 pub fn apply_cross_file_fixes(source: &str, refs: &[CrossFileReference]) -> String {
-    if refs.is_empty() {
+    if refs.is_empty() || crate::lexer::has_conflict_marker(source) {
         return source.to_string();
     }
-    let replacements: Vec<Replacement> = refs
-        .iter()
-        .map(|r| Replacement {
-            offset: r.offset,
-            length: r.length,
-            new_text: r.new_name.clone(),
+    let mut edits = std::collections::HashMap::new();
+    for reference in refs {
+        let name = reference.new_name.as_str();
+        edits
+            .entry((reference.offset, reference.length))
+            .and_modify(|target| {
+                if *target != Some(name) {
+                    *target = None;
+                }
+            })
+            .or_insert(Some(name));
+    }
+    let replacements = edits
+        .into_iter()
+        .filter_map(|((offset, length), target)| {
+            Some(Replacement {
+                offset,
+                length,
+                new_text: target?.to_owned(),
+            })
         })
         .collect();
     apply_replacements(source, replacements)
@@ -463,34 +500,8 @@ pub fn apply_scene_renames(
     scene_source: &str,
     renames: &[AppliedRename],
 ) -> (String, Vec<SceneReference>) {
-    let mut applied: Vec<SceneReference> = Vec::new();
-    let mut out_lines: Vec<String> = Vec::with_capacity(scene_source.split('\n').count());
-
-    for (line_idx, line) in scene_source.split('\n').enumerate() {
-        let mut new_line = line.to_string();
-        for rename in renames {
-            let attr = match rename.kind {
-                RenameKind::Signal => "signal",
-                RenameKind::Function => "method",
-                _ => continue,
-            };
-            // Exact, quoted attribute match: `signal="old"` -> `signal="new"`.
-            let needle = format!("{}=\"{}\"", attr, rename.old_name);
-            let replacement = format!("{}=\"{}\"", attr, rename.new_name);
-            if new_line.contains(&needle) {
-                new_line = new_line.replace(&needle, &replacement);
-                applied.push(SceneReference {
-                    line: line_idx + 1,
-                    attribute: if attr == "signal" { "signal" } else { "method" },
-                    old_name: rename.old_name.clone(),
-                    new_name: rename.new_name.clone(),
-                });
-            }
-        }
-        out_lines.push(new_line);
-    }
-
-    (out_lines.join("\n"), applied)
+    let result = scene::rewrite_connections(scene_source, renames);
+    (result.source, result.applied)
 }
 
 /// The `(start, end)` byte ranges of the replacements that delete only

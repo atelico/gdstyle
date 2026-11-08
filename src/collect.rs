@@ -80,7 +80,8 @@ impl PathFilter {
 /// Collect every `.gd` file reachable from `paths`, applying `filter`. Explicit
 /// file paths are always kept; directories are walked recursively. Hidden
 /// files and directories (a name starting with `.`) are skipped inside a
-/// directory, as Godot skips them: editor lock files such as `.#player.gd`
+/// directory, along with symbolic links and other non-regular entries. Godot skips
+/// hidden files too: editor lock files such as `.#player.gd`
 /// end in `.gd` too. The result is sorted for deterministic output.
 ///
 /// A path that cannot be read (one of `paths` that does not exist, or a
@@ -132,41 +133,85 @@ pub fn collect_gdscript_files_reporting(
     filter: &PathFilter,
     on_unreadable: &mut dyn FnMut(&Path, &std::io::Error),
 ) -> Vec<PathBuf> {
-    let mut files = Vec::new();
+    collect_files(paths, filter, |ext| ext == "gd", on_unreadable)
+}
 
+/// Collect scene and resource files for scene-aware renames.
+pub fn collect_scene_files(paths: &[PathBuf], filter: &PathFilter) -> Vec<PathBuf> {
+    collect_scene_files_reporting(paths, filter, &mut |path, error| {
+        eprintln!(
+            "{}: cannot read {}: {}",
+            "warning".yellow(),
+            path.display(),
+            error
+        );
+    })
+}
+
+/// Collect scene and resource files and report discovery failures to the caller.
+pub fn collect_scene_files_reporting(
+    paths: &[PathBuf],
+    filter: &PathFilter,
+    on_unreadable: &mut dyn FnMut(&Path, &std::io::Error),
+) -> Vec<PathBuf> {
+    collect_files(
+        paths,
+        filter,
+        |ext| ext == "tscn" || ext == "tres",
+        on_unreadable,
+    )
+}
+
+fn collect_files(
+    paths: &[PathBuf],
+    filter: &PathFilter,
+    matches_extension: fn(&std::ffi::OsStr) -> bool,
+    on_unreadable: &mut dyn FnMut(&Path, &std::io::Error),
+) -> Vec<PathBuf> {
+    let mut files = Vec::new();
     for path in paths {
-        // Follows symlinks, as `is_file` / `is_dir` do.
-        let metadata = match std::fs::metadata(path) {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                on_unreadable(path, &error);
-                continue;
+        // Explicit paths may be symlinks; directory walks never follow them.
+        match std::fs::metadata(path) {
+            Ok(metadata) if metadata.is_dir() => {
+                collect_from_directory(
+                    path,
+                    filter,
+                    false,
+                    matches_extension,
+                    &mut files,
+                    on_unreadable,
+                );
             }
-        };
-        if metadata.is_file() {
-            if path.extension().is_some_and(|ext| ext == "gd") {
-                files.push(path.clone());
+            Ok(metadata) if path.extension().is_some_and(matches_extension) => {
+                if metadata.is_file() {
+                    files.push(path.clone());
+                } else {
+                    on_unreadable(path, &std::io::Error::other("not a regular file"));
+                }
             }
-        } else if metadata.is_dir() {
-            collect_from_directory(path, filter, false, &mut files, on_unreadable);
+            Ok(_) => {}
+            Err(error) => on_unreadable(path, &error),
         }
     }
 
     files.sort();
-    // A file named twice, or named and also under a named directory.
     files.dedup();
+    if paths.len() > 1 {
+        // Relative, absolute and symlink arguments may name the same file.
+        // Keep one path so parallel fixes cannot race to rewrite its bytes.
+        let mut seen = std::collections::HashSet::new();
+        files.retain(|path| {
+            seen.insert(std::fs::canonicalize(path).unwrap_or_else(|_| path.clone()))
+        });
+    }
     files
-}
-
-/// True for an entry Godot treats as hidden: its name starts with `.`.
-fn is_hidden(entry: &std::fs::DirEntry) -> bool {
-    entry.file_name().to_string_lossy().starts_with('.')
 }
 
 fn collect_from_directory(
     dir: &Path,
     filter: &PathFilter,
     subtree_excluded: bool,
+    matches_extension: fn(&std::ffi::OsStr) -> bool,
     files: &mut Vec<PathBuf>,
     on_unreadable: &mut dyn FnMut(&Path, &std::io::Error),
 ) {
@@ -178,71 +223,44 @@ fn collect_from_directory(
         }
     };
 
-    for entry in entries.flatten() {
-        // Hidden directories (.godot, .git, …) and hidden files (editor lock
-        // files, macOS `._name` companions) are skipped unconditionally.
-        if is_hidden(&entry) {
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                on_unreadable(dir, &error);
+                continue;
+            }
+        };
+        if entry.file_name().to_string_lossy().starts_with('.') {
             continue;
         }
         let path = entry.path();
-        let path_str = path.to_string_lossy();
-        let excluded = filter.resolve_excluded(path_str.as_ref(), subtree_excluded);
-
-        if path.is_dir() {
-            // Prune an excluded directory, unless an include is configured that
-            // might live beneath it — then descend, keeping the subtree
-            // excluded-by-default so only the carve-out survives.
-            if excluded && !filter.has_includes() {
-                continue;
-            }
-            collect_from_directory(&path, filter, excluded, files, on_unreadable);
-        } else if !excluded && path.extension().is_some_and(|ext| ext == "gd") {
-            files.push(path);
+        let excluded = filter.resolve_excluded(&path.to_string_lossy(), subtree_excluded);
+        if excluded && !filter.has_includes() {
+            continue;
         }
-    }
-}
-
-/// Recursively collect `.tscn` / `.tres` scene/resource files under `paths`,
-/// applying the same `filter`. Used by `--unsafe-fix` to rewrite editor-wired
-/// signal/method connections when a `.gd` rename would otherwise leave them
-/// stale.
-pub fn collect_scene_files(paths: &[PathBuf], filter: &PathFilter) -> Vec<PathBuf> {
-    fn walk(dir: &Path, filter: &PathFilter, subtree_excluded: bool, out: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            if is_hidden(&entry) {
-                continue;
-            }
-            let path = entry.path();
-            let path_str = path.to_string_lossy();
-            let excluded = filter.resolve_excluded(path_str.as_ref(), subtree_excluded);
-            if path.is_dir() {
-                if excluded && !filter.has_includes() {
-                    continue;
-                }
-                walk(&path, filter, excluded, out);
-            } else if !excluded
-                && path
-                    .extension()
-                    .is_some_and(|ext| ext == "tscn" || ext == "tres")
+        // Inspect the entry itself, not its target. Symlinks could escape the
+        // walk root, revisit it through a cycle, or race a second path's write.
+        match entry.file_type() {
+            Ok(kind) if kind.is_dir() => collect_from_directory(
+                &path,
+                filter,
+                excluded,
+                matches_extension,
+                files,
+                on_unreadable,
+            ),
+            Ok(kind)
+                if kind.is_file()
+                    && !excluded
+                    && path.extension().is_some_and(matches_extension) =>
             {
-                out.push(path);
+                files.push(path);
             }
+            Ok(_) => {}
+            Err(error) => on_unreadable(&path, &error),
         }
     }
-
-    let mut files = Vec::new();
-    for path in paths {
-        if path.is_dir() {
-            walk(path, filter, false, &mut files);
-        }
-    }
-    files.sort();
-    // A file named twice, or named and also under a named directory.
-    files.dedup();
-    files
 }
 
 #[cfg(test)]
