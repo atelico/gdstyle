@@ -18,7 +18,7 @@ gdstyle catches style violations, naming inconsistencies, and common code-qualit
 
 - 57 lint rules across syntax, naming, formatting, ordering, and code quality.
 - Formatter (`gdstyle fmt`) that's in-place and idempotent, and reorders class members into the canonical Godot order.
-- Auto-fix: `--fix` for the safe ones, `--unsafe-fix` for renames. Renames follow into other `.gd` files and into the `.tscn`/`.tres` scene wiring.
+- Use `check --fix` for safe edits, `check --unsafe-fix` for project-wide renames, or `fix-at` for one rule on one line.
 - Single static binary. No Python, no Rust toolchain, no Godot install required to run it.
 - Optional Godot editor plugin: bottom panel with clickable diagnostics, single-click fixes, Lint/Format on save. Uses the GDExtension when present, falls back to the CLI binary otherwise.
 - [pre-commit](https://pre-commit.com) framework integration out of the box (`gdstyle` and `gdstyle-fmt` hooks).
@@ -80,6 +80,9 @@ gdstyle check --fix
 
 # Auto-fix all violations including unsafe ones
 gdstyle check --unsafe-fix
+
+# Apply one rule's fix on line 12
+gdstyle fix-at src/player.gd --line 12 --rule format/trailing-whitespace
 
 # Format all GDScript files in place
 gdstyle fmt
@@ -232,7 +235,14 @@ gdstyle check --unsafe-fix
 
 Safe fixes preserve behavior. Unsafe fixes can change semantics (renaming signals, variables, and other identifiers), so review the diff before committing.
 
-When `--unsafe-fix` renames an identifier, gdstyle looks for references in the selected scripts and scene files. It updates a scene's signal or method only if the corresponding connection endpoint has the declaring script attached directly. Connections through instanced or inherited nodes, built-in scripts, or missing project context may need manual updates. A matching scene endpoint that cannot be resolved, or a file that cannot be read or written, makes the run exit `2`.
+When `--unsafe-fix` renames an identifier, gdstyle looks for references in
+the selected scripts and scene files. It updates a scene's signal or method
+only if the corresponding connection endpoint has the declaring script
+attached directly. Connections through instanced or inherited nodes,
+built-in scripts, or missing project context may need manual updates.
+gdstyle reports unresolved references and exits `2` when a rename is
+incomplete. Pass a project directory to discover its scripts and scenes
+together, or name the files you want to process explicitly.
 
 ## Formatter
 
@@ -287,7 +297,12 @@ The contents of multi-line strings are data, so the formatter leaves them alone:
 
 Line endings are kept too, by `fmt` and `check --fix` alike. A file keeps the style most of its line breaks outside strings use, so a CRLF file stays CRLF. A string keeps its own line endings even when they differ from the rest of the file, because Godot keeps a `\r` inside a string as part of its value.
 
-A script that holds a merge conflict marker (a line starting with seven or more `<`, `=`, `>` or `|`, outside a string) is left untouched by `fmt`, `check --fix` and `check --unsafe-fix`: rewriting either side would make the conflict harder to resolve. `check` reports each marker as a `syntax/lex-error`. When `fmt` meets such a script, or `--fix` / `--unsafe-fix` had something to fix in it or a rename made elsewhere needed to reach it, the run names the file in an error and exits `2`. If a conflicted scene needs a connection update, `--unsafe-fix` also leaves it unchanged and exits `2`.
+A line starting with seven or more `<`, `=`, `>` or `|` outside a string is a
+merge conflict marker. `check` reports each marker as a `syntax/lex-error`.
+`fmt` and `fix-at` leave the script untouched and exit `2`. With
+`check --fix` or `check --unsafe-fix`, the script is also left untouched,
+and the run exits `2` if it had an edit to apply. A conflicted scene that
+needs a connection update is handled the same way by `--unsafe-fix`.
 
 > **Note:** Line wrapping breaks at comma boundaries inside delimiters (parentheses, brackets, braces), `and`/`or` operators in `if`/`elif`/`while` conditions, and word boundaries in long comments. Lines without any breakable pattern (e.g., long strings, property chains, continuation lines without enclosing delimiters) are left alone.
 
@@ -602,6 +617,7 @@ gdstyle [COMMAND] [OPTIONS] [PATHS]...
 |---------|-------------|
 | `check` | Lint files (default when no subcommand given) |
 | `fmt` | Format files in place |
+| `fix-at` | Apply one rule's fix at a given line in a single file |
 | `rules` | List all available lint rules |
 | `init` | Generate a starter `gdstyle.toml` configuration file |
 
@@ -614,10 +630,12 @@ gdstyle [COMMAND] [OPTIONS] [PATHS]...
 | `--format <FORMAT>` | Output format: `text` (default) or `json` |
 | `-c, --config <PATH>` | Path to configuration file |
 | `--select <RULES>` | Only check specific rules (comma-separated, supports partial matching) |
-| `--ignore <RULES>` | Ignore specific rules (comma-separated) |
+| `--ignore <RULES>` | Ignore specific rules (comma-separated exact rule names) |
 | `--max-line-length <N>` | Override the maximum line length |
 | `--max-warnings <N>` | Exit 1 when more than N warnings are found |
 | `--no-color` | Disable colored output |
+
+An unknown output format or a rule filter that matches no rules exits `2`.
 
 ### `fmt` options
 
@@ -627,6 +645,18 @@ gdstyle [COMMAND] [OPTIONS] [PATHS]...
 | `--diff` | Print a unified diff of what would change (applies with `git apply`) |
 | `-c, --config <PATH>` | Path to configuration file |
 | `--no-color` | Disable colored output |
+
+### `fix-at` options
+
+| Option | Description |
+|--------|-------------|
+| `--line <N>` | Required 1-based diagnostic line |
+| `--rule <RULE>` | Required exact rule name |
+| `-c, --config <PATH>` | Path to configuration file |
+
+`fix-at` re-lints the file and applies fixes for the matching rule and line,
+including unsafe fixes when the rule provides one. It exits `0` when no
+matching fix applies.
 
 ### `init` options
 
@@ -638,11 +668,11 @@ gdstyle [COMMAND] [OPTIONS] [PATHS]...
 
 | Code | Meaning |
 |------|---------|
-| `0` | Linting/formatting completed (warnings only, or no issues) |
-| `1` | Linting completed with errors, `--max-warnings` was exceeded, or `fmt --check` found changes |
-| `2` | Configuration error, or the run is incomplete: a path does not exist, a file or directory could not be read, a file could not be written, or a script that holds a merge conflict marker kept `fmt`, `--fix` or `--unsafe-fix` from doing its work |
+| `0` | Linting, formatting, or fixing completed successfully |
+| `1` | Linting found errors, `--max-warnings` was exceeded, or `fmt --check` or `fmt --diff` found changes |
+| `2` | Invalid arguments or configuration, a path could not be read or written, conflict markers prevented an edit, or an unsafe rename left references unresolved |
 
-Exit code `2` outranks `1`: when a path was skipped, the report does not cover the whole project. `check` and `fmt` print each failure as it happens and repeat the count as their last line on stderr.
+Exit code `2` takes precedence over `1`. For incomplete runs, `check` and `fmt` report each affected path and print a final count on stderr.
 
 There are two ways to make warnings fail a build. Set the rules you care
 about to `"error"` in `[rules]` to fail on those specifically, or pass
@@ -685,7 +715,7 @@ Add the following to your project's `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/atelico/gdstyle
-    rev: v0.6.1   # pin to a released tag; bump with `pre-commit autoupdate`
+    rev: v0.7.0   # pin to a released tag; bump with `pre-commit autoupdate`
     hooks:
       - id: gdstyle          # lint (fails the commit on diagnostics)
       - id: gdstyle-fmt      # format in place
@@ -861,7 +891,7 @@ You can switch between backends at any time from the mode dropdown in the toolba
 - **Format Project / Format File.** Same split for the formatter (also config-aware for project runs).
 - **Lint on Save.** Lint after every save (on by default).
 - **Format on Save.** Format before linting on save.
-- **Right-click Fix.** Open the diagnostic's script, then right-click the diagnostic to apply its fix. The CLI backend requires a binary with the `fix-at` command.
+- **Right-click Fix.** Open the diagnostic's script, then right-click the diagnostic to apply its fix. The CLI backend requires gdstyle 0.7.0 or later for this action.
 - **Click to navigate.** Double-click a diagnostic to jump to the source line.
 - **In-memory editing.** Lint, fix, and format use the current editor buffer. The CLI backend uses a temporary copy, so unsaved changes are included without writing to the original script.
 
