@@ -108,75 +108,33 @@ pub fn apply_fixes(source: &str, diagnostics: &[Diagnostic], safe_only: bool) ->
     {
         return original_source.to_string();
     }
-    let members = crate::source_cache::members_of(source, &tokens);
-    let class_name = extract_class_name(&members);
-    let existing_names = collect_existing_names(&members);
-    let identifier_tokens = collect_identifier_tokens(&tokens);
-
-    let mut replacements: Vec<Replacement> = Vec::new();
-
-    // Renames carry their kind so the same-file rewriter can apply context
-    // rules (call position vs. bare reference, qualified vs. unqualified).
-    let mut renames: Vec<(String, String, RenameKind)> = Vec::new();
-
-    for diag in diagnostics {
-        if let Some(ref fix) = diag.fix {
-            if safe_only && !fix.is_safe {
-                continue;
-            }
-            // For unsafe naming rule fixes, suppress the rename when the new
-            // name already exists in the file (prevents duplicate-declaration
-            // parse errors when the original was an intentional alias such as
-            // `const e = E`).
-            let is_naming_fix = !safe_only && rule_to_kind(&diag.rule).is_some();
-            let mut suppress_this_diag = false;
-            if is_naming_fix {
-                for replacement in &fix.replacements {
-                    let end = (replacement.offset + replacement.length).min(source.len());
-                    if replacement.offset <= source.len() {
-                        let old_name = &source[replacement.offset..end];
-                        if old_name.is_empty() || old_name == replacement.new_text {
-                            continue;
-                        }
-                        // Suppress if the proposed new name is already
-                        // declared OR appears anywhere in the file as an
-                        // identifier token (Godot built-in, autoload,
-                        // imported class, etc.). The rename would either
-                        // duplicate a declaration or create a self-
-                        // referential / shadowing definition.
-                        if existing_names.contains(replacement.new_text.as_str())
-                            || identifier_tokens.contains(replacement.new_text.as_str())
-                        {
-                            suppress_this_diag = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            if suppress_this_diag {
-                continue;
-            }
-            for replacement in &fix.replacements {
-                if !safe_only {
-                    if let Some(kind) = rule_to_kind(&diag.rule) {
-                        let end = (replacement.offset + replacement.length).min(source.len());
-                        if replacement.offset <= source.len() {
-                            let old_name = &source[replacement.offset..end];
-                            if !old_name.is_empty() && old_name != replacement.new_text {
-                                let resolved_kind = resolve_kind(kind, &members, old_name);
-                                renames.push((
-                                    old_name.to_string(),
-                                    replacement.new_text.clone(),
-                                    resolved_kind,
-                                ));
-                            }
-                        }
-                    }
-                }
-                replacements.push(replacement.clone());
-            }
+    let mut replacements = Vec::new();
+    let mut renames = Vec::new();
+    for fix in diagnostics.iter().filter_map(|diag| {
+        let fix = diag.fix.as_ref()?;
+        if fix.is_safe || (!safe_only && rule_to_kind(&diag.rule).is_none()) {
+            Some(fix)
+        } else {
+            None
         }
+    }) {
+        replacements.extend(fix.replacements.iter().cloned());
     }
+
+    let class_name = if safe_only {
+        None
+    } else {
+        let members = crate::source_cache::members_of(source, &tokens);
+        for (old, replacement, kind) in planned_renames(source, diagnostics, &members, &tokens) {
+            renames.push((
+                old,
+                &replacement.new_text,
+                resolve_kind(kind, &members, old),
+            ));
+            replacements.push(replacement.clone());
+        }
+        extract_class_name(&members)
+    };
 
     // For unsafe naming fixes, look up same-file references using context-aware
     // matching. Reuses the tokens lexed at the top of the function.
@@ -188,7 +146,7 @@ pub fn apply_fixes(source: &str, diagnostics: &[Diagnostic], safe_only: bool) ->
                 let candidate = Replacement {
                     offset,
                     length,
-                    new_text: new_name.clone(),
+                    new_text: (*new_name).to_owned(),
                 };
                 let already_exists = replacements
                     .iter()
@@ -227,53 +185,87 @@ pub fn extract_renames(
     let source = normalized.as_str();
 
     let class_name = extract_class_name(members);
-    let existing_names = collect_existing_names(members);
-    let mut lexer = Lexer::new(source);
-    let tokens = lexer.tokenize();
-    let identifier_tokens = collect_identifier_tokens(&tokens);
-    let mut renames = Vec::new();
-    for diag in diagnostics {
-        if let Some(ref fix) = diag.fix {
-            if fix.is_safe {
-                continue;
+    let tokens = crate::source_cache::tokens_of(source);
+    planned_renames(source, diagnostics, members, &tokens)
+        .into_iter()
+        .map(|(old_name, replacement, kind)| {
+            let kind = resolve_kind(kind, members, old_name);
+            AppliedRename {
+                old_name: old_name.to_owned(),
+                new_name: replacement.new_text.clone(),
+                source_file: file_path.to_string(),
+                source_class_name: class_name.clone(),
+                is_instance_member: is_instance_member_in(members, old_name, &kind),
+                kind,
             }
-            let Some(kind) = rule_to_kind(&diag.rule) else {
+        })
+        .collect()
+}
+
+/// Select one proposal per declaration and reject names that collide with
+/// existing identifiers or with another declaration's proposed name. The
+/// reference pass uses the same plan as the declaration pass.
+fn planned_renames<'s, 'd>(
+    source: &'s str,
+    diagnostics: &'d [Diagnostic],
+    members: &[ClassMember],
+    tokens: &[Token],
+) -> Vec<(&'s str, &'d Replacement, RenameKind)> {
+    use std::collections::{HashMap, HashSet};
+
+    let mut proposals = diagnostics
+        .iter()
+        .filter_map(|diag| {
+            let fix = diag.fix.as_ref().filter(|fix| !fix.is_safe)?;
+            Some((rule_to_kind(&diag.rule)?, &fix.replacements))
+        })
+        .peekable();
+    if proposals.peek().is_none() {
+        return Vec::new();
+    }
+
+    let existing_names = collect_existing_names(members);
+    let identifier_tokens = collect_identifier_tokens(tokens);
+    let mut seen = HashSet::new();
+    let mut targets = HashMap::<&str, Option<&str>>::new();
+    let mut plan = Vec::new();
+    for (kind, replacements) in proposals {
+        for replacement in replacements {
+            let Some(old) = replacement_text(source, replacement) else {
                 continue;
             };
-            for replacement in &fix.replacements {
-                let end = (replacement.offset + replacement.length).min(source.len());
-                if replacement.offset <= source.len() {
-                    let old_name = &source[replacement.offset..end];
-                    if old_name.is_empty() || old_name == replacement.new_text {
-                        continue;
-                    }
-                    // Skip when the proposed new name would collide with an
-                    // existing declaration OR with any identifier already
-                    // used in the file (autoload, built-in, etc.). Without
-                    // this guard the rename can create duplicate decls
-                    // (`const e = E` → `const E = E`) or self-referential
-                    // ones (`const pi = PI` → `const PI = PI`).
-                    if existing_names.contains(replacement.new_text.as_str())
-                        || identifier_tokens.contains(replacement.new_text.as_str())
-                    {
-                        continue;
-                    }
-                    let resolved_kind = resolve_kind(kind.clone(), members, old_name);
-                    let is_instance_member =
-                        is_instance_member_in(members, old_name, &resolved_kind);
-                    renames.push(AppliedRename {
-                        old_name: old_name.to_string(),
-                        new_name: replacement.new_text.clone(),
-                        source_file: file_path.to_string(),
-                        source_class_name: class_name.clone(),
-                        kind: resolved_kind,
-                        is_instance_member,
-                    });
-                }
+            let new = replacement.new_text.as_str();
+            if old.is_empty()
+                || old == new
+                || crate::rules::syntax::is_reserved_word(new)
+                || existing_names.contains(new)
+                || identifier_tokens.contains(new)
+                || !seen.insert((replacement.offset, replacement.length))
+            {
+                continue;
             }
+            if kind != RenameKind::NodePath {
+                targets
+                    .entry(new)
+                    .and_modify(|first| {
+                        if *first != Some(old) {
+                            *first = None;
+                        }
+                    })
+                    .or_insert(Some(old));
+            }
+            plan.push((old, replacement, kind.clone()));
         }
     }
-    renames
+    plan.retain(|(_, replacement, kind)| {
+        *kind == RenameKind::NodePath || targets[replacement.new_text.as_str()].is_some()
+    });
+    plan
+}
+
+fn replacement_text<'s>(source: &'s str, replacement: &Replacement) -> Option<&'s str> {
+    let end = replacement.offset.checked_add(replacement.length)?;
+    source.get(replacement.offset..end)
 }
 
 /// Collect every declared name in the file (vars, consts, signals, funcs,
@@ -594,7 +586,8 @@ impl AcceptedSpans {
 ///    an operator-spacing insertion adjacent to a string-literal
 ///    replacement comes out as `<insert>` followed by `<replaced text>`,
 ///    never inside it.
-fn apply_replacements(source: &str, replacements: Vec<Replacement>) -> String {
+fn apply_replacements(source: &str, mut replacements: Vec<Replacement>) -> String {
+    replacements.retain(|replacement| replacement_text(source, replacement).is_some());
     if replacements.is_empty() {
         return source.to_string();
     }

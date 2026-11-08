@@ -35,6 +35,8 @@ fn starts_with_conflict_marker(mut line_start: impl Iterator<Item = char>) -> bo
 /// tokens decide (see [`is_conflict_marker`]).
 pub(crate) fn may_hold_conflict_marker(source: &str) -> bool {
     source
+        .strip_prefix('\u{feff}')
+        .unwrap_or(source)
         .lines()
         .any(|line| starts_with_conflict_marker(line.chars()))
 }
@@ -58,6 +60,16 @@ pub fn has_conflict_marker(source: &str) -> bool {
     may_hold_conflict_marker(source) && Lexer::new(source).tokenize().iter().any(is_conflict_marker)
 }
 
+// Godot recognizes Unicode identifier continuations, including combining
+// marks. ASCII names keep the cheap path used by most scripts.
+pub(crate) fn is_identifier_continue(ch: char) -> bool {
+    if ch.is_ascii() {
+        ch.is_ascii_alphanumeric() || ch == '_'
+    } else {
+        unicode_ident::is_xid_continue(ch)
+    }
+}
+
 /// Tokenizes GDScript source code into a stream of tokens.
 pub struct Lexer<'a> {
     source: &'a str,
@@ -71,6 +83,7 @@ pub struct Lexer<'a> {
     pending_tokens: Vec<Token>,
     at_line_start: bool,
     paren_depth: usize,
+    next_code_line: Option<(usize, Option<usize>)>,
 }
 
 impl<'a> Lexer<'a> {
@@ -86,6 +99,7 @@ impl<'a> Lexer<'a> {
             pending_tokens: Vec::new(),
             at_line_start: true,
             paren_depth: 0,
+            next_code_line: None,
         }
     }
 
@@ -106,76 +120,85 @@ impl<'a> Lexer<'a> {
     }
 
     fn next_token(&mut self) -> Token {
-        // Return pending tokens first (indentation changes).
-        if let Some(token) = self.pending_tokens.pop() {
-            return token;
+        if self.byte_offset == 0 && self.chars.first() == Some(&'\u{feff}') {
+            self.advance();
+            self.column = 1;
         }
-
-        // The column, not `at_line_start`: a backslash continuation moves to
-        // the next line without setting that flag, and a marker can follow it.
-        if self.column == 1 {
-            if let Some(token) = self.read_conflict_marker() {
+        let ch = loop {
+            // Return pending tokens first (indentation changes).
+            if let Some(token) = self.pending_tokens.pop() {
                 return token;
             }
-        }
 
-        // Handle indentation at line start.
-        if self.at_line_start {
-            if self.paren_depth == 0 {
-                self.at_line_start = false;
-                if let Some(indent_tokens) = self.process_indentation() {
-                    return indent_tokens;
+            // The column, not `at_line_start`: a backslash continuation moves to
+            // the next line without setting that flag, and a marker can follow it.
+            if self.column == 1 {
+                if let Some(token) = self.read_conflict_marker() {
+                    return token;
+                }
+            }
+
+            // Handle indentation at line start.
+            if self.at_line_start {
+                if self.paren_depth == 0 {
+                    self.at_line_start = false;
+                    if let Some(indent_tokens) = self.process_indentation() {
+                        return indent_tokens;
+                    }
+                } else {
+                    // Inside brackets/parens/braces, skip leading whitespace but
+                    // don't track indentation. Reset the flag so we don't re-enter.
+                    self.at_line_start = false;
+                    self.skip_line_whitespace();
+                }
+            }
+
+            self.skip_spaces();
+
+            if self.is_at_end() {
+                // Emit remaining dedents before EOF.
+                if self.indent_stack.len() > 1 {
+                    let span = self.current_span(0);
+                    self.indent_stack.pop();
+                    return Token::new(TokenKind::Dedent, span, String::new());
+                }
+                let span = self.current_span(0);
+                return Token::new(TokenKind::Eof, span, String::new());
+            }
+
+            let ch = self.current_char();
+            // Skip layout without recursing: a file can have any number of
+            // consecutive continuations or blank lines inside delimiters.
+            let continuation = if ch == '\\' {
+                match (self.peek_char(), self.peek_char_at(2)) {
+                    (Some('\n'), _) => 2,
+                    (Some('\r'), Some('\n')) => 3,
+                    _ => 0,
                 }
             } else {
-                // Inside brackets/parens/braces, skip leading whitespace but
-                // don't track indentation. Reset the flag so we don't re-enter.
-                self.at_line_start = false;
-                self.skip_line_whitespace();
+                0
+            };
+            if continuation > 0 {
+                for _ in 0..continuation {
+                    self.advance();
+                }
+                self.line += 1;
+                self.column = 1;
+                continue;
             }
-        }
-
-        self.skip_spaces();
-
-        if self.is_at_end() {
-            // Emit remaining dedents before EOF.
-            if self.indent_stack.len() > 1 {
-                let span = self.current_span(0);
-                self.indent_stack.pop();
-                return Token::new(TokenKind::Dedent, span, String::new());
+            if ch == '\r' {
+                self.advance();
+                continue;
             }
-            let span = self.current_span(0);
-            return Token::new(TokenKind::Eof, span, String::new());
-        }
-
-        let ch = self.current_char();
-
-        // Line continuation with backslash, before an LF or a CRLF line break.
-        if ch == '\\' && self.peek_char() == Some('\n') {
-            self.advance(); // skip backslash
-            self.advance(); // skip newline
-            self.line += 1;
-            self.column = 1;
-            return self.next_token();
-        }
-        if ch == '\\' && self.peek_char() == Some('\r') && self.peek_char_at(2) == Some('\n') {
-            self.advance(); // skip backslash
-            self.advance(); // skip carriage return
-            self.advance(); // skip newline
-            self.line += 1;
-            self.column = 1;
-            return self.next_token();
-        }
-
-        // Carriage return: skip it (handle \r\n as just \n).
-        if ch == '\r' {
-            self.advance();
-            return self.next_token();
-        }
-
-        // Newline.
-        if ch == '\n' {
-            return self.read_newline();
-        }
+            if ch == '\n' {
+                let newline = self.read_newline();
+                if let Some(token) = newline {
+                    return token;
+                }
+                continue;
+            }
+            break ch;
+        };
 
         // Comments.
         if ch == '#' {
@@ -214,7 +237,10 @@ impl<'a> Lexer<'a> {
         }
 
         // Identifiers and keywords.
-        if ch.is_alphabetic() || ch == '_' {
+        if ch.is_ascii_alphabetic()
+            || ch == '_'
+            || (!ch.is_ascii() && unicode_ident::is_xid_start(ch))
+        {
             return self.read_identifier();
         }
 
@@ -232,8 +258,20 @@ impl<'a> Lexer<'a> {
     /// neither blank nor another comment. Returns that line's leading
     /// indent measured the same way as `process_indentation` (tabs count
     /// as `TAB_WIDTH` columns). Returns `None` if EOF is reached without
-    /// finding a real line. Read-only: never mutates lexer state.
-    fn peek_next_real_line_indent(&self) -> Option<usize> {
+    /// finding a real line. Cache the answer until the lexer passes the
+    /// inspected run, so repeated outdented comments cost one scan in all.
+    fn peek_next_real_line_indent(&mut self) -> Option<usize> {
+        if let Some((end, indent)) = self.next_code_line {
+            if self.position < end {
+                return indent;
+            }
+        }
+        let (end, indent) = self.scan_next_real_line();
+        self.next_code_line = Some((end, indent));
+        indent
+    }
+
+    fn scan_next_real_line(&self) -> (usize, Option<usize>) {
         const TAB_WIDTH: usize = 4;
         let mut i = self.position;
         // Skip to end of current line.
@@ -242,7 +280,7 @@ impl<'a> Lexer<'a> {
         }
         loop {
             if i >= self.chars.len() {
-                return None;
+                return (self.chars.len(), None);
             }
             i += 1; // step past '\n'
                     // Measure leading whitespace of this line.
@@ -261,17 +299,18 @@ impl<'a> Lexer<'a> {
                 }
             }
             if i >= self.chars.len() {
-                return None;
+                return (self.chars.len(), None);
             }
             match self.chars[i] {
                 '\n' => continue, // blank line, look further
+                '\r' if self.chars.get(i + 1) == Some(&'\n') => continue,
                 '#' => {
                     // Another comment line: skip to end and keep scanning.
                     while i < self.chars.len() && self.chars[i] != '\n' {
                         i += 1;
                     }
                 }
-                _ => return Some(indent),
+                _ => return (i, Some(indent)),
             }
         }
     }
@@ -299,6 +338,7 @@ impl<'a> Lexer<'a> {
                     // Blank line, skip it.
                     return None;
                 }
+                '\r' if self.peek_char() == Some('\n') => return None,
                 '#' => {
                     // Comment-only line. Three cases by relative indent:
                     //
@@ -373,19 +413,14 @@ impl<'a> Lexer<'a> {
         None
     }
 
-    fn read_newline(&mut self) -> Token {
+    fn read_newline(&mut self) -> Option<Token> {
         let span = self.current_span(1);
         self.advance();
         self.line += 1;
         self.column = 1;
         self.at_line_start = true;
 
-        // Don't emit newlines inside parentheses/brackets/braces.
-        if self.paren_depth > 0 {
-            return self.next_token();
-        }
-
-        Token::new(TokenKind::Newline, span, "\n".to_string())
+        (self.paren_depth == 0).then(|| Token::new(TokenKind::Newline, span, "\n".to_string()))
     }
 
     /// Read a version-control conflict marker line (a run of seven or more
@@ -874,9 +909,7 @@ impl<'a> Lexer<'a> {
         let start_col = self.column;
         let mut text = String::new();
 
-        while !self.is_at_end()
-            && (self.current_char().is_alphanumeric() || self.current_char() == '_')
-        {
+        while !self.is_at_end() && is_identifier_continue(self.current_char()) {
             text.push(self.current_char());
             self.advance();
         }
