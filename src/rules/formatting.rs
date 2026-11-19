@@ -1191,8 +1191,30 @@ pub fn check_operator_spacing(
 }
 
 /// [`check_operator_spacing`] with the other spacing rules' settings read from `config`:
-/// whether a `,` or `:` attaches to the left depends on them.
-pub(crate) fn check_operator_spacing_with_config(
+/// whether a `,` or `:` attaches to the left depends on whether
+/// `format/comma-spacing` and `format/colon-spacing` are on. The linter
+/// calls this one; [`check_operator_spacing`] assumes the default config.
+///
+/// # Example
+///
+/// ```
+/// use gdstyle::config::{Config, RuleSeverityConfig};
+/// use gdstyle::{ast::ScriptFile, lexer::Lexer, parser::Parser, rules::formatting};
+///
+/// let source = "var a = 1\n";
+/// let tokens = Lexer::new(source).tokenize();
+/// let file = ScriptFile {
+///     path: "demo.gd".into(),
+///     members: Parser::new(&tokens).parse(),
+///     lines: source.split('\n').map(String::from).collect(),
+/// };
+/// let mut config = Config::default();
+/// config.rules.insert("format/comma-spacing".into(), RuleSeverityConfig::Off);
+/// let mut diagnostics = Vec::new();
+/// formatting::check_operator_spacing_with_config(&tokens, &file, source, &config, &mut diagnostics);
+/// assert!(diagnostics.is_empty());
+/// ```
+pub fn check_operator_spacing_with_config(
     tokens: &[Token],
     file: &ScriptFile,
     source: &str,
@@ -1362,8 +1384,30 @@ pub fn check_colon_spacing(
 }
 
 /// [`check_colon_spacing`] with the other spacing rules' settings read from `config`:
-/// whether a `,` or `:` attaches to the left depends on them.
-pub(crate) fn check_colon_spacing_with_config(
+/// whether a `,` or `:` attaches to the left depends on whether
+/// `format/comma-spacing` and `format/colon-spacing` are on. The linter
+/// calls this one; [`check_colon_spacing`] assumes the default config.
+///
+/// # Example
+///
+/// ```
+/// use gdstyle::config::{Config, RuleSeverityConfig};
+/// use gdstyle::{ast::ScriptFile, lexer::Lexer, parser::Parser, rules::formatting};
+///
+/// let source = "var a = 1\n";
+/// let tokens = Lexer::new(source).tokenize();
+/// let file = ScriptFile {
+///     path: "demo.gd".into(),
+///     members: Parser::new(&tokens).parse(),
+///     lines: source.split('\n').map(String::from).collect(),
+/// };
+/// let mut config = Config::default();
+/// config.rules.insert("format/comma-spacing".into(), RuleSeverityConfig::Off);
+/// let mut diagnostics = Vec::new();
+/// formatting::check_colon_spacing_with_config(&tokens, &file, source, &config, &mut diagnostics);
+/// assert!(diagnostics.is_empty());
+/// ```
+pub fn check_colon_spacing_with_config(
     tokens: &[Token],
     file: &ScriptFile,
     source: &str,
@@ -1499,8 +1543,30 @@ pub fn check_comma_spacing(
 }
 
 /// [`check_comma_spacing`] with the other spacing rules' settings read from `config`:
-/// whether a `,` or `:` attaches to the left depends on them.
-pub(crate) fn check_comma_spacing_with_config(
+/// whether a `,` or `:` attaches to the left depends on whether
+/// `format/comma-spacing` and `format/colon-spacing` are on. The linter
+/// calls this one; [`check_comma_spacing`] assumes the default config.
+///
+/// # Example
+///
+/// ```
+/// use gdstyle::config::{Config, RuleSeverityConfig};
+/// use gdstyle::{ast::ScriptFile, lexer::Lexer, parser::Parser, rules::formatting};
+///
+/// let source = "var a = 1\n";
+/// let tokens = Lexer::new(source).tokenize();
+/// let file = ScriptFile {
+///     path: "demo.gd".into(),
+///     members: Parser::new(&tokens).parse(),
+///     lines: source.split('\n').map(String::from).collect(),
+/// };
+/// let mut config = Config::default();
+/// config.rules.insert("format/comma-spacing".into(), RuleSeverityConfig::Off);
+/// let mut diagnostics = Vec::new();
+/// formatting::check_comma_spacing_with_config(&tokens, &file, source, &config, &mut diagnostics);
+/// assert!(diagnostics.is_empty());
+/// ```
+pub fn check_comma_spacing_with_config(
     tokens: &[Token],
     file: &ScriptFile,
     source: &str,
@@ -1613,8 +1679,30 @@ pub fn check_brace_spacing(
 }
 
 /// [`check_brace_spacing`] with the other spacing rules' settings read from `config`:
-/// whether a `,` or `:` attaches to the left depends on them.
-pub(crate) fn check_brace_spacing_with_config(
+/// whether a `,` or `:` attaches to the left depends on whether
+/// `format/comma-spacing` and `format/colon-spacing` are on. The linter
+/// calls this one; [`check_brace_spacing`] assumes the default config.
+///
+/// # Example
+///
+/// ```
+/// use gdstyle::config::{Config, RuleSeverityConfig};
+/// use gdstyle::{ast::ScriptFile, lexer::Lexer, parser::Parser, rules::formatting};
+///
+/// let source = "var a = 1\n";
+/// let tokens = Lexer::new(source).tokenize();
+/// let file = ScriptFile {
+///     path: "demo.gd".into(),
+///     members: Parser::new(&tokens).parse(),
+///     lines: source.split('\n').map(String::from).collect(),
+/// };
+/// let mut config = Config::default();
+/// config.rules.insert("format/comma-spacing".into(), RuleSeverityConfig::Off);
+/// let mut diagnostics = Vec::new();
+/// formatting::check_brace_spacing_with_config(&tokens, &file, source, &config, &mut diagnostics);
+/// assert!(diagnostics.is_empty());
+/// ```
+pub fn check_brace_spacing_with_config(
     tokens: &[Token],
     file: &ScriptFile,
     source: &str,
@@ -1798,9 +1886,11 @@ fn attaches_to_the_left(source: &str, offset: usize, neighbor_rules: NeighborSpa
     }
 }
 
-/// True when the `:` at byte `colon_offset` is the first half of `:=`.
+/// True when the `:` at byte `colon_offset` is the first half of `:=`: an
+/// `=` follows, and not `==` (`a :== b` is a `:` then `==`).
 fn is_inferred_type_colon_at(source: &str, colon_offset: usize) -> bool {
-    source.as_bytes().get(colon_offset + 1) == Some(&b'=')
+    let bytes = source.as_bytes();
+    bytes.get(colon_offset + 1) == Some(&b'=') && bytes.get(colon_offset + 2) != Some(&b'=')
 }
 
 /// True when an enabled rule removes the whole gap between `prev` and `next`,

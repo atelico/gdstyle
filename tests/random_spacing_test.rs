@@ -103,6 +103,46 @@ fn spacing_fixes_settle_with_each_spacing_rule_off() {
 }
 
 #[test]
+fn spacing_fixes_settle_with_pairs_of_spacing_rules_off() {
+    let rules = [
+        "format/operator-spacing",
+        "format/comma-spacing",
+        "format/colon-spacing",
+        "format/brace-spacing",
+        "format/call-paren-spacing",
+        "format/one-statement-per-line",
+        "format/boolean-operators",
+        "format/extra-spacing",
+    ];
+    for (index, first) in rules.iter().enumerate() {
+        for second in &rules[index + 1..] {
+            let mut config = config_with_rule_off(first);
+            config
+                .rules
+                .insert(second.to_string(), gdstyle::config::RuleSeverityConfig::Off);
+            assert_fixes_settle(&config, 11, 100);
+        }
+    }
+}
+
+#[test]
+fn colon_before_an_equality_is_not_the_inferred_type_operator() {
+    let source = "func f(a):\n\tvar x = a :==a\n\tpass\n";
+    let diagnostics = linter::lint_source(source, "random.gd", &Config::default());
+    let (fixed, _) = fixer::apply_fixes_until_settled(
+        source,
+        &diagnostics,
+        "random.gd",
+        &Config::default(),
+        true,
+    )
+    .expect("there is spacing to fix");
+    let once = fixer::apply_fixes(source, &diagnostics, true);
+    assert_eq!(once, fixed, "settles in one round");
+    assert!(fixed.contains("\tvar x = a: == a\n"), "{fixed}");
+}
+
+#[test]
 fn comma_and_colon_attach_left_even_after_an_operator() {
     // Each line used to flip between the two layouts on every `fmt` run:
     // one rule removed the space before `,` / `:` and another put a space

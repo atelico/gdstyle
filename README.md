@@ -155,7 +155,7 @@ gdstyle ships with 58 rules organized into five categories. Most rules are enabl
 | `format/one-statement-per-line` | One statement per line (no semicolons to separate statements); a trailing `;` is removed. Match arms and inline callable bodies are exempt, since their statements are not peers of the enclosing line | safe |
 | `format/blank-lines` | Collapse 3+ blank lines to 2 | safe |
 | `format/trailing-comma` | Trailing comma on last item of multi-line collections whose closing bracket starts its own line | safe |
-| `format/operator-spacing` | One space around binary operators (none before a `,` or `:` while comma- / colon-spacing is on, since those attach to the left) | safe |
+| `format/operator-spacing` | One space around binary operators (none before a `,` or a `:` other than the one of `:=` while comma- / colon-spacing is on, since those attach to the left) | safe |
 | `format/colon-spacing` | No space before `:`, one space after (except `:=`, end of line, before a closing bracket, or before a `,` / `:` while comma- / colon-spacing is on) | safe |
 | `format/comma-spacing` | No space before `,`, one space after (except newline, closing bracket, or before a `,` / `:` while comma- / colon-spacing is on) | safe |
 | `format/brace-spacing` | Single-line dictionary literals need a space after `{` (unless a `,` or `:` follows while comma- / colon-spacing is on) and before `}` | safe |
