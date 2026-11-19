@@ -705,7 +705,18 @@ pub fn check_number_literals(
     }
 }
 
-/// Check for multiple statements on one line.
+/// True when the `;` at `semicolon_index` ends the code on its line: only a
+/// comment may follow. `format/one-statement-per-line` deletes such a `;`
+/// with the spaces before it instead of splitting the line there.
+fn semicolon_ends_the_line(tokens: &[Token], semicolon_index: usize) -> bool {
+    tokens.get(semicolon_index + 1).is_none_or(|next| {
+        matches!(
+            next.kind,
+            TokenKind::Newline | TokenKind::Eof | TokenKind::Comment(_) | TokenKind::DocComment(_)
+        )
+    })
+}
+
 /// True when `format/one-statement-per-line` rewrites the `;` at
 /// `semicolon_index`, which sits at byte `semicolon_column` of `line`.
 /// `format/extra-spacing` asks this too, since it leaves the spaces before
@@ -734,6 +745,20 @@ fn one_statement_per_line_applies(
         && !is_inside_inline_callable_body(tokens, semicolon_index)
 }
 
+/// Check for multiple statements on one line: a `;` between statements
+/// becomes a line break, and a `;` that ends the line is removed. Match arms
+/// and one-line lambda bodies are left alone.
+///
+/// # Example
+///
+/// ```
+/// use gdstyle::{config::Config, fixer, linter};
+///
+/// let source = "func f() -> void:\n\tvar a = 1; var b = 2;\n";
+/// let diagnostics = linter::lint_source(source, "demo.gd", &Config::default());
+/// let fixed = fixer::apply_fixes(source, &diagnostics, true);
+/// assert_eq!(fixed, "func f() -> void:\n\tvar a = 1\n\tvar b = 2\n");
+/// ```
 pub fn check_one_statement_per_line(
     tokens: &[Token],
     file: &ScriptFile,
@@ -755,14 +780,6 @@ pub fn check_one_statement_per_line(
                 .take_while(|c| *c == '\t' || *c == ' ')
                 .collect();
 
-            // Skip match-arm bodies: `<pattern>: stmt1; stmt2`. The second
-            // statement isn't a peer of the first; it belongs to the same arm.
-            // Splitting it onto a new line at the same indent would orphan
-            // it. We detect the pattern conservatively: the line, after its
-            // leading indent, starts with a pattern followed by `:` and
-            // that `:` is to the LEFT of the `;`. Pattern tokens are
-            // identifiers, integers, strings, `_`, with optional `,`-joined
-            // alternatives, but never contain `=`/`if`/`for`/`while`.
             let line_start = line_start_offsets
                 .get_or_insert_with(|| line_starts(&file.lines).collect())
                 .get(line_idx)
@@ -778,16 +795,7 @@ pub fn check_one_statement_per_line(
             // would leave an empty, indented line behind, or move the
             // comment onto a line of its own.
             let next = tokens.get(idx + 1);
-            let ends_the_line = next.is_none_or(|next| {
-                matches!(
-                    next.kind,
-                    TokenKind::Newline
-                        | TokenKind::Eof
-                        | TokenKind::Comment(_)
-                        | TokenKind::DocComment(_)
-                )
-            });
-            if ends_the_line {
+            if semicolon_ends_the_line(tokens, idx) {
                 let before = line.get(..semi_col).unwrap_or("");
                 let semi_end = token.span.offset + token.span.length;
                 let next_comment = next.filter(|next| {
@@ -1701,10 +1709,7 @@ fn gap_is_removed_by_other_rule(
         // `format/one-statement-per-line` removes a `;` that ends the code
         // on its line together with the spaces before it.
         TokenKind::Semicolon => {
-            let ends_the_line = tokens.get(prev_index + 2).is_none_or(|after| {
-                is_line_structure(&after.kind)
-                    || matches!(after.kind, TokenKind::Comment(_) | TokenKind::DocComment(_))
-            });
+            let ends_the_line = semicolon_ends_the_line(tokens, prev_index + 1);
             let line_start = source[..next.span.offset]
                 .rfind('\n')
                 .map_or(0, |newline| newline + 1);
@@ -1743,14 +1748,23 @@ enum PlusMinusRole {
 /// `format/operator-spacing` and `format/extra-spacing` use this, so they
 /// never disagree about an operator and undo each other's fix.
 fn plus_minus_role(tokens: &[Token], index: usize) -> PlusMinusRole {
-    // After a comment the operator starts a line. Inside brackets that is a
-    // binary operator continuing an expression, but in a lambda body inside
-    // brackets it starts a statement, and no line token tells them apart.
-    match index.checked_sub(1).map(|before| &tokens[before].kind) {
-        Some(
-            TokenKind::Match | TokenKind::When | TokenKind::Comment(_) | TokenKind::DocComment(_),
-        ) => PlusMinusRole::Unknown,
-        Some(kind) if is_operand_end(kind) => PlusMinusRole::Binary,
+    let is_comment =
+        |token: &Token| matches!(token.kind, TokenKind::Comment(_) | TokenKind::DocComment(_));
+    let operand_index = tokens[..index].iter().rposition(|token| !is_comment(token));
+    let follows_comment = operand_index.map_or(index > 0, |found| found + 1 < index);
+    match operand_index.map(|found| &tokens[found].kind) {
+        Some(TokenKind::Match | TokenKind::When) => PlusMinusRole::Unknown,
+        // After a comment, an operator following an operand starts a line.
+        // Inside brackets that continues an expression, but in a lambda body
+        // inside brackets it starts a statement, and no line token tells
+        // them apart.
+        Some(kind) if is_operand_end(kind) => {
+            if follows_comment {
+                PlusMinusRole::Unknown
+            } else {
+                PlusMinusRole::Binary
+            }
+        }
         _ => PlusMinusRole::Prefix,
     }
 }

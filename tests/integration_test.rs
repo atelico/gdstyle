@@ -9333,6 +9333,22 @@ mod extra_spacing {
     }
 
     #[test]
+    fn prefix_minus_after_a_comma_and_a_comment_is_tightened() {
+        let source = "var b = [\n\t1,  # c\n\t-  2,\n]\n";
+        assert_eq!(fix_safely(source), "var b = [\n\t1,  # c\n\t-2,\n]\n");
+    }
+
+    #[test]
+    fn spaces_before_a_semicolon_followed_by_a_lex_error_are_trimmed() {
+        let source = "func f(a) -> void:\n\tprint(a)   ;  ?\n";
+        let diagnostics = linter::lint_source(source, "test.gd", &default_config());
+        assert!(
+            diagnostics.iter().any(|d| d.rule == RULE),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
     fn node_paths_and_variadic_parameters_lose_their_space() {
         for (source, expected) in [
             ("var a = $  Node\n", "var a = $Node\n"),
