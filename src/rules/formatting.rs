@@ -1149,31 +1149,9 @@ pub fn check_operator_spacing(
     source: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let binary_ops = [
-        TokenKind::Plus,
-        TokenKind::Minus,
-        TokenKind::Star,
-        TokenKind::Slash,
-        TokenKind::Percent,
-        TokenKind::Equal,
-        TokenKind::NotEqual,
-        TokenKind::Less,
-        TokenKind::LessEqual,
-        TokenKind::Greater,
-        TokenKind::GreaterEqual,
-        TokenKind::Assign,
-        TokenKind::PlusAssign,
-        TokenKind::MinusAssign,
-        TokenKind::StarAssign,
-        TokenKind::SlashAssign,
-        TokenKind::PercentAssign,
-        TokenKind::And,
-        TokenKind::Or,
-    ];
-
     for (idx, token) in tokens.iter().enumerate() {
         // Check binary operator spacing.
-        if binary_ops.contains(&token.kind) && idx > 0 && idx + 1 < tokens.len() {
+        if is_spaced_binary_operator(&token.kind) && idx > 0 && idx + 1 < tokens.len() {
             // Skip := (inferred type assign), Colon followed immediately by Assign.
             // Don't add space after Colon when next is Assign, or before Assign when prev is Colon.
             if token.kind == TokenKind::Assign {
@@ -1704,23 +1682,73 @@ fn is_prefix_operator(tokens: &[Token], index: usize) -> bool {
     let is_prefix = match tokens[index].kind {
         TokenKind::Tilde => true,
         TokenKind::Minus | TokenKind::Plus => {
-            // In a multi-line expression a comment or line break can sit
-            // between a binary operator and its left operand.
+            // Inside brackets a comment can sit between a binary operator
+            // and its left operand. Brackets hold no line tokens, so
+            // reaching one means the operator starts a statement.
             !tokens[..index]
                 .iter()
                 .rev()
                 .find(|token| {
-                    !is_line_structure(&token.kind)
-                        && !matches!(token.kind, TokenKind::Comment(_) | TokenKind::DocComment(_))
+                    !matches!(token.kind, TokenKind::Comment(_) | TokenKind::DocComment(_))
                 })
                 .is_some_and(|token| is_operand_end(&token.kind))
         }
         _ => false,
     };
     is_prefix
-        && tokens.get(index + 1).is_some_and(|operand| {
-            operand.kind == TokenKind::LeftParen || is_operand_end(&operand.kind)
-        })
+        && tokens
+            .get(index + 1)
+            .is_some_and(|operand| can_start_operand(&operand.kind))
+}
+
+/// True for the operators `format/operator-spacing` wants a space around
+/// (when it does not read `+` / `-` as a prefix).
+fn is_spaced_binary_operator(kind: &TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Plus
+            | TokenKind::Minus
+            | TokenKind::Star
+            | TokenKind::Slash
+            | TokenKind::Percent
+            | TokenKind::Equal
+            | TokenKind::NotEqual
+            | TokenKind::Less
+            | TokenKind::LessEqual
+            | TokenKind::Greater
+            | TokenKind::GreaterEqual
+            | TokenKind::Assign
+            | TokenKind::PlusAssign
+            | TokenKind::MinusAssign
+            | TokenKind::StarAssign
+            | TokenKind::SlashAssign
+            | TokenKind::PercentAssign
+            | TokenKind::And
+            | TokenKind::Or
+    )
+}
+
+/// True when a token of this kind can begin the operand of a prefix `-`.
+fn can_start_operand(kind: &TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Identifier(_)
+            | TokenKind::Integer(_)
+            | TokenKind::Float(_)
+            | TokenKind::String(_)
+            | TokenKind::Bool(_)
+            | TokenKind::Null
+            | TokenKind::Self_
+            | TokenKind::Super
+            | TokenKind::Preload
+            | TokenKind::Match
+            | TokenKind::When
+            | TokenKind::LeftParen
+            | TokenKind::LeftBracket
+            | TokenKind::LeftBrace
+            | TokenKind::Dollar
+            | TokenKind::UniqueNodeMarker
+    )
 }
 
 /// True when the gap between `prev` and `next` can be one where the style
@@ -1750,25 +1778,50 @@ fn may_take_no_space(prev: &TokenKind, next: &TokenKind) -> bool {
 /// The spacing the style guide wants between the token at `prev_index` and
 /// the one after it: nothing inside brackets, around `.`, after a prefix
 /// operator or before a subscript, and one space everywhere else.
+///
+/// A trailing comma keeps its space before `)` / `]`, and an operator next
+/// to a bracket keeps its space, since `format/operator-spacing` puts it
+/// back otherwise and the two fixes would undo each other.
 fn canonical_token_gap(tokens: &[Token], prev_index: usize) -> &'static str {
     let is_number = |kind: &TokenKind| matches!(kind, TokenKind::Integer(_) | TokenKind::Float(_));
     let prev = &tokens[prev_index].kind;
     let next = &tokens[prev_index + 1].kind;
-    let takes_no_space = matches!(prev, TokenKind::LeftParen | TokenKind::LeftBracket)
-        || matches!(next, TokenKind::RightParen | TokenKind::RightBracket)
-        || (*prev == TokenKind::LeftBrace && *next == TokenKind::RightBrace)
+    let is_spaced_operator_at = |index: usize| {
+        is_spaced_binary_operator(&tokens[index].kind) && !is_prefix_operator(tokens, index)
+    };
+    let takes_no_space = (matches!(prev, TokenKind::LeftParen | TokenKind::LeftBracket)
+        && !is_spaced_operator_at(prev_index + 1))
+        || (matches!(next, TokenKind::RightParen | TokenKind::RightBracket)
+            && !matches!(prev, TokenKind::Comma)
+            && !is_spaced_operator_at(prev_index))
+        || (matches!(prev, TokenKind::LeftBrace) && matches!(next, TokenKind::RightBrace))
         // A space keeps `1 .x` from lexing as the float `1.` followed by `x`.
-        || (*prev == TokenKind::Dot && !is_number(next))
-        || (*next == TokenKind::Dot && !is_number(prev))
-        || (*next == TokenKind::LeftBracket && can_end_callee(prev))
-        || (*next == TokenKind::LeftParen
+        || (matches!(prev, TokenKind::Dot) && !is_number(next))
+        || (matches!(next, TokenKind::Dot) && !is_number(prev))
+        || (matches!(next, TokenKind::LeftBracket) && can_end_callee(prev))
+        || (matches!(next, TokenKind::LeftParen)
             && matches!(prev, TokenKind::Func | TokenKind::Annotation(_)))
         || is_prefix_operator(tokens, prev_index);
+    debug_assert!(
+        !takes_no_space || may_take_no_space(prev, next),
+        "may_take_no_space must accept every gap that takes no space: {prev:?} {next:?}"
+    );
     if takes_no_space {
         ""
     } else {
         " "
     }
+}
+
+/// Where the spaces of a gap that ends in a `\` line continuation start: the
+/// tokens on either side sit on different lines, so neither span says it.
+fn continuation_spaces_span(source: &str, gap_start: usize, length: usize, next: &Token) -> Span {
+    let continued_lines = source[gap_start..next.span.offset].matches('\n').count();
+    let line_start = source[..gap_start]
+        .rfind('\n')
+        .map_or(0, |newline| newline + 1);
+    let column = source[line_start..gap_start].chars().count() + 1;
+    Span::new(next.span.line - continued_lines, column, gap_start, length)
 }
 
 /// True for the tokens that mark line structure or unreadable text rather
@@ -1855,11 +1908,28 @@ pub fn check_extra_spacing(
         if spaces == new_text {
             continue;
         }
+        let expected = if new_text.is_empty() {
+            "no space"
+        } else {
+            "one space"
+        };
+        let found = if spaces.contains('\t') {
+            "a tab".to_string()
+        } else if spaces.len() == 1 {
+            "one space".to_string()
+        } else {
+            format!("{} spaces", spaces.len())
+        };
+        let span = if continues_on_next_line {
+            continuation_spaces_span(source, gap_start, spaces.len(), next)
+        } else {
+            next.span
+        };
         diagnostics.push(
             Diagnostic::warning(
                 "format/extra-spacing",
-                "remove the extra space between tokens".to_string(),
-                next.span,
+                format!("expected {expected} between these tokens, found {found}"),
+                span,
                 &file.path,
             )
             .with_fix(Fix {

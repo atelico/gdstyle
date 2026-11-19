@@ -9129,6 +9129,116 @@ mod extra_spacing {
     }
 
     #[test]
+    fn operator_next_to_a_bracket_keeps_its_space() {
+        // `format/operator-spacing` wants these spaces, so removing them
+        // would make the two fixes undo each other.
+        for source in [
+            "func f(y) -> void:\n\tvar x = f( and y)\n",
+            "func f(y) -> void:\n\tvar z = [ == 1]\n",
+            "var a = (b == )\n",
+        ] {
+            assert!(extra_spacing_lines(source).is_empty(), "{source}");
+            let diagnostics = linter::lint_source(source, "test.gd", &default_config());
+            let (_, remaining) = fixer::apply_fixes_until_settled(
+                source,
+                &diagnostics,
+                "test.gd",
+                &default_config(),
+                true,
+            )
+            .unwrap_or((source.to_string(), diagnostics));
+            assert!(
+                remaining
+                    .iter()
+                    .all(|d| d.fix.as_ref().is_none_or(|fix| !fix.is_safe)),
+                "{source}: {remaining:?}"
+            );
+        }
+        assert_eq!(fix_safely("var a = (   -b)\n"), "var a = (-b)\n");
+    }
+
+    #[test]
+    fn trailing_comma_keeps_its_space() {
+        assert!(extra_spacing_lines("var a = [1, ]\n").is_empty());
+        assert_eq!(fix_safely("var a = [1,   ]\n"), "var a = [1, ]\n");
+    }
+
+    #[test]
+    fn prefix_operators_lose_their_space_before_any_operand() {
+        for (source, expected) in [
+            (
+                "var a = -   $Node.position.x\n",
+                "var a = -$Node.position.x\n",
+            ),
+            ("var a = -   [1]\n", "var a = -[1]\n"),
+            ("var a = -   %Node.x\n", "var a = -%Node.x\n"),
+        ] {
+            assert_eq!(fix_safely(source), expected, "{source}");
+        }
+    }
+
+    #[test]
+    fn minus_starting_a_match_pattern_is_a_prefix() {
+        let source = "func f(x) -> int:\n\tmatch x:\n\t\t1:\n\t\t\treturn x\n\t\t-   1:\n\t\t\tpass\n\treturn 0\n";
+        assert!(
+            fix_safely(source).contains("\t\t-1:\n"),
+            "{}",
+            fix_safely(source)
+        );
+    }
+
+    #[test]
+    fn message_says_what_spacing_is_expected() {
+        let message = |source: &str| {
+            linter::lint_source(source, "test.gd", &default_config())
+                .into_iter()
+                .find(|d| d.rule == RULE)
+                .map(|d| d.message)
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            message("var a = f( b)\n"),
+            "expected no space between these tokens, found one space"
+        );
+        assert_eq!(
+            message("var a   = 1\n"),
+            "expected one space between these tokens, found 3 spaces"
+        );
+        assert_eq!(
+            message("var a\t= 1\n"),
+            "expected one space between these tokens, found a tab"
+        );
+    }
+
+    #[test]
+    fn spaces_before_a_continuation_are_reported_on_their_own_line() {
+        let source = "var a = 1 +   \\\n\t\t2\n";
+        let diagnostics = linter::lint_source(source, "test.gd", &default_config());
+        let diagnostic = diagnostics
+            .iter()
+            .find(|d| d.rule == RULE)
+            .expect("reported");
+        assert_eq!((diagnostic.span.line, diagnostic.span.column), (1, 12));
+    }
+
+    #[test]
+    fn fmt_and_fix_agree_on_deeply_nested_parens() {
+        let source = "func f(a) -> void:\n\tif ((((((((((((a)))))))))))):\n\t\tpass\n";
+        let expected = "func f(a) -> void:\n\tif a:\n\t\tpass\n";
+        assert_eq!(
+            formatter::format_source(source, &default_config()),
+            expected
+        );
+        assert_eq!(fix_safely_until_settled(source), expected);
+    }
+
+    fn fix_safely_until_settled(source: &str) -> String {
+        let diagnostics = linter::lint_source(source, "test.gd", &default_config());
+        fixer::apply_fixes_until_settled(source, &diagnostics, "test.gd", &default_config(), true)
+            .map_or_else(|| source.to_string(), |(fixed, _)| fixed)
+    }
+
+    #[test]
     fn single_space_padding_of_a_dictionary_is_kept() {
         assert!(extra_spacing_lines("var a = { \"k\": 1 }\n").is_empty());
     }

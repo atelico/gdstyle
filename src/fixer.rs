@@ -171,9 +171,9 @@ pub fn apply_fixes(source: &str, diagnostics: &[Diagnostic], safe_only: bool) ->
     crate::linter::restore_line_endings(original_source, &fixed)
 }
 
-/// Most follow-up rounds [`apply_fixes_until_settled`] runs. High enough for
-/// slow progress (one pair of redundant parentheses goes per round), and
-/// still a stop for two fixes that undo each other.
+/// Most follow-up rounds [`apply_fixes_until_settled`] runs: high enough for
+/// slow progress (one pair of redundant parentheses goes per round). Fixes
+/// that undo each other stop earlier, when a text comes back.
 const MAX_SAFE_FIX_ROUNDS: usize = 100;
 
 /// Apply `diagnostics`' fixes as [`apply_fixes`] does, then lint again and
@@ -206,26 +206,39 @@ pub fn apply_fixes_until_settled(
     config: &crate::config::Config,
     safe_only: bool,
 ) -> Option<(String, Vec<Diagnostic>)> {
-    let mut text = apply_fixes(source, diagnostics, safe_only);
-    if text == source {
-        return None;
-    }
-    let mut remaining = crate::linter::lint_source(&text, file_path, config);
-    for _ in 0..MAX_SAFE_FIX_ROUNDS {
-        let has_safe_fix = remaining
-            .iter()
-            .any(|diagnostic| diagnostic.fix.as_ref().is_some_and(|fix| fix.is_safe));
-        if !has_safe_fix {
-            break;
+    let text_hash = |text: &str| {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut hasher);
+        hasher.finish()
+    };
+    // The cache lets each round's `apply_fixes` reuse the tokens its
+    // `lint_source` just produced.
+    crate::source_cache::with_source_cache(|| {
+        let mut text = apply_fixes(source, diagnostics, safe_only);
+        if text == source {
+            return None;
         }
-        let fixed = apply_fixes(&text, &remaining, true);
-        if fixed == text {
-            break;
+        let mut seen = std::collections::HashSet::from([text_hash(source), text_hash(&text)]);
+        let mut remaining = crate::linter::lint_source(&text, file_path, config);
+        for _ in 0..MAX_SAFE_FIX_ROUNDS {
+            let has_safe_fix = remaining
+                .iter()
+                .any(|diagnostic| diagnostic.fix.as_ref().is_some_and(|fix| fix.is_safe));
+            if !has_safe_fix {
+                break;
+            }
+            let fixed = apply_fixes(&text, &remaining, true);
+            // A text seen before means two fixes undo each other: stop on
+            // the current text rather than go round the cycle again.
+            if fixed == text || !seen.insert(text_hash(&fixed)) {
+                break;
+            }
+            text = fixed;
+            remaining = crate::linter::lint_source(&text, file_path, config);
         }
-        text = fixed;
-        remaining = crate::linter::lint_source(&text, file_path, config);
-    }
-    Some((text, remaining))
+        Some((text, remaining))
+    })
 }
 
 /// Re-lint and apply fixes for exactly `rule` at the 1-based `line`.

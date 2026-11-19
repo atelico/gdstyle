@@ -160,7 +160,7 @@ gdstyle ships with 58 rules organized into five categories. Most rules are enabl
 | `format/comma-spacing` | No space before `,`, one space after (except newline, closing bracket, or before another `,`) | safe |
 | `format/brace-spacing` | Single-line dictionary literals need a space after `{` and before `}` | safe |
 | `format/call-paren-spacing` | No space between a callee and its opening `(` | safe |
-| `format/extra-spacing` | No extra spaces or tabs between tokens on a line: no alignment with spaces, and no padding inside `()` and `[]` (`f( a )` becomes `f(a)`). A gap becomes one space, or nothing where the style wants none (inside `()` and `[]`, around `.`). Indentation, strings, single-line dictionary padding and the gap before a comment are left alone | safe |
+| `format/extra-spacing` | No extra spaces or tabs between tokens on a line: no alignment with spaces, and no padding inside `()` and `[]` (`f( a )` becomes `f(a)`). A gap becomes one space, or nothing where the style wants none (inside `()` and `[]`, around `.`). A single-line dictionary keeps its one space of padding (`{ "k": 1 }`, while `{ }` becomes `{}`), and a trailing comma keeps its space (`[1, ]`). Indentation, strings and the gap before a comment are left alone | safe |
 | `format/float-literal-zeros` | Float literals need leading/trailing zeros (`0.5`, not `.5`) | safe |
 | `format/large-number-underscores` | Numbers at or above `large_number_threshold` (default `10_000`) should use underscores (`10_000`). Covers ints and the integer part of floats (`1_000_000.5`); hex/binary literals are skipped | safe |
 | `format/enum-one-per-line` | Each enum member on its own line, including enums in inner classes | safe |
