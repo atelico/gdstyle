@@ -1675,7 +1675,7 @@ fn gap_is_removed_by_other_rule(
     tokens: &[Token],
     prev_index: usize,
     source: &str,
-    config: &Config,
+    neighbor_rules: NeighborSpacingRules,
 ) -> bool {
     let prev = &tokens[prev_index];
     let next = &tokens[prev_index + 1];
@@ -1686,14 +1686,14 @@ fn gap_is_removed_by_other_rule(
             tokens.get(prev_index + 2).is_none_or(|after| {
                 is_line_structure(&after.kind)
                     || matches!(after.kind, TokenKind::Comment(_) | TokenKind::DocComment(_))
-            }) && config.is_rule_enabled("format/one-statement-per-line")
+            }) && neighbor_rules.is_one_statement_per_line_on
         }
-        TokenKind::Comma => config.is_rule_enabled("format/comma-spacing"),
+        TokenKind::Comma => neighbor_rules.is_comma_spacing_on,
         TokenKind::Colon => {
-            !is_inferred_type_colon(next, source) && config.is_rule_enabled("format/colon-spacing")
+            !is_inferred_type_colon(next, source) && neighbor_rules.is_colon_spacing_on
         }
         TokenKind::LeftParen => {
-            can_end_callee(&prev.kind) && config.is_rule_enabled("format/call-paren-spacing")
+            can_end_callee(&prev.kind) && neighbor_rules.is_call_paren_spacing_on
         }
         _ => false,
     }
@@ -1799,21 +1799,25 @@ fn can_start_operand(kind: &TokenKind) -> bool {
 /// when they are off.
 #[derive(Clone, Copy)]
 struct NeighborSpacingRules {
-    operator: bool,
-    comma: bool,
-    colon: bool,
-    brace: bool,
-    boolean_operators: bool,
+    is_operator_spacing_on: bool,
+    is_comma_spacing_on: bool,
+    is_colon_spacing_on: bool,
+    is_brace_spacing_on: bool,
+    is_call_paren_spacing_on: bool,
+    is_one_statement_per_line_on: bool,
+    is_boolean_operators_on: bool,
 }
 
 impl NeighborSpacingRules {
     fn from_config(config: &Config) -> Self {
         Self {
-            operator: config.is_rule_enabled("format/operator-spacing"),
-            comma: config.is_rule_enabled("format/comma-spacing"),
-            colon: config.is_rule_enabled("format/colon-spacing"),
-            brace: config.is_rule_enabled("format/brace-spacing"),
-            boolean_operators: config.is_rule_enabled("format/boolean-operators"),
+            is_operator_spacing_on: config.is_rule_enabled("format/operator-spacing"),
+            is_comma_spacing_on: config.is_rule_enabled("format/comma-spacing"),
+            is_colon_spacing_on: config.is_rule_enabled("format/colon-spacing"),
+            is_brace_spacing_on: config.is_rule_enabled("format/brace-spacing"),
+            is_call_paren_spacing_on: config.is_rule_enabled("format/call-paren-spacing"),
+            is_one_statement_per_line_on: config.is_rule_enabled("format/one-statement-per-line"),
+            is_boolean_operators_on: config.is_rule_enabled("format/boolean-operators"),
         }
     }
 }
@@ -1866,7 +1870,7 @@ fn canonical_token_gap(
     // the two fixes would undo each other. A `+` / `-` after `match` or
     // `when` may be binary, so it keeps them too.
     let is_spaced_operator_at = |index: usize| {
-        neighbor_rules.operator
+        neighbor_rules.is_operator_spacing_on
             && match tokens[index].kind {
                 TokenKind::Plus | TokenKind::Minus => {
                     plus_minus_role(tokens, index) != PlusMinusRole::Prefix
@@ -1878,10 +1882,9 @@ fn canonical_token_gap(
         || (matches!(next, TokenKind::RightParen | TokenKind::RightBracket)
             && !matches!(prev, TokenKind::Comma))
         || (matches!(prev, TokenKind::LeftBrace) && matches!(next, TokenKind::RightBrace))
-        // A space keeps `1 .x` from lexing as the float `1.` followed by
-        // `x`, and `. .` from lexing as `..`.
-        || (matches!(prev, TokenKind::Dot) && !is_number(next) && !matches!(next, TokenKind::Dot))
-        || (matches!(next, TokenKind::Dot) && !is_number(prev) && !matches!(prev, TokenKind::Dot))
+        // A space keeps `1 .x` from lexing as the float `1.` followed by `x`.
+        || (matches!(prev, TokenKind::Dot) && !is_number(next))
+        || (matches!(next, TokenKind::Dot) && !is_number(prev))
         || (matches!(next, TokenKind::LeftBracket) && is_operand_end(prev))
         || matches!(next, TokenKind::Semicolon)
         || (matches!(next, TokenKind::LeftParen)
@@ -1893,7 +1896,7 @@ fn canonical_token_gap(
         )
         // With boolean-operators on, `!` becomes `not`, which needs a space.
         || (matches!(prev, TokenKind::Bang)
-            && !neighbor_rules.boolean_operators
+            && !neighbor_rules.is_boolean_operators_on
             && can_start_operand(next))
         || is_prefix_operator(tokens, prev_index);
     // The space after `,` and `:` belongs to comma-spacing and colon-spacing,
@@ -1901,16 +1904,21 @@ fn canonical_token_gap(
     // `{` / `}` belongs to brace-spacing, which skips an empty `{ }`.
     let is_empty_braces =
         matches!(prev, TokenKind::LeftBrace) && matches!(next, TokenKind::RightBrace);
-    let other_rule_wants_space = ((matches!(prev, TokenKind::Comma) && neighbor_rules.comma)
-        || (matches!(prev, TokenKind::Colon) && neighbor_rules.colon))
+    let other_rule_wants_space = ((matches!(prev, TokenKind::Comma)
+        && neighbor_rules.is_comma_spacing_on)
+        || (matches!(prev, TokenKind::Colon) && neighbor_rules.is_colon_spacing_on))
         && !matches!(
             next,
             TokenKind::RightParen | TokenKind::RightBracket | TokenKind::RightBrace
         )
-        || (neighbor_rules.brace
+        || (neighbor_rules.is_brace_spacing_on
             && !is_empty_braces
             && (matches!(prev, TokenKind::LeftBrace) || matches!(next, TokenKind::RightBrace)));
+    // Joining dots would lex differently: `. .` as `..`, `.. .` as `...`.
+    let would_join_dots =
+        tokens[prev_index].text.ends_with('.') && tokens[prev_index + 1].text.starts_with('.');
     let takes_no_space = wants_no_space
+        && !would_join_dots
         && !other_rule_wants_space
         && !is_spaced_operator_at(prev_index)
         && !is_spaced_operator_at(prev_index + 1);
@@ -2011,7 +2019,6 @@ pub fn check_extra_spacing(
                 && !may_take_no_space(&prev.kind, &next.kind))
             || is_line_structure(&prev.kind)
             || is_line_structure(&next.kind)
-            || matches!(next.kind, TokenKind::Comment(_) | TokenKind::DocComment(_))
         {
             continue;
         }
@@ -2023,12 +2030,19 @@ pub fn check_extra_spacing(
             .position(|&byte| byte != b' ' && byte != b'\t')
             .unwrap_or(gap.len());
         let continues_on_next_line = gap.get(spaces_len) == Some(&b'\\');
-        if spaces_len == 0 || !(spaces_len == gap.len() || continues_on_next_line) {
+        // The gap before a comment on the same line is left alone so that
+        // aligned trailing comments keep their column.
+        let is_before_trailing_comment = !continues_on_next_line
+            && matches!(next.kind, TokenKind::Comment(_) | TokenKind::DocComment(_));
+        if spaces_len == 0
+            || !(spaces_len == gap.len() || continues_on_next_line)
+            || is_before_trailing_comment
+        {
             continue;
         }
         let spaces = &source[gap_start..gap_start + spaces_len];
         if !continues_on_next_line
-            && gap_is_removed_by_other_rule(tokens, prev_index, source, config)
+            && gap_is_removed_by_other_rule(tokens, prev_index, source, neighbor_rules)
         {
             continue;
         }
@@ -2541,11 +2555,13 @@ mod tests {
         let kinds = every_token_kind();
         kinds.iter().for_each(every_token_kind_is_listed);
         let all_off = NeighborSpacingRules {
-            operator: false,
-            comma: false,
-            colon: false,
-            brace: false,
-            boolean_operators: false,
+            is_operator_spacing_on: false,
+            is_comma_spacing_on: false,
+            is_colon_spacing_on: false,
+            is_brace_spacing_on: false,
+            is_call_paren_spacing_on: false,
+            is_one_statement_per_line_on: false,
+            is_boolean_operators_on: false,
         };
         let rule_sets = [
             NeighborSpacingRules::from_config(&Config::default()),

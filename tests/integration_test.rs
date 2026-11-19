@@ -9451,6 +9451,34 @@ mod extra_spacing {
     }
 
     #[test]
+    fn removing_a_space_never_joins_dots_into_another_token() {
+        for source in [
+            "var a = b .. .c\n",
+            "var a = b . ...c\n",
+            "var a = b . .c\n",
+        ] {
+            let fixed = fix_safely(source);
+            let kinds = |text: &str| {
+                Lexer::new(text)
+                    .tokenize()
+                    .into_iter()
+                    .map(|token| std::mem::discriminant(&token.kind))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(kinds(&fixed), kinds(source), "{source} -> {fixed}");
+        }
+    }
+
+    #[test]
+    fn spaces_before_a_continuation_followed_by_a_comment_line_are_trimmed() {
+        let source = "func f() -> void:\n\tvar g = 1  \\\n\t\t# c\n\tpass\n";
+        assert_eq!(
+            fix_safely(source),
+            "func f() -> void:\n\tvar g = 1 \\\n\t\t# c\n\tpass\n"
+        );
+    }
+
+    #[test]
     fn trims_spaces_before_a_line_continuation_only() {
         let source = "var a = 1   +   \\\n\t\t2\n";
         assert_eq!(fix_safely(source), "var a = 1 + \\\n\t\t2\n");
