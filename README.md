@@ -262,6 +262,13 @@ gdstyle fmt --diff
 
 The formatter normalizes indentation, trailing whitespace, blank lines (including the spacing between class members), boolean operators (`&&`/`||`/`!` to `and`/`or`/`not`), string quotes, comment spacing, colon and comma spacing, extra spaces between tokens (which removes padding inside parentheses and brackets, and alignment of assignments and table-like literals, but not of trailing comments), float and hex literals, trailing newlines, and single-line enums (expanded to multi-line). It reorders class members to match the canonical style guide order, and wraps long lines at commas inside parentheses, brackets, and braces. Running it twice produces the same output. A rule set to `"off"` in the config, or suppressed with a `# gdstyle:ignore` comment, is not applied (see [Suppressing diagnostics](#suppressing-diagnostics)).
 
+Code aligned with spaces loses its alignment, because `format/extra-spacing` turns every run of spaces between tokens into one. To keep a hand-aligned table, end each of its lines with `# gdstyle:ignore=format/extra-spacing`, or set the rule to `"off"` in `gdstyle.toml` to keep alignment everywhere:
+
+```toml
+[rules]
+"format/extra-spacing" = "off"
+```
+
 Consecutive variables sit together with no blank line between them, except a property with an indented `set` / `get` block, which gets one blank line on each side so it reads like a small function.
 
 A comment line longer than `max_line_length` is wrapped at word boundaries. `comment_wrap` picks how:
@@ -716,7 +723,7 @@ Add the following to your project's `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/atelico/gdstyle
-    rev: v0.7.0   # pin to a released tag; bump with `pre-commit autoupdate`
+    rev: v0.8.0   # pin to a released tag; bump with `pre-commit autoupdate`
     hooks:
       - id: gdstyle          # lint (fails the commit on diagnostics)
       - id: gdstyle-fmt      # format in place
@@ -920,7 +927,8 @@ for d in diagnostics:
 # back unchanged, from fix_source too.
 var formatted = style.format_source(source_code)
 
-# Auto-fix violations.
+# Auto-fix violations. Safe fixes repeat until the source settles, like
+# `check --fix`.
 var fixed = style.fix_source(source_code, "player.gd")
 
 # Fix a single diagnostic by line and rule.

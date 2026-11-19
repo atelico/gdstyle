@@ -1,52 +1,75 @@
-## gdstyle 0.7.0
+## gdstyle 0.8.0
 
-gdstyle 0.7.0 preserves more valid GDScript during formatting and makes
-unsafe renames more conservative. The Godot editor's CLI backend now uses
-the same fixer as the Rust library for individual diagnostics.
+gdstyle 0.8.0 adds `format/extra-spacing`, which removes extra spaces
+between tokens, and makes every fix run settle in one go. Projects that
+align code with spaces will see new warnings and `fmt` changes, see
+[Upgrading](#upgrading).
 
 ### Highlights
 
-- **Formatting preserves valid multiline calls.** A closing delimiter in a
-  comment can no longer cause the formatter to split a call and leave extra
-  parentheses behind. The lexer also handles long runs of line continuations
-  and bracketed blank lines without growing the call stack, recognizes UTF-8
-  BOMs and combining marks, and accepts the minimum signed decimal integer.
-  ([#100](https://github.com/atelico/gdstyle/pull/100),
-  [#101](https://github.com/atelico/gdstyle/pull/101))
-- **Unsafe renames avoid several sources of broken references.** gdstyle
-  skips replacements that would introduce reserved names or duplicate
-  declarations. Scene connections are rewritten only when the endpoint has
-  the declaring script attached directly. Unresolved references are reported
-  and make the run exit `2`. ([#100](https://github.com/atelico/gdstyle/pull/100),
-  [#101](https://github.com/atelico/gdstyle/pull/101))
-- **`fix-at` applies one rule's fix at a selected line.** Use
-  `gdstyle fix-at player.gd --line 12 --rule format/trailing-whitespace`.
-  The Godot editor's right-click action uses this command in CLI mode and
-  verifies that the diagnostic belongs to the open script. CLI linting and
-  formatting in the editor honor the project configuration.
-  ([#101](https://github.com/atelico/gdstyle/pull/101))
+- **New rule: `format/extra-spacing`** (safe, on by default). A run of
+  spaces or tabs between two tokens becomes one space, or none where the
+  style guide wants none: inside `()` and `[]`, around `.`, after a prefix
+  `-`/`+`/`~`, before a subscript. So
+  `func     _ready()       ->       void:` becomes `func _ready() -> void:`
+  and `print( a )` becomes `print(a)`. Indentation, strings, the padding of
+  single-line dictionaries (`{ "k": 1 }`) and the gap before a comment are
+  left alone, so aligned trailing comments keep their column.
+  ([#103](https://github.com/atelico/gdstyle/issues/103),
+  [#105](https://github.com/atelico/gdstyle/pull/105))
+- **One fix run is enough.** `check --fix`, `check --unsafe-fix`, the
+  editor's Fix File, the GDExtension's `fix_source` and the formatter now
+  repeat safe fixes until nothing changes. Before, overlapping fixes such
+  as `enum K {A,B}` needed a second run. Renames still happen once, and
+  `fix-at` still applies only the fix it is asked for.
+  ([#105](https://github.com/atelico/gdstyle/pull/105))
+- **`fmt` always settles.** On some invalid lines (`var x = , 1`,
+  `a * : b`), two spacing rules undid each other, so `fmt` changed the file
+  on every run and `fmt --check` never passed. `,` and `:` now attach to
+  the token on their left while `format/comma-spacing` and
+  `format/colon-spacing` are on. Valid code formats as before. A seeded
+  randomized test now checks this on thousands of lines, also with each
+  spacing rule and each pair of them turned off.
+  ([#106](https://github.com/atelico/gdstyle/pull/106))
+
+### Performance
+
+`check` and `fmt` run about 8% fewer instructions than 0.7.0 on the Godot
+demo projects and on large generated files, measured single-threaded. Most
+of it comes from `format/operator-spacing`, which now matches operator
+kinds directly instead of searching a list for every token.
+
+### Library
+
+- `fixer::apply_fixes_until_settled` applies fixes and repeats the safe ones
+  until the source settles, returning the fixed text and the diagnostics
+  left.
+- `check_operator_spacing_with_config`, `check_colon_spacing_with_config`,
+  `check_comma_spacing_with_config` and `check_brace_spacing_with_config` in
+  `rules::formatting` take a `Config`, so a caller with comma- or
+  colon-spacing off gets the same results as the linter. The versions
+  without `_with_config` keep their 0.7 signatures and use the default
+  config.
 
 ### Changelog
 
-- Added `fix-at` and the Rust library functions `fixer::apply_fix_at_line`,
-  `fixer::apply_scoped_scene_renames`, and
-  `collect::collect_scene_files_reporting` (#101).
-- Directory walks skip symbolic links and special files, and explicit aliases
-  are deduplicated. Scene discovery reports I/O failures (#101).
-- Unknown output formats and unmatched rule filters exit `2`. After
-  cross-file fixes, diagnostics reflect the final script contents (#101).
-- Fixed formatter and lexer edge cases, including mismatched delimiters,
-  Unicode identifiers, CRLF blank lines, and large layout runs. The parser
-  also accepts a token slice without an explicit EOF token (#100, #101).
-- Invalid fix ranges, reserved rename targets, and conflicting rename
-  proposals are skipped (#100, #101).
+- Added: `format/extra-spacing` removes extra spaces and tabs between tokens,
+  including alignment and padding inside `()` and `[]` (#103, #105).
+- Changed: `check --fix`, `--unsafe-fix`, `fix_source` and `fmt` repeat safe
+  fixes until the source settles, so one run is enough (#105).
+- Fixed: `fmt` no longer flips between two layouts on invalid lines where a
+  space before `,` or `:` was both added and removed (#106).
+- Performance: `check` and `fmt` run about 8% fewer instructions (#105).
+- Library: added `fixer::apply_fixes_until_settled` and the
+  `*_with_config` spacing checks (#105, #106).
 
 ### Upgrading
 
-- Name a symbolic link explicitly if you want gdstyle to process it.
-- Review any unresolved connections after `check --unsafe-fix`. Connections
-  through inherited or instanced scenes and built-in scripts may need a
-  manual update. Conflicted scenes that need a connection update are left
-  unchanged.
-- Upgrade the CLI binary to 0.7.0 when using right-click Fix in the Godot
-  plugin's CLI mode.
+- Expect new `format/extra-spacing` warnings, and `fmt` changes, wherever
+  code is aligned with spaces or brackets are padded (`f( a )`). Run
+  `gdstyle fmt` once and commit the result before turning on
+  `fmt --check` in CI.
+- To keep alignment, set `"format/extra-spacing" = "off"` under `[rules]`
+  in `gdstyle.toml`, or end each aligned line with
+  `# gdstyle:ignore=format/extra-spacing`.
+- Update the pre-commit `rev` to `v0.8.0`.
