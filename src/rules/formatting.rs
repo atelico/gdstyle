@@ -706,6 +706,34 @@ pub fn check_number_literals(
 }
 
 /// Check for multiple statements on one line.
+/// True when `format/one-statement-per-line` rewrites the `;` at
+/// `semicolon_index`, which sits at byte `semicolon_column` of `line`.
+/// `format/extra-spacing` asks this too, since it leaves the spaces before
+/// a rewritten `;` to that rule.
+fn one_statement_per_line_applies(
+    tokens: &[Token],
+    semicolon_index: usize,
+    line: &str,
+    semicolon_column: usize,
+) -> bool {
+    // Skip match-arm bodies: `<pattern>: stmt1; stmt2`. The second
+    // statement isn't a peer of the first; it belongs to the same arm.
+    // Splitting it onto a new line at the same indent would orphan it. We
+    // detect the pattern conservatively: the line, after its leading
+    // indent, starts with a pattern followed by `:` and that `:` is to the
+    // LEFT of the `;`. Pattern tokens are identifiers, integers, strings,
+    // `_`, with optional `,`-joined alternatives, but never contain
+    // `=`/`if`/`for`/`while`.
+    //
+    // Skip inline callable bodies: `func(v): stmt1; stmt2`. Same shape as
+    // the match arm: the second statement belongs to the lambda, not to the
+    // enclosing scope, so moving it to a new line at the line's indent drops
+    // it out of the body. When the lambda is a call argument that also
+    // breaks the argument list, turning valid code into a parse error.
+    !is_match_arm_line(line, semicolon_column)
+        && !is_inside_inline_callable_body(tokens, semicolon_index)
+}
+
 pub fn check_one_statement_per_line(
     tokens: &[Token],
     file: &ScriptFile,
@@ -741,17 +769,7 @@ pub fn check_one_statement_per_line(
                 .copied()
                 .unwrap_or(0);
             let semi_col = token.span.offset.saturating_sub(line_start);
-            if is_match_arm_line(line, semi_col) {
-                continue;
-            }
-
-            // Skip inline callable bodies: `func(v): stmt1; stmt2`. Same shape
-            // as the match arm above — the second statement belongs to the
-            // lambda, not to the enclosing scope, so moving it to a new line at
-            // the line's indent drops it out of the body. When the lambda is a
-            // call argument that also breaks the argument list, turning valid
-            // code into a parse error.
-            if is_inside_inline_callable_body(tokens, idx) {
+            if !one_statement_per_line_applies(tokens, idx, line, semi_col) {
                 continue;
             }
 
@@ -1683,10 +1701,22 @@ fn gap_is_removed_by_other_rule(
         // `format/one-statement-per-line` removes a `;` that ends the code
         // on its line together with the spaces before it.
         TokenKind::Semicolon => {
-            tokens.get(prev_index + 2).is_none_or(|after| {
+            let ends_the_line = tokens.get(prev_index + 2).is_none_or(|after| {
                 is_line_structure(&after.kind)
                     || matches!(after.kind, TokenKind::Comment(_) | TokenKind::DocComment(_))
-            }) && neighbor_rules.is_one_statement_per_line_on
+            });
+            let line_start = source[..next.span.offset]
+                .rfind('\n')
+                .map_or(0, |newline| newline + 1);
+            let line = source[line_start..].split('\n').next().unwrap_or("");
+            neighbor_rules.is_one_statement_per_line_on
+                && ends_the_line
+                && one_statement_per_line_applies(
+                    tokens,
+                    prev_index + 1,
+                    line,
+                    next.span.offset - line_start,
+                )
         }
         TokenKind::Comma => neighbor_rules.is_comma_spacing_on,
         TokenKind::Colon => {

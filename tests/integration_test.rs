@@ -9226,6 +9226,24 @@ mod extra_spacing {
     }
 
     #[test]
+    fn spaces_before_a_semicolon_one_statement_per_line_skips_are_removed() {
+        // one-statement-per-line leaves `;` alone in match arms and one-line
+        // lambda bodies, so the spaces before it are this rule's to remove.
+        for (source, expected) in [
+            (
+                "func f(x) -> void:\n\tmatch x:\n\t\t0: pass  ;\n",
+                "func f(x) -> void:\n\tmatch x:\n\t\t0: pass;\n",
+            ),
+            (
+                "func f() -> void:\n\tvar g = func(): pass  ;\n",
+                "func f() -> void:\n\tvar g = func(): pass;\n",
+            ),
+        ] {
+            assert_eq!(fix_safely_until_settled(source), expected, "{source}");
+        }
+    }
+
+    #[test]
     fn spaces_before_a_semicolon_are_reported_once() {
         let source = "func f() -> void:\n\tpass  ;\n";
         let diagnostics = linter::lint_source(source, "test.gd", &default_config());

@@ -206,12 +206,6 @@ pub fn apply_fixes_until_settled(
     config: &crate::config::Config,
     safe_only: bool,
 ) -> Option<(String, Vec<Diagnostic>)> {
-    let text_hash = |text: &str| {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        text.hash(&mut hasher);
-        hasher.finish()
-    };
     // The cache lets each round's `apply_fixes` reuse the tokens its
     // `lint_source` just produced.
     crate::source_cache::with_source_cache(|| {
@@ -219,7 +213,7 @@ pub fn apply_fixes_until_settled(
         if text == source {
             return None;
         }
-        let mut seen = std::collections::HashSet::from([text_hash(source), text_hash(&text)]);
+        let mut seen = std::collections::HashSet::from([source.to_owned(), text.clone()]);
         let mut remaining = crate::linter::lint_source(&text, file_path, config);
         for _ in 0..MAX_SAFE_FIX_ROUNDS {
             let has_safe_fix = remaining
@@ -231,7 +225,7 @@ pub fn apply_fixes_until_settled(
             let fixed = apply_fixes(&text, &remaining, true);
             // A text seen before means two fixes undo each other: stop on
             // the current text rather than go round the cycle again.
-            if fixed == text || !seen.insert(text_hash(&fixed)) {
+            if fixed == text || !seen.insert(fixed.clone()) {
                 break;
             }
             text = fixed;
