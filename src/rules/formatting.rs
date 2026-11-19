@@ -1331,7 +1331,7 @@ pub fn check_colon_spacing(
         // `=`, a space after the `=`. The Assign rule handles space-after-`=`;
         // here we just skip both the "no space before" and "space after"
         // checks when this colon is the leading half of `:=`.
-        let is_walrus = source.as_bytes().get(token.span.offset + token.span.length) == Some(&b'=');
+        let is_walrus = is_inferred_type_colon(token, source);
 
         // No space before the colon (skipped for `:=`).
         if !is_walrus && token.span.offset > 0 {
@@ -1632,16 +1632,7 @@ pub fn check_call_paren_spacing(
             continue;
         }
         let prev = &tokens[idx - 1];
-        let is_call_like = matches!(
-            prev.kind,
-            TokenKind::Identifier(_)
-                | TokenKind::RightParen
-                | TokenKind::RightBracket
-                | TokenKind::Preload
-                | TokenKind::Assert
-                | TokenKind::Super
-        );
-        if !is_call_like {
+        if !can_end_callee(&prev.kind) {
             continue;
         }
 
@@ -1666,6 +1657,177 @@ pub fn check_call_paren_spacing(
                     offset: prev_end,
                     length: token.span.offset - prev_end,
                     new_text: String::new(),
+                }],
+                is_safe: true,
+            }),
+        );
+    }
+}
+
+/// True when a `(` right after this token opens a call.
+fn can_end_callee(kind: &TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Identifier(_)
+            | TokenKind::RightParen
+            | TokenKind::RightBracket
+            | TokenKind::Preload
+            | TokenKind::Assert
+            | TokenKind::Super
+    )
+}
+
+/// True when this `:` is the first half of the `:=` operator.
+fn is_inferred_type_colon(colon: &Token, source: &str) -> bool {
+    source.as_bytes().get(colon.span.offset + colon.span.length) == Some(&b'=')
+}
+
+/// True when an enabled rule removes the whole gap between `prev` and `next`,
+/// so reporting it here too would report it twice.
+fn gap_is_removed_by_other_rule(prev: &Token, next: &Token, source: &str, config: &Config) -> bool {
+    match next.kind {
+        TokenKind::Comma => config.is_rule_enabled("format/comma-spacing"),
+        TokenKind::Colon => {
+            !is_inferred_type_colon(next, source) && config.is_rule_enabled("format/colon-spacing")
+        }
+        TokenKind::LeftParen => {
+            can_end_callee(&prev.kind) && config.is_rule_enabled("format/call-paren-spacing")
+        }
+        _ => false,
+    }
+}
+
+/// True when the token at `index` is a prefix `-`, `+` or `~` applied to the
+/// operand after it. `!` is left out: `format/boolean-operators` rewrites it
+/// to `not`, which needs the space.
+fn is_prefix_operator(tokens: &[Token], index: usize) -> bool {
+    let is_prefix = match tokens[index].kind {
+        TokenKind::Tilde => true,
+        TokenKind::Minus | TokenKind::Plus => {
+            // In a multi-line expression a comment or line break can sit
+            // between a binary operator and its left operand.
+            !tokens[..index]
+                .iter()
+                .rev()
+                .find(|token| {
+                    !is_line_structure(&token.kind)
+                        && !matches!(token.kind, TokenKind::Comment(_) | TokenKind::DocComment(_))
+                })
+                .is_some_and(|token| is_operand_end(&token.kind))
+        }
+        _ => false,
+    };
+    is_prefix
+        && tokens.get(index + 1).is_some_and(|operand| {
+            operand.kind == TokenKind::LeftParen || is_operand_end(&operand.kind)
+        })
+}
+
+/// The spacing the style guide wants between the token at `prev_index` and
+/// the one after it: nothing inside brackets, around `.`, after a prefix
+/// operator or before a subscript, and one space everywhere else.
+fn canonical_token_gap(tokens: &[Token], prev_index: usize) -> &'static str {
+    let is_number = |kind: &TokenKind| matches!(kind, TokenKind::Integer(_) | TokenKind::Float(_));
+    let prev = &tokens[prev_index].kind;
+    let next = &tokens[prev_index + 1].kind;
+    let takes_no_space = matches!(prev, TokenKind::LeftParen | TokenKind::LeftBracket)
+        || matches!(next, TokenKind::RightParen | TokenKind::RightBracket)
+        || (*prev == TokenKind::LeftBrace && *next == TokenKind::RightBrace)
+        // A space keeps `1 .x` from lexing as the float `1.` followed by `x`.
+        || (*prev == TokenKind::Dot && !is_number(next))
+        || (*next == TokenKind::Dot && !is_number(prev))
+        || (*next == TokenKind::LeftBracket && can_end_callee(prev))
+        || (*next == TokenKind::LeftParen
+            && matches!(prev, TokenKind::Func | TokenKind::Annotation(_)))
+        || is_prefix_operator(tokens, prev_index);
+    if takes_no_space {
+        ""
+    } else {
+        " "
+    }
+}
+
+/// True for the tokens that mark line structure or unreadable text rather
+/// than code on a line.
+fn is_line_structure(kind: &TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Newline
+            | TokenKind::Indent
+            | TokenKind::Dedent
+            | TokenKind::Eof
+            | TokenKind::Error(_)
+    )
+}
+
+/// Remove repeated spaces and tabs between two tokens on a line:
+/// `func   f(   )   ->   void:` should be `func f() -> void:`. The GDScript
+/// style guide asks for single spaces and no vertical alignment.
+///
+/// A gap becomes one space, or nothing where the style wants none (see
+/// `canonical_token_gap`). A gap of exactly one space is not reported.
+/// Spaces before a `\` line continuation are covered too.
+///
+/// Indentation, string contents and the gap before a comment are left alone,
+/// the last so that aligned trailing comments keep their column. Working on
+/// tokens is what keeps string contents out of reach.
+///
+/// # Example
+///
+/// ```
+/// use gdstyle::{config::Config, fixer, linter};
+///
+/// let source = "func   f(   )   ->   void:\n\tpass   # note\n";
+/// let diagnostics = linter::lint_source(source, "demo.gd", &Config::default());
+/// let fixed = fixer::apply_fixes(source, &diagnostics, true);
+/// assert_eq!(fixed, "func f() -> void:\n\tpass   # note\n");
+/// ```
+pub fn check_extra_spacing(
+    tokens: &[Token],
+    file: &ScriptFile,
+    source: &str,
+    config: &Config,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for (prev_index, pair) in tokens.windows(2).enumerate() {
+        let [prev, next] = pair else { continue };
+        let gap_start = prev.span.offset + prev.span.length;
+        let Some(between_tokens) = source.get(gap_start..next.span.offset) else {
+            continue;
+        };
+        let after_spaces = between_tokens.trim_start_matches([' ', '\t']);
+        let spaces = &between_tokens[..between_tokens.len() - after_spaces.len()];
+        let continues_on_next_line = after_spaces.starts_with('\\');
+        if spaces.is_empty()
+            || spaces == " "
+            || !(after_spaces.is_empty() || continues_on_next_line)
+            || is_line_structure(&prev.kind)
+            || is_line_structure(&next.kind)
+            || matches!(next.kind, TokenKind::Comment(_) | TokenKind::DocComment(_))
+        {
+            continue;
+        }
+        if !continues_on_next_line && gap_is_removed_by_other_rule(prev, next, source, config) {
+            continue;
+        }
+
+        let new_text = if continues_on_next_line {
+            " "
+        } else {
+            canonical_token_gap(tokens, prev_index)
+        };
+        diagnostics.push(
+            Diagnostic::warning(
+                "format/extra-spacing",
+                "remove the extra spacing between tokens".to_string(),
+                next.span,
+                &file.path,
+            )
+            .with_fix(Fix {
+                replacements: vec![Replacement {
+                    offset: gap_start,
+                    length: spaces.len(),
+                    new_text: new_text.to_string(),
                 }],
                 is_safe: true,
             }),

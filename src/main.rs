@@ -473,8 +473,13 @@ fn run_check(options: CheckOptions) {
                 return result;
             }
 
-            let fixed_source = fixer::apply_fixes(&source, &diagnostics, safe_only);
-            if fixed_source == source {
+            let Some((fixed_source, remaining_diagnostics)) = fixer::apply_fixes_until_settled(
+                &source,
+                &diagnostics,
+                &file_str,
+                &config,
+                safe_only,
+            ) else {
                 // `apply_fixes` leaves a conflicted file as it is, the way
                 // `fmt` does. With something to fix, the run did not do what
                 // it was asked to, and fails as `fmt` fails on that file.
@@ -486,7 +491,7 @@ fn run_check(options: CheckOptions) {
                 }
                 result.diagnostics = diagnostics;
                 return result;
-            }
+            };
             if let Err(e) = std::fs::write(file_path, &fixed_source) {
                 // The file on disk is unchanged: it keeps its diagnostics,
                 // and its renames must not reach the files that reference it.
@@ -500,8 +505,7 @@ fn run_check(options: CheckOptions) {
                 let members = parse_members(&source);
                 result.renames = fixer::extract_renames(&source, &diagnostics, &file_str, &members);
             }
-            // Re-lint to report remaining issues.
-            result.diagnostics = linter::lint_source(&fixed_source, &file_str, &config);
+            result.diagnostics = remaining_diagnostics;
             result
         })
         .collect();

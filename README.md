@@ -16,7 +16,7 @@ gdstyle catches style violations, naming inconsistencies, and common code-qualit
 
 ## Features
 
-- 57 lint rules across syntax, naming, formatting, ordering, and code quality.
+- 58 lint rules across syntax, naming, formatting, ordering, and code quality.
 - Formatter (`gdstyle fmt`) that's in-place and idempotent, and reorders class members into the canonical Godot order.
 - Use `check --fix` for safe edits, `check --unsafe-fix` for project-wide renames, or `fix-at` for one rule on one line.
 - Single static binary. No Python, no Rust toolchain, no Godot install required to run it.
@@ -114,7 +114,7 @@ gdstyle check --max-line-length 120
 
 ## Rules
 
-gdstyle ships with 57 rules organized into five categories. Most rules are enabled by default (a few advisory rules are opt-in).
+gdstyle ships with 58 rules organized into five categories. Most rules are enabled by default (a few advisory rules are opt-in).
 
 ### Syntax (2 rules)
 
@@ -139,7 +139,7 @@ gdstyle ships with 57 rules organized into five categories. Most rules are enabl
 | `naming/private-underscore-prefix` | Private members with `_` should not have `@export` | - |
 | `naming/node-name-pascal-case` | `$NodePath` references should use `PascalCase` | unsafe |
 
-### Formatting (20 rules)
+### Formatting (21 rules)
 
 | Rule | Description | Fixable |
 |------|-------------|---------|
@@ -160,6 +160,7 @@ gdstyle ships with 57 rules organized into five categories. Most rules are enabl
 | `format/comma-spacing` | No space before `,`, one space after (except newline, closing bracket, or before another `,`) | safe |
 | `format/brace-spacing` | Single-line dictionary literals need a space after `{` and before `}` | safe |
 | `format/call-paren-spacing` | No space between a callee and its opening `(` | safe |
+| `format/extra-spacing` | No repeated spaces or tabs between tokens on a line, so no alignment with spaces. A gap becomes one space, or nothing where the style wants none (inside `()` and `[]`, around `.`). Indentation, strings and the gap before a comment are left alone | safe |
 | `format/float-literal-zeros` | Float literals need leading/trailing zeros (`0.5`, not `.5`) | safe |
 | `format/large-number-underscores` | Numbers at or above `large_number_threshold` (default `10_000`) should use underscores (`10_000`). Covers ints and the integer part of floats (`1_000_000.5`); hex/binary literals are skipped | safe |
 | `format/enum-one-per-line` | Each enum member on its own line, including enums in inner classes | safe |
@@ -233,7 +234,7 @@ gdstyle check --unsafe-fix
 > `--unsafe-fix`, then review the diff. (`gdstyle fmt --diff` previews
 > formatter changes without writing.)
 
-Safe fixes preserve behavior. Unsafe fixes can change semantics (renaming signals, variables, and other identifiers), so review the diff before committing.
+Safe fixes preserve behavior. Unsafe fixes can change semantics (renaming signals, variables, and other identifiers), so review the diff before committing. Both flags repeat safe fixes until none is left to apply, so one run is enough.
 
 When `--unsafe-fix` renames an identifier, gdstyle looks for references in
 the selected scripts and scene files. It updates a scene's signal or method
@@ -259,7 +260,7 @@ gdstyle fmt --check
 gdstyle fmt --diff
 ```
 
-The formatter normalizes indentation, trailing whitespace, blank lines (including the spacing between class members), boolean operators (`&&`/`||`/`!` to `and`/`or`/`not`), string quotes, comment spacing, colon and comma spacing, float and hex literals, trailing newlines, and single-line enums (expanded to multi-line). It reorders class members to match the canonical style guide order, and wraps long lines at commas inside parentheses, brackets, and braces. Running it twice produces the same output. A rule set to `"off"` in the config, or suppressed with a `# gdstyle:ignore` comment, is not applied (see [Suppressing diagnostics](#suppressing-diagnostics)).
+The formatter normalizes indentation, trailing whitespace, blank lines (including the spacing between class members), boolean operators (`&&`/`||`/`!` to `and`/`or`/`not`), string quotes, comment spacing, colon and comma spacing, repeated spaces between tokens (which removes alignment of assignments and table-like literals, but not of trailing comments), float and hex literals, trailing newlines, and single-line enums (expanded to multi-line). It reorders class members to match the canonical style guide order, and wraps long lines at commas inside parentheses, brackets, and braces. Running it twice produces the same output. A rule set to `"off"` in the config, or suppressed with a `# gdstyle:ignore` comment, is not applied (see [Suppressing diagnostics](#suppressing-diagnostics)).
 
 Consecutive variables sit together with no blank line between them, except a property with an indented `set` / `get` block, which gets one blank line on each side so it reads like a small function.
 
@@ -821,7 +822,7 @@ gdstyle/
 │   └── rules/
 │       ├── mod.rs           # Rule dispatcher
 │       ├── naming.rs        # 11 naming convention rules
-│       ├── formatting.rs    # 20 formatting rules
+│       ├── formatting.rs    # 21 formatting rules
 │       ├── ordering.rs      # Class member ordering rule
 │       └── quality.rs       # 23 code quality rules
 ├── gdstyle-gdext/           # GDExtension wrapper (exposes linter/formatter to Godot)
