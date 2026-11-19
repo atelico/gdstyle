@@ -9116,6 +9116,24 @@ mod extra_spacing {
     }
 
     #[test]
+    fn removes_single_space_padding_inside_brackets() {
+        for (source, expected) in [
+            ("var a = f( b )\n", "var a = f(b)\n"),
+            ("var a = [ 1, 2 ]\n", "var a = [1, 2]\n"),
+            ("var a = b[ 0 ]\n", "var a = b[0]\n"),
+            ("var a = [ { \"k\": 1 } ]\n", "var a = [{ \"k\": 1 }]\n"),
+            ("var a = { }\n", "var a = {}\n"),
+        ] {
+            assert_eq!(fix_safely(source), expected, "{source}");
+        }
+    }
+
+    #[test]
+    fn single_space_padding_of_a_dictionary_is_kept() {
+        assert!(extra_spacing_lines("var a = { \"k\": 1 }\n").is_empty());
+    }
+
+    #[test]
     fn keeps_one_space_where_removing_it_would_change_the_code() {
         for (source, expected) in [
             ("var a = b   -   1\n", "var a = b - 1\n"),

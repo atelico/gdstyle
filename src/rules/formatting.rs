@@ -1760,13 +1760,14 @@ fn is_line_structure(kind: &TokenKind) -> bool {
     )
 }
 
-/// Remove repeated spaces and tabs between two tokens on a line:
-/// `func   f(   )   ->   void:` should be `func f() -> void:`. The GDScript
-/// style guide asks for single spaces and no vertical alignment.
+/// Remove extra spaces and tabs between two tokens on a line:
+/// `func   f( a )   ->   void:` should be `func f(a) -> void:`. The GDScript
+/// style guide asks for single spaces, no vertical alignment and no padding
+/// inside brackets.
 ///
 /// A gap becomes one space, or nothing where the style wants none (see
-/// `canonical_token_gap`). A gap of exactly one space is not reported.
-/// Spaces before a `\` line continuation are covered too.
+/// `canonical_token_gap`), so even a single space is reported there.
+/// Spaces before a `\` line continuation become one space.
 ///
 /// Indentation, string contents and the gap before a comment are left alone,
 /// the last so that aligned trailing comments keep their column. Working on
@@ -1777,10 +1778,10 @@ fn is_line_structure(kind: &TokenKind) -> bool {
 /// ```
 /// use gdstyle::{config::Config, fixer, linter};
 ///
-/// let source = "func   f(   )   ->   void:\n\tpass   # note\n";
+/// let source = "func   f( a )   ->   void:\n\tpass   # note\n";
 /// let diagnostics = linter::lint_source(source, "demo.gd", &Config::default());
 /// let fixed = fixer::apply_fixes(source, &diagnostics, true);
-/// assert_eq!(fixed, "func f() -> void:\n\tpass   # note\n");
+/// assert_eq!(fixed, "func f(a) -> void:\n\tpass   # note\n");
 /// ```
 pub fn check_extra_spacing(
     tokens: &[Token],
@@ -1799,7 +1800,6 @@ pub fn check_extra_spacing(
         let spaces = &between_tokens[..between_tokens.len() - after_spaces.len()];
         let continues_on_next_line = after_spaces.starts_with('\\');
         if spaces.is_empty()
-            || spaces == " "
             || !(after_spaces.is_empty() || continues_on_next_line)
             || is_line_structure(&prev.kind)
             || is_line_structure(&next.kind)
@@ -1816,10 +1816,13 @@ pub fn check_extra_spacing(
         } else {
             canonical_token_gap(tokens, prev_index)
         };
+        if spaces == new_text {
+            continue;
+        }
         diagnostics.push(
             Diagnostic::warning(
                 "format/extra-spacing",
-                "remove the extra spacing between tokens".to_string(),
+                "remove the extra space between tokens".to_string(),
                 next.span,
                 &file.path,
             )

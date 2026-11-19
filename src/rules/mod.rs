@@ -351,7 +351,7 @@ pub fn all_rules() -> &'static [(&'static str, &'static str)] {
         ),
         (
             "format/extra-spacing",
-            "No repeated spaces between tokens on a line; aligned trailing comments are kept",
+            "No extra spaces between tokens on a line (no alignment, no padding inside brackets); aligned trailing comments are kept",
         ),
         (
             "format/float-literal-zeros",
