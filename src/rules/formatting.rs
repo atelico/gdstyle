@@ -1723,6 +1723,30 @@ fn is_prefix_operator(tokens: &[Token], index: usize) -> bool {
         })
 }
 
+/// True when the gap between `prev` and `next` can be one where the style
+/// wants no space: a cheap first test before [`canonical_token_gap`].
+fn may_take_no_space(prev: &TokenKind, next: &TokenKind) -> bool {
+    matches!(
+        prev,
+        TokenKind::LeftParen
+            | TokenKind::LeftBracket
+            | TokenKind::LeftBrace
+            | TokenKind::Dot
+            | TokenKind::Minus
+            | TokenKind::Plus
+            | TokenKind::Tilde
+            | TokenKind::Func
+            | TokenKind::Annotation(_)
+    ) || matches!(
+        next,
+        TokenKind::RightParen
+            | TokenKind::RightBracket
+            | TokenKind::Dot
+            | TokenKind::LeftBracket
+            | TokenKind::LeftParen
+    )
+}
+
 /// The spacing the style guide wants between the token at `prev_index` and
 /// the one after it: nothing inside brackets, around `.`, after a prefix
 /// operator or before a subscript, and one space everywhere else.
@@ -1790,23 +1814,35 @@ pub fn check_extra_spacing(
     config: &Config,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
+    let bytes = source.as_bytes();
     for (prev_index, pair) in tokens.windows(2).enumerate() {
         let [prev, next] = pair else { continue };
+        // This loop sees every token, so it rejects with offsets and token
+        // kinds first and only looks at the text of the rare gaps left.
         let gap_start = prev.span.offset + prev.span.length;
-        let Some(between_tokens) = source.get(gap_start..next.span.offset) else {
-            continue;
-        };
-        let after_spaces = between_tokens.trim_start_matches([' ', '\t']);
-        let spaces = &between_tokens[..between_tokens.len() - after_spaces.len()];
-        let continues_on_next_line = after_spaces.starts_with('\\');
-        if spaces.is_empty()
-            || !(after_spaces.is_empty() || continues_on_next_line)
+        let gap_end = next.span.offset;
+        if gap_end <= gap_start
+            || (gap_end == gap_start + 1
+                && bytes.get(gap_start) == Some(&b' ')
+                && !may_take_no_space(&prev.kind, &next.kind))
             || is_line_structure(&prev.kind)
             || is_line_structure(&next.kind)
             || matches!(next.kind, TokenKind::Comment(_) | TokenKind::DocComment(_))
         {
             continue;
         }
+        let Some(gap) = bytes.get(gap_start..gap_end) else {
+            continue;
+        };
+        let spaces_len = gap
+            .iter()
+            .position(|&byte| byte != b' ' && byte != b'\t')
+            .unwrap_or(gap.len());
+        let continues_on_next_line = gap.get(spaces_len) == Some(&b'\\');
+        if spaces_len == 0 || !(spaces_len == gap.len() || continues_on_next_line) {
+            continue;
+        }
+        let spaces = &source[gap_start..gap_start + spaces_len];
         if !continues_on_next_line && gap_is_removed_by_other_rule(prev, next, source, config) {
             continue;
         }
