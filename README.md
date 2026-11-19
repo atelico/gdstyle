@@ -155,10 +155,10 @@ gdstyle ships with 58 rules organized into five categories. Most rules are enabl
 | `format/one-statement-per-line` | One statement per line (no semicolons to separate statements); a trailing `;` is removed. Match arms and inline callable bodies are exempt, since their statements are not peers of the enclosing line | safe |
 | `format/blank-lines` | Collapse 3+ blank lines to 2 | safe |
 | `format/trailing-comma` | Trailing comma on last item of multi-line collections whose closing bracket starts its own line | safe |
-| `format/operator-spacing` | One space around binary operators (none before a `,` or `:`, which attach to the left) | safe |
-| `format/colon-spacing` | No space before `:`, one space after (except `:=`, end of line, before a closing bracket, or before `,` or `:`) | safe |
-| `format/comma-spacing` | No space before `,`, one space after (except newline, closing bracket, or before `,` or `:`) | safe |
-| `format/brace-spacing` | Single-line dictionary literals need a space after `{` (unless a `,` or `:` follows) and before `}` | safe |
+| `format/operator-spacing` | One space around binary operators (none before a `,` or `:` while comma- / colon-spacing is on, since those attach to the left) | safe |
+| `format/colon-spacing` | No space before `:`, one space after (except `:=`, end of line, before a closing bracket, or before a `,` / `:` while comma- / colon-spacing is on) | safe |
+| `format/comma-spacing` | No space before `,`, one space after (except newline, closing bracket, or before a `,` / `:` while comma- / colon-spacing is on) | safe |
+| `format/brace-spacing` | Single-line dictionary literals need a space after `{` (unless a `,` or `:` follows while comma- / colon-spacing is on) and before `}` | safe |
 | `format/call-paren-spacing` | No space between a callee and its opening `(` | safe |
 | `format/extra-spacing` | No extra spaces or tabs between tokens on a line: no alignment with spaces, and no padding inside `()` and `[]` (`f( a )` becomes `f(a)`). A gap becomes one space, or nothing where the style wants none (inside `()` and `[]`, around `.`). A single-line dictionary keeps its one space of padding (`{ "k": 1 }`, while `{ }` becomes `{}`), and a trailing comma keeps its space (`[1, ]`). Indentation, strings and the gap before a comment are left alone | safe |
 | `format/float-literal-zeros` | Float literals need leading/trailing zeros (`0.5`, not `.5`) | safe |

@@ -130,8 +130,11 @@ fn comma_and_colon_attach_left_even_after_an_operator() {
 
 #[test]
 fn inferred_type_operator_keeps_the_space_before_it() {
-    let source = "func f(a):\n\tvar x := 1\n\tvar y = a if a else b\n";
-    assert_eq!(formatter::format_source(source, &Config::default()), source);
+    // The `:` of `:=` does not attach to the left: the gap before it gets
+    // one space, from extra-spacing or operator-spacing.
+    let source = "func f(a):\n\tvar x   := 1\n\tvar y =:= 2\n";
+    let formatted = formatter::format_source(source, &Config::default());
+    assert_eq!(formatted, "func f(a):\n\tvar x := 1\n\tvar y = := 2\n");
 }
 
 #[test]
