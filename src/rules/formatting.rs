@@ -1705,23 +1705,22 @@ fn gap_is_removed_by_other_rule(
 ) -> bool {
     let prev = &tokens[prev_index];
     let next = &tokens[prev_index + 1];
+    // `format/one-statement-per-line` replaces a `;` between statements and
+    // the spaces after it with a line break.
+    if matches!(prev.kind, TokenKind::Semicolon)
+        && neighbor_rules.is_one_statement_per_line_on
+        && !semicolon_ends_the_line(tokens, prev_index)
+        && one_statement_per_line_rewrites(tokens, prev_index, source)
+    {
+        return true;
+    }
     match next.kind {
-        // `format/one-statement-per-line` removes a `;` that ends the code
-        // on its line together with the spaces before it.
+        // It removes a `;` that ends the code on its line together with the
+        // spaces before it.
         TokenKind::Semicolon => {
-            let ends_the_line = semicolon_ends_the_line(tokens, prev_index + 1);
-            let line_start = source[..next.span.offset]
-                .rfind('\n')
-                .map_or(0, |newline| newline + 1);
-            let line = source[line_start..].split('\n').next().unwrap_or("");
             neighbor_rules.is_one_statement_per_line_on
-                && ends_the_line
-                && one_statement_per_line_applies(
-                    tokens,
-                    prev_index + 1,
-                    line,
-                    next.span.offset - line_start,
-                )
+                && semicolon_ends_the_line(tokens, prev_index + 1)
+                && one_statement_per_line_rewrites(tokens, prev_index + 1, source)
         }
         TokenKind::Comma => neighbor_rules.is_comma_spacing_on,
         TokenKind::Colon => {
@@ -1732,6 +1731,17 @@ fn gap_is_removed_by_other_rule(
         }
         _ => false,
     }
+}
+
+/// [`one_statement_per_line_applies`] for the `;` at `semicolon_index`,
+/// finding its line in `source`.
+fn one_statement_per_line_rewrites(tokens: &[Token], semicolon_index: usize, source: &str) -> bool {
+    let offset = tokens[semicolon_index].span.offset;
+    let line_start = source[..offset]
+        .rfind('\n')
+        .map_or(0, |newline| newline + 1);
+    let line = source[line_start..].split('\n').next().unwrap_or("");
+    one_statement_per_line_applies(tokens, semicolon_index, line, offset - line_start)
 }
 
 /// Whether the `+` / `-` at an index is a prefix or a binary operator.

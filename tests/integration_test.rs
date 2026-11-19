@@ -9244,6 +9244,23 @@ mod extra_spacing {
     }
 
     #[test]
+    fn spaces_after_a_mid_line_semicolon_are_reported_once() {
+        let source = "func f() -> void:\n\tvar s = 1;   var r = 2\n";
+        let diagnostics = linter::lint_source(source, "test.gd", &default_config());
+        assert!(diagnostics
+            .iter()
+            .any(|d| d.rule == "format/one-statement-per-line"));
+        assert!(
+            diagnostics.iter().all(|d| d.rule != RULE),
+            "{diagnostics:?}"
+        );
+        assert_eq!(
+            fixer::apply_fixes(source, &diagnostics, true),
+            "func f() -> void:\n\tvar s = 1\n\tvar r = 2\n"
+        );
+    }
+
+    #[test]
     fn spaces_before_a_semicolon_are_reported_once() {
         let source = "func f() -> void:\n\tpass  ;\n";
         let diagnostics = linter::lint_source(source, "test.gd", &default_config());

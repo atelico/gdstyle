@@ -250,12 +250,19 @@ impl GdStyle {
     }
 
     /// Auto-fix safe lint violations in a source string. Returns the fixed source.
+    ///
+    /// Fixes are applied and the text linted again until no safe fix is
+    /// left, so overlapping fixes all land in one call. `fix_one_in_source`
+    /// applies only the one fix it is asked for.
     #[func]
     fn fix_source(&self, source: GString, file_path: GString) -> GString {
         fixed_source_text(&source, &file_path, &self.config, true)
     }
 
     /// Auto-fix all lint violations (including unsafe) in a source string.
+    ///
+    /// Unsafe fixes such as renames are applied once, then safe fixes are
+    /// repeated until none is left, as in `fix_source`.
     #[func]
     fn fix_source_unsafe(&self, source: GString, file_path: GString) -> GString {
         fixed_source_text(&source, &file_path, &self.config, false)
