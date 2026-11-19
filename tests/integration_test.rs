@@ -9178,6 +9178,28 @@ mod extra_spacing {
     }
 
     #[test]
+    fn minus_after_a_variable_named_when_or_match_is_left_binary() {
+        for name in ["when", "match"] {
+            let source = format!("var {name} = 1\nvar x = {name} - 1\nvar y = {name}   -   1\n");
+            let fixed = fix_safely(&source);
+            assert!(fixed.contains(&format!("var x = {name} - 1\n")), "{fixed}");
+            assert!(fixed.contains(&format!("var y = {name} - 1\n")), "{fixed}");
+        }
+    }
+
+    #[test]
+    fn match_guard_with_a_negative_value_is_kept() {
+        let source = "func f(x) -> void:\n\tmatch x:\n\t\tvar y when -y > 1:\n\t\t\tpass\n";
+        assert_eq!(fix_safely(source), source);
+    }
+
+    #[test]
+    fn operator_spacing_sees_a_binary_minus_after_a_comment() {
+        let source = "var a = (b\n\t# note\n\t-c)\n";
+        assert_eq!(fix_safely(source), "var a = (b\n\t# note\n\t- c)\n");
+    }
+
+    #[test]
     fn minus_starting_a_match_pattern_is_a_prefix() {
         let source = "func f(x) -> int:\n\tmatch x:\n\t\t1:\n\t\t\treturn x\n\t\t-   1:\n\t\t\tpass\n\treturn 0\n";
         assert!(
@@ -9207,6 +9229,10 @@ mod extra_spacing {
         assert_eq!(
             message("var a\t= 1\n"),
             "expected one space between these tokens, found a tab"
+        );
+        assert_eq!(
+            message("var a =\t\t 1\n"),
+            "expected one space between these tokens, found 2 tabs and one space"
         );
     }
 

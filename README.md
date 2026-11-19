@@ -234,7 +234,7 @@ gdstyle check --unsafe-fix
 > `--unsafe-fix`, then review the diff. (`gdstyle fmt --diff` previews
 > formatter changes without writing.)
 
-Safe fixes preserve behavior. Unsafe fixes can change semantics (renaming signals, variables, and other identifiers), so review the diff before committing. Both flags repeat safe fixes until none is left to apply, so one run is enough.
+Safe fixes preserve behavior. Unsafe fixes can change semantics (renaming signals, variables, and other identifiers), so review the diff before committing. Both flags repeat safe fixes until they settle, so one run is normally enough. Fixes that would undo each other stop the repetition early, and `fix-at` (the editor's per-line Fix) applies only the one fix it is asked for.
 
 When `--unsafe-fix` renames an identifier, gdstyle looks for references in
 the selected scripts and scene files. It updates a scene's signal or method

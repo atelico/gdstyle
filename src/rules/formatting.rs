@@ -1190,13 +1190,10 @@ pub fn check_operator_spacing(
                 }
             }
 
-            // Skip unary minus/plus. The operator is BINARY only when the
-            // preceding token is a value-producing operand (identifier, literal,
-            // closing bracket, self/super). In every other context, keywords
-            // like `else`/`return`/`if`/`and`, operators, commas, opening
-            // brackets, line starts, `-`/`+` is unary.
+            // Skip unary minus/plus, and the ones that may be either (see
+            // `plus_minus_role`).
             if matches!(token.kind, TokenKind::Plus | TokenKind::Minus)
-                && !is_operand_end(&tokens[idx - 1].kind)
+                && plus_minus_role(tokens, idx) != PlusMinusRole::Binary
             {
                 continue;
             }
@@ -1675,6 +1672,33 @@ fn gap_is_removed_by_other_rule(prev: &Token, next: &Token, source: &str, config
     }
 }
 
+/// Whether the `+` / `-` at an index is a prefix or a binary operator.
+#[derive(Debug, PartialEq)]
+enum PlusMinusRole {
+    Prefix,
+    Binary,
+    /// After `match` or `when`, which are keywords but also valid names.
+    Unknown,
+}
+
+/// The role of the `+` / `-` at `index`, from the token before it. Both
+/// `format/operator-spacing` and `format/extra-spacing` use this, so they
+/// never disagree about an operator and undo each other's fix.
+fn plus_minus_role(tokens: &[Token], index: usize) -> PlusMinusRole {
+    // Inside brackets a comment can sit between a binary operator and its
+    // left operand. Brackets hold no line tokens, so reaching one means the
+    // operator starts a statement.
+    let before = tokens[..index]
+        .iter()
+        .rev()
+        .find(|token| !matches!(token.kind, TokenKind::Comment(_) | TokenKind::DocComment(_)));
+    match before.map(|token| &token.kind) {
+        Some(TokenKind::Match | TokenKind::When) => PlusMinusRole::Unknown,
+        Some(kind) if is_operand_end(kind) => PlusMinusRole::Binary,
+        _ => PlusMinusRole::Prefix,
+    }
+}
+
 /// True when the token at `index` is a prefix `-`, `+` or `~` applied to the
 /// operand after it. `!` is left out: `format/boolean-operators` rewrites it
 /// to `not`, which needs the space.
@@ -1682,16 +1706,7 @@ fn is_prefix_operator(tokens: &[Token], index: usize) -> bool {
     let is_prefix = match tokens[index].kind {
         TokenKind::Tilde => true,
         TokenKind::Minus | TokenKind::Plus => {
-            // Inside brackets a comment can sit between a binary operator
-            // and its left operand. Brackets hold no line tokens, so
-            // reaching one means the operator starts a statement.
-            !tokens[..index]
-                .iter()
-                .rev()
-                .find(|token| {
-                    !matches!(token.kind, TokenKind::Comment(_) | TokenKind::DocComment(_))
-                })
-                .is_some_and(|token| is_operand_end(&token.kind))
+            plus_minus_role(tokens, index) == PlusMinusRole::Prefix
         }
         _ => false,
     };
@@ -1813,6 +1828,28 @@ fn canonical_token_gap(tokens: &[Token], prev_index: usize) -> &'static str {
     }
 }
 
+/// `spaces`, a run of spaces and tabs, in words: "3 spaces", "a tab",
+/// "2 tabs and one space".
+fn describe_spacing(spaces: &str) -> String {
+    let count = |character: char, one: &str, many: &str| match spaces
+        .chars()
+        .filter(|&c| c == character)
+        .count()
+    {
+        0 => None,
+        1 => Some(one.to_string()),
+        n => Some(format!("{n} {many}")),
+    };
+    let parts: Vec<String> = [
+        count('\t', "a tab", "tabs"),
+        count(' ', "one space", "spaces"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    parts.join(" and ")
+}
+
 /// Where the spaces of a gap that ends in a `\` line continuation start: the
 /// tokens on either side sit on different lines, so neither span says it.
 fn continuation_spaces_span(source: &str, gap_start: usize, length: usize, next: &Token) -> Span {
@@ -1913,13 +1950,7 @@ pub fn check_extra_spacing(
         } else {
             "one space"
         };
-        let found = if spaces.contains('\t') {
-            "a tab".to_string()
-        } else if spaces.len() == 1 {
-            "one space".to_string()
-        } else {
-            format!("{} spaces", spaces.len())
-        };
+        let found = describe_spacing(spaces);
         let span = if continues_on_next_line {
             continuation_spaces_span(source, gap_start, spaces.len(), next)
         } else {
@@ -2279,6 +2310,139 @@ fn is_operand_end(kind: &TokenKind) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every kind of token, for the checks that must hold for all pairs.
+    fn every_token_kind() -> Vec<TokenKind> {
+        use TokenKind::*;
+        let string = crate::lexer::Lexer::new("\"a\"").tokenize().remove(0).kind;
+        vec![
+            Integer(1),
+            Float(1.0),
+            string,
+            Bool(true),
+            Null,
+            Identifier("a".into()),
+            ClassName,
+            Extends,
+            Class,
+            Func,
+            Var,
+            Const,
+            Signal,
+            Enum,
+            Static,
+            If,
+            Elif,
+            Else,
+            For,
+            While,
+            Match,
+            When,
+            Break,
+            Continue,
+            Pass,
+            Return,
+            As,
+            Is,
+            In,
+            Not,
+            And,
+            Or,
+            Self_,
+            Super,
+            Await,
+            Assert,
+            Breakpoint,
+            Preload,
+            Void,
+            Trait,
+            Annotation("@export".into()),
+            Plus,
+            Minus,
+            Star,
+            StarStar,
+            Slash,
+            Percent,
+            Equal,
+            NotEqual,
+            Less,
+            LessEqual,
+            Greater,
+            GreaterEqual,
+            Assign,
+            PlusAssign,
+            MinusAssign,
+            StarAssign,
+            SlashAssign,
+            PercentAssign,
+            StarStarAssign,
+            LessLessAssign,
+            GreaterGreaterAssign,
+            AmpersandAssign,
+            PipeAssign,
+            CaretAssign,
+            Ampersand,
+            Pipe,
+            Caret,
+            Tilde,
+            LessLess,
+            GreaterGreater,
+            Arrow,
+            AmpersandAmpersand,
+            PipePipe,
+            Bang,
+            LeftParen,
+            RightParen,
+            LeftBracket,
+            RightBracket,
+            LeftBrace,
+            RightBrace,
+            Comma,
+            Colon,
+            Semicolon,
+            Dot,
+            DotDot,
+            Ellipsis,
+            Dollar,
+            UniqueNodeMarker,
+            Newline,
+            Indent,
+            Dedent,
+            Comment("#".into()),
+            DocComment("##".into()),
+            Eof,
+            Error("x".into()),
+        ]
+    }
+
+    #[test]
+    fn fast_filter_accepts_every_gap_that_takes_no_space() {
+        // `check_extra_spacing` skips a single-space gap unless
+        // `may_take_no_space` accepts it, so it must accept every gap
+        // `canonical_token_gap` would empty, after any token before them.
+        let token = |kind: TokenKind| Token::new(kind, Span::new(1, 1, 0, 0), String::new());
+        let kinds = every_token_kind();
+        for before in [
+            None,
+            Some(TokenKind::Identifier("b".into())),
+            Some(TokenKind::Comma),
+        ] {
+            for prev in &kinds {
+                for next in &kinds {
+                    let mut tokens: Vec<Token> = before.clone().into_iter().map(token).collect();
+                    let prev_index = tokens.len();
+                    tokens.push(token(prev.clone()));
+                    tokens.push(token(next.clone()));
+                    if canonical_token_gap(&tokens, prev_index).is_empty() {
+                        assert!(
+                            may_take_no_space(prev, next),
+                            "{before:?} {prev:?} {next:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     fn make_file(lines: &[&str]) -> ScriptFile {
         ScriptFile {
