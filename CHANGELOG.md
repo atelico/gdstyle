@@ -4,6 +4,18 @@ A short summary of every gdstyle release, newest first. The full notes for
 each version are on its
 [GitHub release](https://github.com/atelico/gdstyle/releases).
 
+## 0.8.0 (2026-11-19)
+
+- Added: `format/extra-spacing` removes extra spaces and tabs between tokens,
+  including alignment and padding inside `()` and `[]` (#103, #105).
+- Changed: `check --fix`, `--unsafe-fix`, `fix_source` and `fmt` repeat safe
+  fixes until the source settles, so one run is enough (#105).
+- Fixed: `fmt` no longer flips between two layouts on invalid lines where a
+  space before `,` or `:` was both added and removed (#106).
+- Performance: `check` and `fmt` run about 8% fewer instructions (#105).
+- Library: added `fixer::apply_fixes_until_settled` and the
+  `*_with_config` spacing checks (#105, #106).
+
 ## 0.7.0 (2026-11-08)
 
 - Added: `fix-at` applies one rule's fix at a selected line. The Godot
