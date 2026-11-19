@@ -1667,6 +1667,10 @@ fn is_inferred_type_colon(colon: &Token, source: &str) -> bool {
 
 /// True when an enabled rule removes the whole gap between `prev` and `next`,
 /// so reporting it here too would report it twice.
+///
+/// A `# gdstyle:ignore` for that rule on the line keeps the gap as it is:
+/// the ignore asks for that spacing to be left alone, so this rule does not
+/// step in.
 fn gap_is_removed_by_other_rule(
     tokens: &[Token],
     prev_index: usize,
@@ -1700,7 +1704,8 @@ fn gap_is_removed_by_other_rule(
 enum PlusMinusRole {
     Prefix,
     Binary,
-    /// After `match` or `when`, which are keywords but also valid names.
+    /// After `match` or `when`, which are keywords but also valid names, or
+    /// after a comment.
     Unknown,
 }
 
@@ -1708,15 +1713,13 @@ enum PlusMinusRole {
 /// `format/operator-spacing` and `format/extra-spacing` use this, so they
 /// never disagree about an operator and undo each other's fix.
 fn plus_minus_role(tokens: &[Token], index: usize) -> PlusMinusRole {
-    // Inside brackets a comment can sit between a binary operator and its
-    // left operand. Brackets hold no line tokens, so reaching one means the
-    // operator starts a statement.
-    let before = tokens[..index]
-        .iter()
-        .rev()
-        .find(|token| !matches!(token.kind, TokenKind::Comment(_) | TokenKind::DocComment(_)));
-    match before.map(|token| &token.kind) {
-        Some(TokenKind::Match | TokenKind::When) => PlusMinusRole::Unknown,
+    // After a comment the operator starts a line. Inside brackets that is a
+    // binary operator continuing an expression, but in a lambda body inside
+    // brackets it starts a statement, and no line token tells them apart.
+    match index.checked_sub(1).map(|before| &tokens[before].kind) {
+        Some(
+            TokenKind::Match | TokenKind::When | TokenKind::Comment(_) | TokenKind::DocComment(_),
+        ) => PlusMinusRole::Unknown,
         Some(kind) if is_operand_end(kind) => PlusMinusRole::Binary,
         _ => PlusMinusRole::Prefix,
     }
@@ -1791,6 +1794,30 @@ fn can_start_operand(kind: &TokenKind) -> bool {
     )
 }
 
+/// Which of the rules that own the spacing next to some tokens are enabled.
+/// `format/extra-spacing` leaves those spaces to them, and takes them over
+/// when they are off.
+#[derive(Clone, Copy)]
+struct NeighborSpacingRules {
+    operator: bool,
+    comma: bool,
+    colon: bool,
+    brace: bool,
+    boolean_operators: bool,
+}
+
+impl NeighborSpacingRules {
+    fn from_config(config: &Config) -> Self {
+        Self {
+            operator: config.is_rule_enabled("format/operator-spacing"),
+            comma: config.is_rule_enabled("format/comma-spacing"),
+            colon: config.is_rule_enabled("format/colon-spacing"),
+            brace: config.is_rule_enabled("format/brace-spacing"),
+            boolean_operators: config.is_rule_enabled("format/boolean-operators"),
+        }
+    }
+}
+
 /// True when the gap between `prev` and `next` can be one where the style
 /// wants no space: a cheap first test before [`canonical_token_gap`].
 fn may_take_no_space(prev: &TokenKind, next: &TokenKind) -> bool {
@@ -1803,6 +1830,10 @@ fn may_take_no_space(prev: &TokenKind, next: &TokenKind) -> bool {
             | TokenKind::Minus
             | TokenKind::Plus
             | TokenKind::Tilde
+            | TokenKind::Bang
+            | TokenKind::Dollar
+            | TokenKind::UniqueNodeMarker
+            | TokenKind::Ellipsis
             | TokenKind::Func
             | TokenKind::Annotation(_)
     ) || matches!(
@@ -1823,18 +1854,25 @@ fn may_take_no_space(prev: &TokenKind, next: &TokenKind) -> bool {
 /// A trailing comma keeps its space before `)` / `]`, and a binary operator
 /// keeps the spaces on both sides, since `format/operator-spacing` puts them
 /// back otherwise and the two fixes would undo each other.
-fn canonical_token_gap(tokens: &[Token], prev_index: usize) -> &'static str {
+fn canonical_token_gap(
+    tokens: &[Token],
+    prev_index: usize,
+    neighbor_rules: NeighborSpacingRules,
+) -> &'static str {
     let is_number = |kind: &TokenKind| matches!(kind, TokenKind::Integer(_) | TokenKind::Float(_));
     let prev = &tokens[prev_index].kind;
     let next = &tokens[prev_index + 1].kind;
     // An operator `format/operator-spacing` may space keeps its spaces, or
     // the two fixes would undo each other. A `+` / `-` after `match` or
     // `when` may be binary, so it keeps them too.
-    let is_spaced_operator_at = |index: usize| match tokens[index].kind {
-        TokenKind::Plus | TokenKind::Minus => {
-            plus_minus_role(tokens, index) != PlusMinusRole::Prefix
-        }
-        ref kind => is_spaced_binary_operator(kind),
+    let is_spaced_operator_at = |index: usize| {
+        neighbor_rules.operator
+            && match tokens[index].kind {
+                TokenKind::Plus | TokenKind::Minus => {
+                    plus_minus_role(tokens, index) != PlusMinusRole::Prefix
+                }
+                ref kind => is_spaced_binary_operator(kind),
+            }
     };
     let wants_no_space = matches!(prev, TokenKind::LeftParen | TokenKind::LeftBracket)
         || (matches!(next, TokenKind::RightParen | TokenKind::RightBracket)
@@ -1848,18 +1886,29 @@ fn canonical_token_gap(tokens: &[Token], prev_index: usize) -> &'static str {
         || matches!(next, TokenKind::Semicolon)
         || (matches!(next, TokenKind::LeftParen)
             && matches!(prev, TokenKind::Func | TokenKind::Annotation(_)))
+        // `$Node`, `%Node`, `...args`.
+        || matches!(
+            prev,
+            TokenKind::Dollar | TokenKind::UniqueNodeMarker | TokenKind::Ellipsis
+        )
+        // With boolean-operators on, `!` becomes `not`, which needs a space.
+        || (matches!(prev, TokenKind::Bang)
+            && !neighbor_rules.boolean_operators
+            && can_start_operand(next))
         || is_prefix_operator(tokens, prev_index);
     // The space after `,` and `:` belongs to comma-spacing and colon-spacing,
     // which skip it only before a closing bracket. The space just inside
     // `{` / `}` belongs to brace-spacing, which skips an empty `{ }`.
     let is_empty_braces =
         matches!(prev, TokenKind::LeftBrace) && matches!(next, TokenKind::RightBrace);
-    let other_rule_wants_space = (matches!(prev, TokenKind::Comma | TokenKind::Colon)
+    let other_rule_wants_space = ((matches!(prev, TokenKind::Comma) && neighbor_rules.comma)
+        || (matches!(prev, TokenKind::Colon) && neighbor_rules.colon))
         && !matches!(
             next,
             TokenKind::RightParen | TokenKind::RightBracket | TokenKind::RightBrace
-        ))
-        || (!is_empty_braces
+        )
+        || (neighbor_rules.brace
+            && !is_empty_braces
             && (matches!(prev, TokenKind::LeftBrace) || matches!(next, TokenKind::RightBrace)));
     let takes_no_space = wants_no_space
         && !other_rule_wants_space
@@ -1949,6 +1998,7 @@ pub fn check_extra_spacing(
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     let bytes = source.as_bytes();
+    let neighbor_rules = NeighborSpacingRules::from_config(config);
     for (prev_index, pair) in tokens.windows(2).enumerate() {
         let [prev, next] = pair else { continue };
         // This loop sees every token, so it rejects with offsets and token
@@ -1986,7 +2036,7 @@ pub fn check_extra_spacing(
         let new_text = if continues_on_next_line {
             " "
         } else {
-            canonical_token_gap(tokens, prev_index)
+            canonical_token_gap(tokens, prev_index, neighbor_rules)
         };
         if spaces == new_text {
             continue;
@@ -2490,18 +2540,32 @@ mod tests {
         let token = |kind: TokenKind| Token::new(kind, Span::new(1, 1, 0, 0), String::new());
         let kinds = every_token_kind();
         kinds.iter().for_each(every_token_kind_is_listed);
-        for before in [
-            None,
-            Some(TokenKind::Identifier("b".into())),
-            Some(TokenKind::Comma),
-        ] {
+        let all_off = NeighborSpacingRules {
+            operator: false,
+            comma: false,
+            colon: false,
+            brace: false,
+            boolean_operators: false,
+        };
+        let rule_sets = [
+            NeighborSpacingRules::from_config(&Config::default()),
+            all_off,
+        ];
+        for (neighbor_rules, before) in rule_sets.into_iter().flat_map(|rules| {
+            [
+                None,
+                Some(TokenKind::Identifier("b".into())),
+                Some(TokenKind::Comma),
+            ]
+            .map(|before| (rules, before))
+        }) {
             for prev in &kinds {
                 for next in &kinds {
                     let mut tokens: Vec<Token> = before.clone().into_iter().map(token).collect();
                     let prev_index = tokens.len();
                     tokens.push(token(prev.clone()));
                     tokens.push(token(next.clone()));
-                    if canonical_token_gap(&tokens, prev_index).is_empty() {
+                    if canonical_token_gap(&tokens, prev_index, neighbor_rules).is_empty() {
                         assert!(
                             may_take_no_space(prev, next),
                             "{before:?} {prev:?} {next:?}"

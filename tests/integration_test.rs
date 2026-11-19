@@ -9286,9 +9286,45 @@ mod extra_spacing {
     }
 
     #[test]
-    fn operator_spacing_sees_a_binary_minus_after_a_comment() {
-        let source = "var a = (b\n\t# note\n\t-c)\n";
-        assert_eq!(fix_safely(source), "var a = (b\n\t# note\n\t- c)\n");
+    fn minus_after_a_comment_keeps_its_spacing() {
+        // After a comment, a `-` may continue an expression or start a
+        // statement in a lambda body, so neither rule changes it.
+        for source in [
+            "var a = (b\n\t# note\n\t-c)\n",
+            "var a = (b\n\t# note\n\t- c)\n",
+            "func f(arr) -> void:\n\tarr.map(func(x):\n\t\tvar y = x # c\n\t\t-y\n\t\treturn y\n\t)\n",
+        ] {
+            assert_eq!(fix_safely(source), source);
+        }
+    }
+
+    #[test]
+    fn spaces_owned_by_a_rule_that_is_off_are_removed() {
+        for (source, other_rule, expected) in [
+            (
+                "var a = [1  , 2]\n",
+                "format/comma-spacing",
+                "var a = [1 , 2]\n",
+            ),
+            ("var a = !  b\n", "format/boolean-operators", "var a = !b\n"),
+        ] {
+            let config = config_with_rules_off(&[other_rule]);
+            let formatted = formatter::format_source(source, &config);
+            assert_eq!(formatted, expected, "{other_rule}");
+        }
+    }
+
+    #[test]
+    fn node_paths_and_variadic_parameters_lose_their_space() {
+        for (source, expected) in [
+            ("var a = $  Node\n", "var a = $Node\n"),
+            (
+                "func f(...  args) -> void:\n\tpass\n",
+                "func f(...args) -> void:\n\tpass\n",
+            ),
+        ] {
+            assert_eq!(fix_safely(source), expected, "{source}");
+        }
     }
 
     #[test]
