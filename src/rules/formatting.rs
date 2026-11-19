@@ -1349,15 +1349,23 @@ pub fn check_colon_spacing(
         }
 
         // One space after the colon, unless followed by `=` (`:=`), end of
-        // line (`if cond:` block opener, `func f():` etc.), or a comma. A
-        // space before a comma is removed by `format/comma-spacing`, so
-        // asking for one here would make the two fixes undo each other.
+        // line (`if cond:` block opener, `func f():` etc.), a comma or a
+        // closing bracket. `format/comma-spacing` and `format/extra-spacing`
+        // remove a space before those, so asking for one here would make
+        // the fixes undo each other.
         let token_end = token.span.offset + token.span.length;
         if token_end < source.len() {
             let next_byte = source.as_bytes().get(token_end);
             let no_space_required = matches!(
                 next_byte,
-                Some(&b'=') | Some(&b'\n') | Some(&b' ') | Some(&b'\t') | Some(&b',')
+                Some(&b'=')
+                    | Some(&b'\n')
+                    | Some(&b' ')
+                    | Some(&b'\t')
+                    | Some(&b',')
+                    | Some(&b')')
+                    | Some(&b']')
+                    | Some(&b'}')
             );
             if !no_space_required {
                 // Also tolerate when the next token IS a Newline (the byte
@@ -1659,8 +1667,23 @@ fn is_inferred_type_colon(colon: &Token, source: &str) -> bool {
 
 /// True when an enabled rule removes the whole gap between `prev` and `next`,
 /// so reporting it here too would report it twice.
-fn gap_is_removed_by_other_rule(prev: &Token, next: &Token, source: &str, config: &Config) -> bool {
+fn gap_is_removed_by_other_rule(
+    tokens: &[Token],
+    prev_index: usize,
+    source: &str,
+    config: &Config,
+) -> bool {
+    let prev = &tokens[prev_index];
+    let next = &tokens[prev_index + 1];
     match next.kind {
+        // `format/one-statement-per-line` removes a `;` that ends the code
+        // on its line together with the spaces before it.
+        TokenKind::Semicolon => {
+            tokens.get(prev_index + 2).is_none_or(|after| {
+                is_line_structure(&after.kind)
+                    || matches!(after.kind, TokenKind::Comment(_) | TokenKind::DocComment(_))
+            }) && config.is_rule_enabled("format/one-statement-per-line")
+        }
         TokenKind::Comma => config.is_rule_enabled("format/comma-spacing"),
         TokenKind::Colon => {
             !is_inferred_type_colon(next, source) && config.is_rule_enabled("format/colon-spacing")
@@ -1763,6 +1786,8 @@ fn can_start_operand(kind: &TokenKind) -> bool {
             | TokenKind::LeftBrace
             | TokenKind::Dollar
             | TokenKind::UniqueNodeMarker
+            | TokenKind::Tilde
+            | TokenKind::Await
     )
 }
 
@@ -1787,6 +1812,7 @@ fn may_take_no_space(prev: &TokenKind, next: &TokenKind) -> bool {
             | TokenKind::Dot
             | TokenKind::LeftBracket
             | TokenKind::LeftParen
+            | TokenKind::Semicolon
     )
 }
 
@@ -1794,33 +1820,51 @@ fn may_take_no_space(prev: &TokenKind, next: &TokenKind) -> bool {
 /// the one after it: nothing inside brackets, around `.`, after a prefix
 /// operator or before a subscript, and one space everywhere else.
 ///
-/// A trailing comma keeps its space before `)` / `]`, and an operator next
-/// to a bracket keeps its space, since `format/operator-spacing` puts it
+/// A trailing comma keeps its space before `)` / `]`, and a binary operator
+/// keeps the spaces on both sides, since `format/operator-spacing` puts them
 /// back otherwise and the two fixes would undo each other.
 fn canonical_token_gap(tokens: &[Token], prev_index: usize) -> &'static str {
     let is_number = |kind: &TokenKind| matches!(kind, TokenKind::Integer(_) | TokenKind::Float(_));
     let prev = &tokens[prev_index].kind;
     let next = &tokens[prev_index + 1].kind;
-    let is_spaced_operator_at = |index: usize| {
-        is_spaced_binary_operator(&tokens[index].kind) && !is_prefix_operator(tokens, index)
+    // An operator `format/operator-spacing` may space keeps its spaces, or
+    // the two fixes would undo each other. A `+` / `-` after `match` or
+    // `when` may be binary, so it keeps them too.
+    let is_spaced_operator_at = |index: usize| match tokens[index].kind {
+        TokenKind::Plus | TokenKind::Minus => {
+            plus_minus_role(tokens, index) != PlusMinusRole::Prefix
+        }
+        ref kind => is_spaced_binary_operator(kind),
     };
-    let takes_no_space = (matches!(prev, TokenKind::LeftParen | TokenKind::LeftBracket)
-        && !is_spaced_operator_at(prev_index + 1))
+    let wants_no_space = matches!(prev, TokenKind::LeftParen | TokenKind::LeftBracket)
         || (matches!(next, TokenKind::RightParen | TokenKind::RightBracket)
-            && !matches!(prev, TokenKind::Comma)
-            && !is_spaced_operator_at(prev_index))
+            && !matches!(prev, TokenKind::Comma))
         || (matches!(prev, TokenKind::LeftBrace) && matches!(next, TokenKind::RightBrace))
-        // A space keeps `1 .x` from lexing as the float `1.` followed by `x`.
-        || (matches!(prev, TokenKind::Dot) && !is_number(next))
-        || (matches!(next, TokenKind::Dot) && !is_number(prev))
-        || (matches!(next, TokenKind::LeftBracket) && can_end_callee(prev))
+        // A space keeps `1 .x` from lexing as the float `1.` followed by
+        // `x`, and `. .` from lexing as `..`.
+        || (matches!(prev, TokenKind::Dot) && !is_number(next) && !matches!(next, TokenKind::Dot))
+        || (matches!(next, TokenKind::Dot) && !is_number(prev) && !matches!(prev, TokenKind::Dot))
+        || (matches!(next, TokenKind::LeftBracket) && is_operand_end(prev))
+        || matches!(next, TokenKind::Semicolon)
         || (matches!(next, TokenKind::LeftParen)
             && matches!(prev, TokenKind::Func | TokenKind::Annotation(_)))
         || is_prefix_operator(tokens, prev_index);
-    debug_assert!(
-        !takes_no_space || may_take_no_space(prev, next),
-        "may_take_no_space must accept every gap that takes no space: {prev:?} {next:?}"
-    );
+    // The space after `,` and `:` belongs to comma-spacing and colon-spacing,
+    // which skip it only before a closing bracket. The space just inside
+    // `{` / `}` belongs to brace-spacing, which skips an empty `{ }`.
+    let is_empty_braces =
+        matches!(prev, TokenKind::LeftBrace) && matches!(next, TokenKind::RightBrace);
+    let other_rule_wants_space = (matches!(prev, TokenKind::Comma | TokenKind::Colon)
+        && !matches!(
+            next,
+            TokenKind::RightParen | TokenKind::RightBracket | TokenKind::RightBrace
+        ))
+        || (!is_empty_braces
+            && (matches!(prev, TokenKind::LeftBrace) || matches!(next, TokenKind::RightBrace)));
+    let takes_no_space = wants_no_space
+        && !other_rule_wants_space
+        && !is_spaced_operator_at(prev_index)
+        && !is_spaced_operator_at(prev_index + 1);
     if takes_no_space {
         ""
     } else {
@@ -1933,7 +1977,9 @@ pub fn check_extra_spacing(
             continue;
         }
         let spaces = &source[gap_start..gap_start + spaces_len];
-        if !continues_on_next_line && gap_is_removed_by_other_rule(prev, next, source, config) {
+        if !continues_on_next_line
+            && gap_is_removed_by_other_rule(tokens, prev_index, source, config)
+        {
             continue;
         }
 
@@ -2311,6 +2357,27 @@ fn is_operand_end(kind: &TokenKind) -> bool {
 mod tests {
     use super::*;
 
+    /// Fails to compile when a `TokenKind` is added, as a reminder to add it
+    /// to [`every_token_kind`] too.
+    fn every_token_kind_is_listed(kind: &TokenKind) {
+        use TokenKind::*;
+        match kind {
+            Integer(_) | Float(_) | String(_) | Bool(_) | Null | Identifier(_) | ClassName
+            | Extends | Class | Func | Var | Const | Signal | Enum | Static | If | Elif | Else
+            | For | While | Match | When | Break | Continue | Pass | Return | As | Is | In
+            | Not | And | Or | Self_ | Super | Await | Assert | Breakpoint | Preload | Void
+            | Trait | Annotation(_) | Plus | Minus | Star | StarStar | Slash | Percent | Equal
+            | NotEqual | Less | LessEqual | Greater | GreaterEqual | Assign | PlusAssign
+            | MinusAssign | StarAssign | SlashAssign | PercentAssign | StarStarAssign
+            | LessLessAssign | GreaterGreaterAssign | AmpersandAssign | PipeAssign
+            | CaretAssign | Ampersand | Pipe | Caret | Tilde | LessLess | GreaterGreater
+            | Arrow | AmpersandAmpersand | PipePipe | Bang | LeftParen | RightParen
+            | LeftBracket | RightBracket | LeftBrace | RightBrace | Comma | Colon | Semicolon
+            | Dot | DotDot | Ellipsis | Dollar | UniqueNodeMarker | Newline | Indent | Dedent
+            | Comment(_) | DocComment(_) | Eof | Error(_) => {}
+        }
+    }
+
     /// Every kind of token, for the checks that must hold for all pairs.
     fn every_token_kind() -> Vec<TokenKind> {
         use TokenKind::*;
@@ -2422,6 +2489,7 @@ mod tests {
         // `canonical_token_gap` would empty, after any token before them.
         let token = |kind: TokenKind| Token::new(kind, Span::new(1, 1, 0, 0), String::new());
         let kinds = every_token_kind();
+        kinds.iter().for_each(every_token_kind_is_listed);
         for before in [
             None,
             Some(TokenKind::Identifier("b".into())),
