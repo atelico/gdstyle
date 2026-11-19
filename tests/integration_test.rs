@@ -9530,6 +9530,15 @@ mod extra_spacing {
     }
 
     #[test]
+    fn spaces_after_an_opening_bracket_before_a_continuation_are_removed() {
+        let source = "func f(a) -> void:\n\tprint(   \\\n\t\ta)\n";
+        assert_eq!(
+            fix_safely(source),
+            "func f(a) -> void:\n\tprint(\\\n\t\ta)\n"
+        );
+    }
+
+    #[test]
     fn trims_spaces_before_a_line_continuation_only() {
         let source = "var a = 1   +   \\\n\t\t2\n";
         assert_eq!(fix_safely(source), "var a = 1 + \\\n\t\t2\n");

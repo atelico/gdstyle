@@ -1706,10 +1706,10 @@ fn gap_is_removed_by_other_rule(
     let prev = &tokens[prev_index];
     let next = &tokens[prev_index + 1];
     // `format/one-statement-per-line` replaces a `;` between statements and
-    // the spaces after it with a line break.
+    // the spaces after it with a line break. A `;` that ends its line never
+    // gets here: the caller skips gaps before a line break or a comment.
     if matches!(prev.kind, TokenKind::Semicolon)
         && neighbor_rules.is_one_statement_per_line_on
-        && !semicolon_ends_the_line(tokens, prev_index)
         && one_statement_per_line_rewrites(tokens, prev_index, source)
     {
         return true;
@@ -1958,16 +1958,17 @@ fn canonical_token_gap(
     // `{` / `}` belongs to brace-spacing, which skips an empty `{ }`.
     let is_empty_braces =
         matches!(prev, TokenKind::LeftBrace) && matches!(next, TokenKind::RightBrace);
-    let other_rule_wants_space = ((matches!(prev, TokenKind::Comma)
-        && neighbor_rules.is_comma_spacing_on)
-        || (matches!(prev, TokenKind::Colon) && neighbor_rules.is_colon_spacing_on))
-        && !matches!(
-            next,
-            TokenKind::RightParen | TokenKind::RightBracket | TokenKind::RightBrace
-        )
-        || (neighbor_rules.is_brace_spacing_on
-            && !is_empty_braces
-            && (matches!(prev, TokenKind::LeftBrace) || matches!(next, TokenKind::RightBrace)));
+    let is_before_closing_bracket = matches!(
+        next,
+        TokenKind::RightParen | TokenKind::RightBracket | TokenKind::RightBrace
+    );
+    let comma_or_colon_wants_space = !is_before_closing_bracket
+        && ((matches!(prev, TokenKind::Comma) && neighbor_rules.is_comma_spacing_on)
+            || (matches!(prev, TokenKind::Colon) && neighbor_rules.is_colon_spacing_on));
+    let brace_wants_space = neighbor_rules.is_brace_spacing_on
+        && !is_empty_braces
+        && (matches!(prev, TokenKind::LeftBrace) || matches!(next, TokenKind::RightBrace));
+    let other_rule_wants_space = comma_or_colon_wants_space || brace_wants_space;
     // Joining dots would lex differently: `. .` as `..`, `.. .` as `...`.
     let would_join_dots =
         tokens[prev_index].text.ends_with('.') && tokens[prev_index + 1].text.starts_with('.');
@@ -2101,8 +2102,14 @@ pub fn check_extra_spacing(
             continue;
         }
 
+        // Before a `\` the gap keeps one space, except inside an opening
+        // bracket, which takes no padding.
         let new_text = if continues_on_next_line {
-            " "
+            if matches!(prev.kind, TokenKind::LeftParen | TokenKind::LeftBracket) {
+                ""
+            } else {
+                " "
+            }
         } else {
             canonical_token_gap(tokens, prev_index, neighbor_rules)
         };
