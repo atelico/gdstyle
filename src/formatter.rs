@@ -1016,9 +1016,11 @@ fn ensure_trailing_newline(source: &str, is_suppressed: &dyn Fn(usize) -> bool) 
 }
 
 fn lint_then_fix(source: &str, config: &Config) -> String {
-    // Run lint rules and apply all safe fixes.
+    // Run lint rules and apply safe fixes until they settle, the same way
+    // `check --fix` does, so the two agree.
     let diagnostics = linter::lint_source(source, "<fmt>", config);
-    fixer::apply_fixes(source, &diagnostics, true)
+    fixer::apply_fixes_until_settled(source, &diagnostics, "<fmt>", config, true)
+        .map_or_else(|| source.to_string(), |(fixed, _remaining)| fixed)
 }
 
 /// Width a tab counts for when measuring a line against `max_line_length`.

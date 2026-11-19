@@ -8987,3 +8987,580 @@ fn apply_fixes_returns_a_conflicted_source_unchanged() {
         }
     }
 }
+
+// Style guide: one space between tokens, no alignment with spaces.
+mod extra_spacing {
+    use super::*;
+
+    const RULE: &str = "format/extra-spacing";
+
+    fn extra_spacing_lines(source: &str) -> Vec<usize> {
+        linter::lint_source(source, "test.gd", &default_config())
+            .iter()
+            .filter(|d| d.rule == RULE)
+            .map(|d| d.span.line)
+            .collect()
+    }
+
+    fn fix_safely(source: &str) -> String {
+        let diagnostics = linter::lint_source(source, "test.gd", &default_config());
+        fixer::apply_fixes(source, &diagnostics, true)
+    }
+
+    #[test]
+    fn reports_each_gap_in_a_function_declaration() {
+        let source = "func     _ready()       ->       void:\n\tpass\n";
+        assert_eq!(extra_spacing_lines(source), vec![1, 1, 1]);
+    }
+
+    #[test]
+    fn fix_and_format_trim_a_function_declaration() {
+        let source = "func     _ready()       ->       void:\n\tpass\n";
+        let expected = "func _ready() -> void:\n\tpass\n";
+        assert_eq!(fix_safely(source), expected);
+        assert_eq!(
+            formatter::format_source(source, &default_config()),
+            expected
+        );
+    }
+
+    #[test]
+    fn format_trims_keywords_operators_and_tabs() {
+        let source = "const   MAX   :=   1\n\n\nfunc f(a:   int,   b\t=   2) -> int:\n\tvar   c   =   a   +   b\n\tif   c   >   MAX:\n\t\treturn   c\n\treturn\t0\n";
+        let expected = "const MAX := 1\n\n\nfunc f(a: int, b = 2) -> int:\n\tvar c = a + b\n\tif c > MAX:\n\t\treturn c\n\treturn 0\n";
+        assert_eq!(
+            formatter::format_source(source, &default_config()),
+            expected
+        );
+    }
+
+    #[test]
+    fn single_spaces_are_clean() {
+        let source = "func f(a: int) -> int:\n\treturn a + 1\n";
+        assert!(extra_spacing_lines(source).is_empty());
+    }
+
+    #[test]
+    fn leaves_indentation_strings_and_comment_alignment_alone() {
+        let source =
+            "var a = 1   # first\nvar long_name = \"x   y\"   # second\nvar b = [\n\t  1,\n]\n";
+        assert!(extra_spacing_lines(source).is_empty());
+    }
+
+    #[test]
+    fn leaves_the_lines_inside_a_multiline_string_alone() {
+        let source = "var a = \"\"\"\nx   =   1\n\"\"\"\n";
+        assert!(extra_spacing_lines(source).is_empty());
+    }
+
+    #[test]
+    fn gaps_other_rules_remove_are_reported_once() {
+        for (source, other_rule) in [
+            ("var a   : int\n", "format/colon-spacing"),
+            ("var a = [1   , 2]\n", "format/comma-spacing"),
+            ("var a = f   ()\n", "format/call-paren-spacing"),
+        ] {
+            let diagnostics = linter::lint_source(source, "test.gd", &default_config());
+            assert!(diagnostics.iter().any(|d| d.rule == other_rule), "{source}");
+            assert!(diagnostics.iter().all(|d| d.rule != RULE), "{source}");
+        }
+    }
+
+    #[test]
+    fn inferred_type_operator_keeps_one_space_before_it() {
+        assert_eq!(fix_safely("var a   := 1\n"), "var a := 1\n");
+    }
+
+    #[test]
+    fn crlf_files_stay_crlf() {
+        assert_eq!(fix_safely("var   a = 1\r\n"), "var a = 1\r\n");
+    }
+
+    #[test]
+    fn rule_off_and_ignore_comment_keep_the_spacing() {
+        let source = "var   a = 1\n";
+        let config = config_with_rules_off(&[RULE]);
+        assert_eq!(formatter::format_source(source, &config), source);
+
+        let ignored = "var   a = 1 # gdstyle:ignore=format/extra-spacing\n";
+        assert_eq!(
+            formatter::format_source(ignored, &default_config()),
+            ignored
+        );
+    }
+
+    #[test]
+    fn removes_the_gap_where_the_style_wants_no_space() {
+        for (source, expected) in [
+            ("var a = g(   )\n", "var a = g()\n"),
+            ("var a = b[   0   ]\n", "var a = b[0]\n"),
+            ("var a = [   ]\n", "var a = []\n"),
+            ("var a = {   }\n", "var a = {}\n"),
+            ("var a = b   .c\n", "var a = b.c\n"),
+            ("var a = b.   c\n", "var a = b.c\n"),
+            ("var a = b   [0]\n", "var a = b[0]\n"),
+            ("var a: Array   [int]\n", "var a: Array[int]\n"),
+            ("var a = -   1\n", "var a = -1\n"),
+            ("var a = ~   b\n", "var a = ~b\n"),
+            (
+                "var a = func   (x): return x\n",
+                "var a = func(x): return x\n",
+            ),
+            (
+                "@export_range   (0, 1) var a: int\n",
+                "@export_range(0, 1) var a: int\n",
+            ),
+        ] {
+            assert_eq!(fix_safely(source), expected, "{source}");
+        }
+    }
+
+    #[test]
+    fn removes_single_space_padding_inside_brackets() {
+        for (source, expected) in [
+            ("var a = f( b )\n", "var a = f(b)\n"),
+            ("var a = [ 1, 2 ]\n", "var a = [1, 2]\n"),
+            ("var a = b[ 0 ]\n", "var a = b[0]\n"),
+            ("var a = [ { \"k\": 1 } ]\n", "var a = [{ \"k\": 1 }]\n"),
+            ("var a = { }\n", "var a = {}\n"),
+        ] {
+            assert_eq!(fix_safely(source), expected, "{source}");
+        }
+    }
+
+    #[test]
+    fn operator_next_to_a_bracket_keeps_its_space() {
+        // `format/operator-spacing` wants these spaces, so removing them
+        // would make the two fixes undo each other.
+        for source in [
+            "func f(y) -> void:\n\tvar x = f( and y)\n",
+            "func f(y) -> void:\n\tvar z = [ == 1]\n",
+            "var a = (b == )\n",
+        ] {
+            assert!(extra_spacing_lines(source).is_empty(), "{source}");
+            let diagnostics = linter::lint_source(source, "test.gd", &default_config());
+            let (_, remaining) = fixer::apply_fixes_until_settled(
+                source,
+                &diagnostics,
+                "test.gd",
+                &default_config(),
+                true,
+            )
+            .unwrap_or((source.to_string(), diagnostics));
+            assert!(
+                remaining
+                    .iter()
+                    .all(|d| d.fix.as_ref().is_none_or(|fix| !fix.is_safe)),
+                "{source}: {remaining:?}"
+            );
+        }
+        assert_eq!(fix_safely("var a = (   -b)\n"), "var a = (-b)\n");
+    }
+
+    #[test]
+    fn spacing_other_rules_want_is_kept_so_fmt_settles() {
+        // Invalid GDScript found by random testing: each line used to flip
+        // between two layouts on every `fmt` run, because extra-spacing
+        // removed a space that operator-, comma-, colon- or brace-spacing
+        // put back.
+        for line in [
+            "var x = } orself = . $N",
+            "var x = and (. == }",
+            "var x = and) or. / not",
+            "var x = a:   . }, /",
+            "var x = or if, .",
+            "var x = (   , . 1",
+            "var x = and { a match f( }",
+            "var x = not { ) ,, }",
+            "var x = . .",
+        ] {
+            let source = format!("func f(a, b):\n\t{line}\n\tpass\n");
+            let once = formatter::format_source(&source, &default_config());
+            assert_eq!(
+                formatter::format_source(&once, &default_config()),
+                once,
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn colon_before_a_closing_bracket_settles() {
+        // Invalid GDScript the parser accepts: colon-spacing used to add a
+        // space here that extra-spacing then removed, on every run.
+        for source in ["var q = foo(a:)\n", "var r = [b:]\n", "var s = {c:}\n"] {
+            let formatted = formatter::format_source(source, &default_config());
+            assert_eq!(
+                formatter::format_source(&formatted, &default_config()),
+                formatted
+            );
+            let diagnostics = linter::lint_source(&formatted, "test.gd", &default_config());
+            assert!(
+                diagnostics.iter().all(|d| d.fix.is_none()),
+                "{formatted}: {diagnostics:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn subscript_loses_its_space_after_any_indexable_value() {
+        for (source, expected) in [
+            ("var a = self  [0]\n", "var a = self[0]\n"),
+            ("var a = \"abc\"  [0]\n", "var a = \"abc\"[0]\n"),
+            ("var a = {1: 2}  [1]\n", "var a = { 1: 2 }[1]\n"),
+            ("var a = b in  [1]\n", "var a = b in [1]\n"),
+        ] {
+            assert_eq!(fix_safely(source), expected, "{source}");
+        }
+    }
+
+    #[test]
+    fn padding_before_a_prefix_operator_is_removed() {
+        for (source, expected) in [
+            ("var a = [ - -b]\n", "var a = [- -b]\n"),
+            ("var a = ( -~b)\n", "var a = (-~b)\n"),
+            ("var a = -  await g()\n", "var a = -await g()\n"),
+        ] {
+            assert_eq!(fix_safely(source), expected, "{source}");
+        }
+    }
+
+    #[test]
+    fn spaces_before_a_semicolon_one_statement_per_line_skips_are_removed() {
+        // one-statement-per-line leaves `;` alone in match arms and one-line
+        // lambda bodies, so the spaces before it are this rule's to remove.
+        for (source, expected) in [
+            (
+                "func f(x) -> void:\n\tmatch x:\n\t\t0: pass  ;\n",
+                "func f(x) -> void:\n\tmatch x:\n\t\t0: pass;\n",
+            ),
+            (
+                "func f() -> void:\n\tvar g = func(): pass  ;\n",
+                "func f() -> void:\n\tvar g = func(): pass;\n",
+            ),
+        ] {
+            assert_eq!(fix_safely_until_settled(source), expected, "{source}");
+        }
+    }
+
+    #[test]
+    fn spaces_after_a_mid_line_semicolon_are_reported_once() {
+        let source = "func f() -> void:\n\tvar s = 1;   var r = 2\n";
+        let diagnostics = linter::lint_source(source, "test.gd", &default_config());
+        assert!(diagnostics
+            .iter()
+            .any(|d| d.rule == "format/one-statement-per-line"));
+        assert!(
+            diagnostics.iter().all(|d| d.rule != RULE),
+            "{diagnostics:?}"
+        );
+        assert_eq!(
+            fixer::apply_fixes(source, &diagnostics, true),
+            "func f() -> void:\n\tvar s = 1\n\tvar r = 2\n"
+        );
+    }
+
+    #[test]
+    fn spaces_before_a_semicolon_are_reported_once() {
+        let source = "func f() -> void:\n\tpass  ;\n";
+        let diagnostics = linter::lint_source(source, "test.gd", &default_config());
+        assert!(diagnostics
+            .iter()
+            .any(|d| d.rule == "format/one-statement-per-line"));
+        assert!(
+            diagnostics.iter().all(|d| d.rule != RULE),
+            "{diagnostics:?}"
+        );
+
+        let config = config_with_rules_off(&["format/one-statement-per-line"]);
+        let diagnostics = linter::lint_source(source, "test.gd", &config);
+        assert_eq!(
+            fixer::apply_fixes(source, &diagnostics, true),
+            "func f() -> void:\n\tpass;\n"
+        );
+        assert_eq!(
+            fix_safely_until_settled("func f() -> void:\n\tvar a = 1  ; var b = 2\n"),
+            "func f() -> void:\n\tvar a = 1\n\tvar b = 2\n"
+        );
+    }
+
+    #[test]
+    fn trailing_comma_keeps_its_space() {
+        assert!(extra_spacing_lines("var a = [1, ]\n").is_empty());
+        assert_eq!(fix_safely("var a = [1,   ]\n"), "var a = [1, ]\n");
+    }
+
+    #[test]
+    fn prefix_operators_lose_their_space_before_any_operand() {
+        for (source, expected) in [
+            (
+                "var a = -   $Node.position.x\n",
+                "var a = -$Node.position.x\n",
+            ),
+            ("var a = -   [1]\n", "var a = -[1]\n"),
+            ("var a = -   %Node.x\n", "var a = -%Node.x\n"),
+        ] {
+            assert_eq!(fix_safely(source), expected, "{source}");
+        }
+    }
+
+    #[test]
+    fn minus_after_a_variable_named_when_or_match_is_left_binary() {
+        for name in ["when", "match"] {
+            let source = format!("var {name} = 1\nvar x = {name} - 1\nvar y = {name}   -   1\n");
+            let fixed = fix_safely(&source);
+            assert!(fixed.contains(&format!("var x = {name} - 1\n")), "{fixed}");
+            assert!(fixed.contains(&format!("var y = {name} - 1\n")), "{fixed}");
+        }
+    }
+
+    #[test]
+    fn match_guard_with_a_negative_value_is_kept() {
+        let source = "func f(x) -> void:\n\tmatch x:\n\t\tvar y when -y > 1:\n\t\t\tpass\n";
+        assert_eq!(fix_safely(source), source);
+    }
+
+    #[test]
+    fn minus_after_a_comment_keeps_its_spacing() {
+        // After a comment, a `-` may continue an expression or start a
+        // statement in a lambda body, so neither rule changes it.
+        for source in [
+            "var a = (b\n\t# note\n\t-c)\n",
+            "var a = (b\n\t# note\n\t- c)\n",
+            "func f(arr) -> void:\n\tarr.map(func(x):\n\t\tvar y = x # c\n\t\t-y\n\t\treturn y\n\t)\n",
+        ] {
+            assert_eq!(fix_safely(source), source);
+        }
+    }
+
+    #[test]
+    fn spaces_owned_by_a_rule_that_is_off_are_removed() {
+        for (source, other_rule, expected) in [
+            (
+                "var a = [1  , 2]\n",
+                "format/comma-spacing",
+                "var a = [1 , 2]\n",
+            ),
+            ("var a = !  b\n", "format/boolean-operators", "var a = !b\n"),
+        ] {
+            let config = config_with_rules_off(&[other_rule]);
+            let formatted = formatter::format_source(source, &config);
+            assert_eq!(formatted, expected, "{other_rule}");
+        }
+    }
+
+    #[test]
+    fn prefix_minus_after_a_comma_and_a_comment_is_tightened() {
+        let source = "var b = [\n\t1,  # c\n\t-  2,\n]\n";
+        assert_eq!(fix_safely(source), "var b = [\n\t1,  # c\n\t-2,\n]\n");
+    }
+
+    #[test]
+    fn spaces_before_a_semicolon_followed_by_a_lex_error_are_trimmed() {
+        let source = "func f(a) -> void:\n\tprint(a)   ;  ?\n";
+        let diagnostics = linter::lint_source(source, "test.gd", &default_config());
+        assert!(
+            diagnostics.iter().any(|d| d.rule == RULE),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn node_paths_and_variadic_parameters_lose_their_space() {
+        for (source, expected) in [
+            ("var a = $  Node\n", "var a = $Node\n"),
+            (
+                "func f(...  args) -> void:\n\tpass\n",
+                "func f(...args) -> void:\n\tpass\n",
+            ),
+        ] {
+            assert_eq!(fix_safely(source), expected, "{source}");
+        }
+    }
+
+    #[test]
+    fn minus_starting_a_match_pattern_is_a_prefix() {
+        let source = "func f(x) -> int:\n\tmatch x:\n\t\t1:\n\t\t\treturn x\n\t\t-   1:\n\t\t\tpass\n\treturn 0\n";
+        assert!(
+            fix_safely(source).contains("\t\t-1:\n"),
+            "{}",
+            fix_safely(source)
+        );
+    }
+
+    #[test]
+    fn message_says_what_spacing_is_expected() {
+        let message = |source: &str| {
+            linter::lint_source(source, "test.gd", &default_config())
+                .into_iter()
+                .find(|d| d.rule == RULE)
+                .map(|d| d.message)
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            message("var a = f( b)\n"),
+            "expected no space between these tokens, found one space"
+        );
+        assert_eq!(
+            message("var a   = 1\n"),
+            "expected one space between these tokens, found 3 spaces"
+        );
+        assert_eq!(
+            message("var a\t= 1\n"),
+            "expected one space between these tokens, found a tab"
+        );
+        assert_eq!(
+            message("var a =\t\t 1\n"),
+            "expected one space between these tokens, found 2 tabs and one space"
+        );
+    }
+
+    #[test]
+    fn spaces_before_a_continuation_are_reported_on_their_own_line() {
+        let source = "var a = 1 +   \\\n\t\t2\n";
+        let diagnostics = linter::lint_source(source, "test.gd", &default_config());
+        let diagnostic = diagnostics
+            .iter()
+            .find(|d| d.rule == RULE)
+            .expect("reported");
+        assert_eq!((diagnostic.span.line, diagnostic.span.column), (1, 12));
+    }
+
+    #[test]
+    fn fmt_and_fix_agree_on_deeply_nested_parens() {
+        let source = "func f(a) -> void:\n\tif ((((((((((((a)))))))))))):\n\t\tpass\n";
+        let expected = "func f(a) -> void:\n\tif a:\n\t\tpass\n";
+        assert_eq!(
+            formatter::format_source(source, &default_config()),
+            expected
+        );
+        assert_eq!(fix_safely_until_settled(source), expected);
+    }
+
+    fn fix_safely_until_settled(source: &str) -> String {
+        let diagnostics = linter::lint_source(source, "test.gd", &default_config());
+        fixer::apply_fixes_until_settled(source, &diagnostics, "test.gd", &default_config(), true)
+            .map_or_else(|| source.to_string(), |(fixed, _)| fixed)
+    }
+
+    #[test]
+    fn single_space_padding_of_a_dictionary_is_kept() {
+        assert!(extra_spacing_lines("var a = { \"k\": 1 }\n").is_empty());
+    }
+
+    #[test]
+    fn keeps_one_space_where_removing_it_would_change_the_code() {
+        for (source, expected) in [
+            ("var a = b   -   1\n", "var a = b - 1\n"),
+            ("var a = 1   .b\n", "var a = 1 .b\n"),
+            ("var a = b in   [1]\n", "var a = b in [1]\n"),
+            ("var a = -   -b\n", "var a = - -b\n"),
+            (
+                "var a = (b\n\t# note\n\t-   c)\n",
+                "var a = (b\n\t# note\n\t- c)\n",
+            ),
+        ] {
+            assert_eq!(fix_safely(source), expected, "{source}");
+        }
+    }
+
+    #[test]
+    fn prefix_not_operator_keeps_its_separation() {
+        let formatted = formatter::format_source("var a = !   b\n", &default_config());
+        assert_eq!(formatted, "var a = not b\n");
+    }
+
+    #[test]
+    fn redundant_parens_with_extra_spacing_are_removed() {
+        let source = "func f(a) -> void:\n\tif   (   a   ):\n\t\tpass\n";
+        let expected = "func f(a) -> void:\n\tif a:\n\t\tpass\n";
+        assert_eq!(
+            formatter::format_source(source, &default_config()),
+            expected
+        );
+    }
+
+    #[test]
+    fn gaps_get_one_space_when_the_rule_that_removes_them_is_off() {
+        for (source, other_rule, expected) in [
+            ("var a   : int\n", "format/colon-spacing", "var a : int\n"),
+            (
+                "var a = [1   , 2]\n",
+                "format/comma-spacing",
+                "var a = [1 , 2]\n",
+            ),
+            (
+                "var a = f   ()\n",
+                "format/call-paren-spacing",
+                "var a = f ()\n",
+            ),
+        ] {
+            let config = config_with_rules_off(&[other_rule]);
+            let diagnostics = linter::lint_source(source, "test.gd", &config);
+            assert_eq!(fixer::apply_fixes(source, &diagnostics, true), expected);
+        }
+    }
+
+    #[test]
+    fn removing_a_space_never_joins_dots_into_another_token() {
+        for source in [
+            "var a = b .. .c\n",
+            "var a = b . ...c\n",
+            "var a = b . .c\n",
+        ] {
+            let fixed = fix_safely(source);
+            let kinds = |text: &str| {
+                Lexer::new(text)
+                    .tokenize()
+                    .into_iter()
+                    .map(|token| std::mem::discriminant(&token.kind))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(kinds(&fixed), kinds(source), "{source} -> {fixed}");
+        }
+    }
+
+    #[test]
+    fn spaces_before_a_continuation_followed_by_a_comment_line_are_trimmed() {
+        let source = "func f() -> void:\n\tvar g = 1  \\\n\t\t# c\n\tpass\n";
+        assert_eq!(
+            fix_safely(source),
+            "func f() -> void:\n\tvar g = 1 \\\n\t\t# c\n\tpass\n"
+        );
+    }
+
+    #[test]
+    fn spaces_after_an_opening_bracket_before_a_continuation_are_removed() {
+        let source = "func f(a) -> void:\n\tprint(   \\\n\t\ta)\n";
+        assert_eq!(
+            fix_safely(source),
+            "func f(a) -> void:\n\tprint(\\\n\t\ta)\n"
+        );
+    }
+
+    #[test]
+    fn trims_spaces_before_a_line_continuation_only() {
+        let source = "var a = 1   +   \\\n\t\t2\n";
+        assert_eq!(fix_safely(source), "var a = 1 + \\\n\t\t2\n");
+    }
+
+    #[test]
+    fn format_handles_gaps_next_to_rewritten_code() {
+        for (source, expected) in [
+            ("enum   K   {   A,   B   }\n", "enum K {\n\tA,\n\tB,\n}\n"),
+            (
+                "func f() -> void:\n\tvar a = 1;   var b = 2\n",
+                "func f() -> void:\n\tvar a = 1\n\tvar b = 2\n",
+            ),
+            ("var a = {   \"k\":   1   }\n", "var a = { \"k\": 1 }\n"),
+            ("var a = 1   +   (   2   )\n", "var a = 1 + (2)\n"),
+        ] {
+            let formatted = formatter::format_source(source, &default_config());
+            assert_eq!(formatted, expected);
+            assert_eq!(
+                formatter::format_source(&formatted, &default_config()),
+                formatted
+            );
+        }
+    }
+}

@@ -250,21 +250,22 @@ impl GdStyle {
     }
 
     /// Auto-fix safe lint violations in a source string. Returns the fixed source.
+    ///
+    /// Fixes are applied and the text linted again until no safe fix is
+    /// left, so overlapping fixes all land in one call. `fix_one_in_source`
+    /// applies only the one fix it is asked for.
     #[func]
     fn fix_source(&self, source: GString, file_path: GString) -> GString {
-        let src = source.to_string();
-        let diagnostics = linter::lint_source(&src, &file_path.to_string(), &self.config);
-        let fixed = fixer::apply_fixes(&src, &diagnostics, true);
-        GString::from(&fixed)
+        fixed_source_text(&source, &file_path, &self.config, true)
     }
 
     /// Auto-fix all lint violations (including unsafe) in a source string.
+    ///
+    /// Unsafe fixes such as renames are applied once, then safe fixes are
+    /// repeated until none is left, as in `fix_source`.
     #[func]
     fn fix_source_unsafe(&self, source: GString, file_path: GString) -> GString {
-        let src = source.to_string();
-        let diagnostics = linter::lint_source(&src, &file_path.to_string(), &self.config);
-        let fixed = fixer::apply_fixes(&src, &diagnostics, false);
-        GString::from(&fixed)
+        fixed_source_text(&source, &file_path, &self.config, false)
     }
 
     /// Apply the single fix for the diagnostic at `(line, rule)` within the
@@ -326,6 +327,22 @@ impl GdStyle {
                 false
             }
         }
+    }
+}
+
+/// `source` after its fixes, repeated until they settle.
+fn fixed_source_text(
+    source: &GString,
+    file_path: &GString,
+    config: &Config,
+    safe_only: bool,
+) -> GString {
+    let source_text = source.to_string();
+    let path = file_path.to_string();
+    let diagnostics = linter::lint_source(&source_text, &path, config);
+    match fixer::apply_fixes_until_settled(&source_text, &diagnostics, &path, config, safe_only) {
+        Some((fixed, _remaining_diagnostics)) => GString::from(&fixed),
+        None => source.clone(),
     }
 }
 

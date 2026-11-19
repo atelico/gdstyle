@@ -1234,6 +1234,45 @@ fn check_fix_reports_what_is_left_after_the_fix() {
 }
 
 #[test]
+fn one_fix_run_settles_fixes_that_overlap() {
+    // In each source a narrow fix sits inside a wider one, so the wider one
+    // can only apply after a new lint.
+    for (source, expected) in [
+        ("enum K {   A,   B   }\n", "enum K {\n\tA,\n\tB,\n}\n"),
+        (
+            "enum K {A = 1,   B   = 2}\n",
+            "enum K {\n\tA = 1,\n\tB = 2,\n}\n",
+        ),
+        ("enum K {A,B}\n", "enum K {\n\tA,\n\tB,\n}\n"),
+        ("var a = 1   ;\n", "var a = 1\n"),
+        (
+            "func f() -> void:\n\tvar a = 1;   var b = 2\n",
+            "func f() -> void:\n\tvar a = 1\n\tvar b = 2\n",
+        ),
+    ] {
+        for flag in ["--fix", "--unsafe-fix"] {
+            let p = project("", source);
+            let output = check(&p.config, &p.script, &[flag]);
+            let stdout = stdout_of(&output);
+            assert_eq!(output.status.code(), Some(0), "stdout:\n{stdout}");
+            assert_eq!(std::fs::read_to_string(&p.script).unwrap(), expected);
+            assert!(stdout.contains("no issues found"), "stdout:\n{stdout}");
+        }
+    }
+}
+
+#[test]
+fn unsafe_fix_renames_and_settles_safe_fixes_in_one_run() {
+    let p = project("", "var BadName   =   1\n\n\nenum K {   A,   B   }\n");
+
+    let output = check(&p.config, &p.script, &["--unsafe-fix"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stdout_of(&output));
+    let fixed = std::fs::read_to_string(&p.script).unwrap();
+    assert!(fixed.contains("var bad_name = 1\n"), "got:\n{fixed}");
+    assert!(fixed.contains("enum K {\n\tA,\n\tB,\n}\n"), "got:\n{fixed}");
+}
+
+#[test]
 fn check_fix_on_a_conflicted_file_with_nothing_to_fix_is_not_a_failure() {
     // The markers are errors, so the run exits 1. It exits 2 only when a
     // fix had to be held back.
@@ -1499,4 +1538,20 @@ fn invalid_cli_options_do_not_silently_pass() {
     let output = check(&p.config, &p.script, &["--select", " naming, format "]);
     assert!(output.status.success(), "{}", stderr_of(&output));
     assert!(stdout_of(&output).contains("naming/variable-name-snake-case"));
+}
+
+#[test]
+fn one_fix_run_removes_deeply_nested_redundant_parens() {
+    // `format/no-unnecessary-parens` removes one pair per round.
+    let p = project(
+        "",
+        "func f(a) -> void:\n\tif ((((((((a)))))))):\n\t\tpass\n",
+    );
+
+    let output = check(&p.config, &p.script, &["--fix"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stdout_of(&output));
+    assert_eq!(
+        std::fs::read_to_string(&p.script).unwrap(),
+        "func f(a) -> void:\n\tif a:\n\t\tpass\n"
+    );
 }
