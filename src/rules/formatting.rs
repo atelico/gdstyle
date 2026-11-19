@@ -1168,13 +1168,17 @@ pub fn check_trailing_comma(
     }
 }
 
-/// Check operator spacing (one space around binary operators, one after commas).
+/// Check operator spacing: one space around binary operators. No space is
+/// asked for before a `,` or a `:` (other than the one of `:=`): while
+/// comma- and colon-spacing are on, those attach to the token on their left.
 pub fn check_operator_spacing(
     tokens: &[Token],
     file: &ScriptFile,
     source: &str,
+    config: &Config,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
+    let (is_comma_spacing_on, is_colon_spacing_on) = comma_and_colon_spacing_on(config);
     for (idx, token) in tokens.iter().enumerate() {
         // Check binary operator spacing.
         if is_spaced_binary_operator(&token.kind) && idx > 0 && idx + 1 < tokens.len() {
@@ -1283,11 +1287,12 @@ pub fn check_operator_spacing(
                     && byte_after != Some(&b'\t')
                     && byte_after != Some(&b'\n')
                 {
-                    // Skip space after Colon when next is '=' (part of :=).
-                    if token.kind == TokenKind::Colon && byte_after == Some(&b'=') {
-                        continue;
-                    }
-                    if attaches_to_the_left(source, token_end) {
+                    if attaches_to_the_left(
+                        source,
+                        token_end,
+                        is_comma_spacing_on,
+                        is_colon_spacing_on,
+                    ) {
                         continue;
                     }
                     diagnostics.push(
@@ -1318,13 +1323,17 @@ pub fn check_operator_spacing(
 /// - **One space after** in value-introducing positions: type hints
 ///   (`var x: int`), dict keys (`{"k": 1}`), single-line statement bodies
 ///   (`if cond: pass`). Skipped when the next token is `=` (`:=` inferred
-///   type) or a newline (block-opening colon at end of line).
+///   type), a newline (block-opening colon at end of line), a closing
+///   bracket, or a `,` / `:` that attaches to the token on its left while
+///   comma- / colon-spacing is on.
 pub fn check_colon_spacing(
     tokens: &[Token],
     file: &ScriptFile,
     source: &str,
+    config: &Config,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
+    let (is_comma_spacing_on, is_colon_spacing_on) = comma_and_colon_spacing_on(config);
     for (idx, token) in tokens.iter().enumerate() {
         if token.kind != TokenKind::Colon {
             continue;
@@ -1391,12 +1400,18 @@ pub fn check_colon_spacing(
                     | Some(&b'\n')
                     | Some(&b' ')
                     | Some(&b'\t')
-                    | Some(&b',')
                     | Some(&b')')
                     | Some(&b']')
                     | Some(&b'}')
             );
-            if !no_space_required && !attaches_to_the_left(source, token_end) {
+            if !no_space_required
+                && !attaches_to_the_left(
+                    source,
+                    token_end,
+                    is_comma_spacing_on,
+                    is_colon_spacing_on,
+                )
+            {
                 // Also tolerate when the next token IS a Newline (the byte
                 // check above already handles `\n`, but be defensive about
                 // CR/EOF).
@@ -1431,13 +1446,16 @@ pub fn check_colon_spacing(
 /// - **One space after**: `f(a,b)` should be `f(a, b)`. Skipped when the
 ///   comma is the last item before a newline or a closing bracket (trailing
 ///   commas in multi-line collections / parameter lists are valid and need
-///   no following space).
+///   no following space), and before a `,` / `:` that attaches to the token
+///   on its left while comma- / colon-spacing is on.
 pub fn check_comma_spacing(
     tokens: &[Token],
     file: &ScriptFile,
     source: &str,
+    config: &Config,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
+    let (is_comma_spacing_on, is_colon_spacing_on) = comma_and_colon_spacing_on(config);
     for token in tokens.iter() {
         if token.kind != TokenKind::Comma {
             continue;
@@ -1488,15 +1506,16 @@ pub fn check_comma_spacing(
             let next_byte = source.as_bytes().get(token_end);
             let no_space_required = matches!(
                 next_byte,
-                Some(&b' ')
-                    | Some(&b'\t')
-                    | Some(&b'\n')
-                    | Some(&b')')
-                    | Some(&b']')
-                    | Some(&b'}')
-                    | Some(&b',')
+                Some(&b' ') | Some(&b'\t') | Some(&b'\n') | Some(&b')') | Some(&b']') | Some(&b'}')
             );
-            if !no_space_required && !attaches_to_the_left(source, token_end) {
+            if !no_space_required
+                && !attaches_to_the_left(
+                    source,
+                    token_end,
+                    is_comma_spacing_on,
+                    is_colon_spacing_on,
+                )
+            {
                 diagnostics.push(
                     Diagnostic::warning(
                         "format/comma-spacing",
@@ -1526,12 +1545,16 @@ pub fn check_comma_spacing(
 /// `enum` keyword (optionally via an enum name). Empty dicts (`{}`) and
 /// multi-line dicts are left alone: there's nothing to pad in the former, and
 /// the opening/closing braces already sit on their own lines in the latter.
+/// No space is asked for after `{` before a `,` or `:` that attaches to the
+/// token on its left while comma- / colon-spacing is on.
 pub fn check_brace_spacing(
     tokens: &[Token],
     file: &ScriptFile,
     source: &str,
+    config: &Config,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
+    let (is_comma_spacing_on, is_colon_spacing_on) = comma_and_colon_spacing_on(config);
     for (idx, token) in tokens.iter().enumerate() {
         if token.kind != TokenKind::LeftBrace {
             continue;
@@ -1584,7 +1607,7 @@ pub fn check_brace_spacing(
         let byte_after = source.as_bytes().get(open_end);
         if byte_after != Some(&b' ')
             && byte_after != Some(&b'\t')
-            && !attaches_to_the_left(source, open_end)
+            && !attaches_to_the_left(source, open_end, is_comma_spacing_on, is_colon_spacing_on)
         {
             diagnostics.push(
                 Diagnostic::warning(
@@ -1692,23 +1715,41 @@ fn can_end_callee(kind: &TokenKind) -> bool {
     )
 }
 
-/// True when the token at byte `offset` is a `,` or a `:` other than the one
-/// of `:=`. Those take no space before them (`format/comma-spacing`,
-/// `format/colon-spacing`), so a rule that wants a space after the token
-/// before them gives way, or the two fixes would undo each other: `= ,`
-/// and `=,` would swap on every run.
-fn attaches_to_the_left(source: &str, offset: usize) -> bool {
-    let bytes = source.as_bytes();
-    match bytes.get(offset) {
-        Some(b',') => true,
-        Some(b':') => bytes.get(offset + 1) != Some(&b'='),
+/// True when the token at byte `offset` takes no space before it: a `,`
+/// while `format/comma-spacing` is on, or a `:` other than the one of `:=`
+/// while `format/colon-spacing` is on. Every rule that wants a space after a
+/// token gives way before such a token, and `format/extra-spacing` leaves
+/// the gap to those rules, or the fixes would undo each other: `= ,` and
+/// `=,` would swap on every run.
+fn attaches_to_the_left(
+    source: &str,
+    offset: usize,
+    is_comma_spacing_on: bool,
+    is_colon_spacing_on: bool,
+) -> bool {
+    match source.as_bytes().get(offset) {
+        Some(b',') => is_comma_spacing_on,
+        Some(b':') => is_colon_spacing_on && !is_inferred_type_colon_at(source, offset),
         _ => false,
     }
 }
 
+/// `is_comma_spacing_on` and `is_colon_spacing_on` for [`attaches_to_the_left`].
+fn comma_and_colon_spacing_on(config: &Config) -> (bool, bool) {
+    (
+        config.is_rule_enabled("format/comma-spacing"),
+        config.is_rule_enabled("format/colon-spacing"),
+    )
+}
+
+/// True when the `:` at byte `colon_offset` is the first half of `:=`.
+fn is_inferred_type_colon_at(source: &str, colon_offset: usize) -> bool {
+    source.as_bytes().get(colon_offset + 1) == Some(&b'=')
+}
+
 /// True when this `:` is the first half of the `:=` operator.
 fn is_inferred_type_colon(colon: &Token, source: &str) -> bool {
-    source.as_bytes().get(colon.span.offset + colon.span.length) == Some(&b'=')
+    is_inferred_type_colon_at(source, colon.span.offset)
 }
 
 /// True when an enabled rule removes the whole gap between `prev` and `next`,
@@ -1742,10 +1783,12 @@ fn gap_is_removed_by_other_rule(
                 && semicolon_ends_the_line(tokens, prev_index + 1)
                 && one_statement_per_line_rewrites(tokens, prev_index + 1, source)
         }
-        TokenKind::Comma => neighbor_rules.is_comma_spacing_on,
-        TokenKind::Colon => {
-            !is_inferred_type_colon(next, source) && neighbor_rules.is_colon_spacing_on
-        }
+        TokenKind::Comma | TokenKind::Colon => attaches_to_the_left(
+            source,
+            next.span.offset,
+            neighbor_rules.is_comma_spacing_on,
+            neighbor_rules.is_colon_spacing_on,
+        ),
         TokenKind::LeftParen => {
             can_end_callee(&prev.kind) && neighbor_rules.is_call_paren_spacing_on
         }
@@ -1974,7 +2017,8 @@ fn canonical_token_gap(
             && can_start_operand(next))
         || is_prefix_operator(tokens, prev_index);
     // The space after `,` and `:` belongs to comma-spacing and colon-spacing,
-    // which skip it only before a closing bracket. The space just inside
+    // which skip it before a closing bracket (and before a `,` or `:`, where
+    // extra-spacing defers to them anyway). The space just inside
     // `{` / `}` belongs to brace-spacing, which skips an empty `{ }`.
     let is_empty_braces =
         matches!(prev, TokenKind::LeftBrace) && matches!(next, TokenKind::RightBrace);
@@ -2900,8 +2944,8 @@ mod tests {
             let lines: Vec<&str> = source.split('\n').collect();
             let file = make_file(&lines);
             let mut diags = Vec::new();
-            check_comma_spacing(&tokens, &file, source, &mut diags);
-            check_colon_spacing(&tokens, &file, source, &mut diags);
+            check_comma_spacing(&tokens, &file, source, &Config::default(), &mut diags);
+            check_colon_spacing(&tokens, &file, source, &Config::default(), &mut diags);
             apply(source, &diags)
         };
         for (source, settled) in [

@@ -113,22 +113,22 @@ pub fn run_all_rules_with_source(
     }
     if config.is_rule_enabled("format/operator-spacing") {
         if let Some(src) = source {
-            formatting::check_operator_spacing(tokens, file, src, &mut diagnostics);
+            formatting::check_operator_spacing(tokens, file, src, config, &mut diagnostics);
         }
     }
     if config.is_rule_enabled("format/colon-spacing") {
         if let Some(src) = source {
-            formatting::check_colon_spacing(tokens, file, src, &mut diagnostics);
+            formatting::check_colon_spacing(tokens, file, src, config, &mut diagnostics);
         }
     }
     if config.is_rule_enabled("format/comma-spacing") {
         if let Some(src) = source {
-            formatting::check_comma_spacing(tokens, file, src, &mut diagnostics);
+            formatting::check_comma_spacing(tokens, file, src, config, &mut diagnostics);
         }
     }
     if config.is_rule_enabled("format/brace-spacing") {
         if let Some(src) = source {
-            formatting::check_brace_spacing(tokens, file, src, &mut diagnostics);
+            formatting::check_brace_spacing(tokens, file, src, config, &mut diagnostics);
         }
     }
     if config.is_rule_enabled("format/call-paren-spacing") {

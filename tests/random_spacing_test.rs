@@ -43,10 +43,11 @@ impl Generator {
 }
 
 fn config_with_rule_off(rule: &str) -> Config {
-    let directory = tempfile::tempdir().expect("temporary directory");
-    let path = directory.path().join("gdstyle.toml");
-    std::fs::write(&path, format!("[rules]\n\"{rule}\" = \"off\"\n")).expect("write config");
-    Config::from_file(&path).expect("config loads")
+    let mut config = Config::default();
+    config
+        .rules
+        .insert(rule.to_string(), gdstyle::config::RuleSeverityConfig::Off);
+    config
 }
 
 /// Fails with the first script on which `fmt` does not settle, or after
@@ -131,4 +132,16 @@ fn comma_and_colon_attach_left_even_after_an_operator() {
 fn inferred_type_operator_keeps_the_space_before_it() {
     let source = "func f(a):\n\tvar x := 1\n\tvar y = a if a else b\n";
     assert_eq!(formatter::format_source(source, &Config::default()), source);
+}
+
+#[test]
+fn operators_space_before_a_colon_when_colon_spacing_is_off() {
+    // Nothing removes the space before `:` then, so the operator gets its
+    // space and both spellings settle on the same layout.
+    let config = config_with_rule_off("format/colon-spacing");
+    for line in ["var x = a *:b", "var x = a * :b"] {
+        let source = format!("func f(a):\n\t{line}\n\tpass\n");
+        let formatted = formatter::format_source(&source, &config);
+        assert_eq!(formatted.lines().nth(1), Some("\tvar x = a * :b"), "{line}");
+    }
 }
