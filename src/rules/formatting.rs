@@ -1287,6 +1287,9 @@ pub fn check_operator_spacing(
                     if token.kind == TokenKind::Colon && byte_after == Some(&b'=') {
                         continue;
                     }
+                    if attaches_to_the_left(source, token_end) {
+                        continue;
+                    }
                     diagnostics.push(
                         Diagnostic::warning(
                             "format/operator-spacing",
@@ -1393,7 +1396,7 @@ pub fn check_colon_spacing(
                     | Some(&b']')
                     | Some(&b'}')
             );
-            if !no_space_required {
+            if !no_space_required && !attaches_to_the_left(source, token_end) {
                 // Also tolerate when the next token IS a Newline (the byte
                 // check above already handles `\n`, but be defensive about
                 // CR/EOF).
@@ -1493,7 +1496,7 @@ pub fn check_comma_spacing(
                     | Some(&b'}')
                     | Some(&b',')
             );
-            if !no_space_required {
+            if !no_space_required && !attaches_to_the_left(source, token_end) {
                 diagnostics.push(
                     Diagnostic::warning(
                         "format/comma-spacing",
@@ -1579,7 +1582,10 @@ pub fn check_brace_spacing(
 
         let open_end = token.span.offset + token.span.length;
         let byte_after = source.as_bytes().get(open_end);
-        if byte_after != Some(&b' ') && byte_after != Some(&b'\t') {
+        if byte_after != Some(&b' ')
+            && byte_after != Some(&b'\t')
+            && !attaches_to_the_left(source, open_end)
+        {
             diagnostics.push(
                 Diagnostic::warning(
                     "format/brace-spacing",
@@ -1684,6 +1690,20 @@ fn can_end_callee(kind: &TokenKind) -> bool {
             | TokenKind::Assert
             | TokenKind::Super
     )
+}
+
+/// True when the token at byte `offset` is a `,` or a `:` other than the one
+/// of `:=`. Those take no space before them (`format/comma-spacing`,
+/// `format/colon-spacing`), so a rule that wants a space after the token
+/// before them gives way, or the two fixes would undo each other: `= ,`
+/// and `=,` would swap on every run.
+fn attaches_to_the_left(source: &str, offset: usize) -> bool {
+    let bytes = source.as_bytes();
+    match bytes.get(offset) {
+        Some(b',') => true,
+        Some(b':') => bytes.get(offset + 1) != Some(&b'='),
+        _ => false,
+    }
 }
 
 /// True when this `:` is the first half of the `:=` operator.
